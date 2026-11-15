@@ -1,0 +1,59 @@
+# After CI passes on main: when project() VERSION in CMakeLists.txt has no release yet, platform/release.sh builds
+# both apps with JD_RELEASE=1 and publishes vX.Y.Z. The APK is signed with the key every earlier release used
+# (secret ANDROID_KEYSTORE_B64), or phones would refuse the update.
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Version
+        id: version
+        run: |
+          v=$(sed -n 's/^project(jackdaw VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          echo "tag=v$v" >>"$GITHUB_OUTPUT"
+          if gh release view "v$v" >/dev/null 2>&1; then echo "new=0" >>"$GITHUB_OUTPUT"; else echo "new=1" >>"$GITHUB_OUTPUT"; fi
+      - name: Packages
+        if: steps.version.outputs.new == '1'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build pkg-config autoconf automake libtool make \
+            libssl-dev libcurl4-openssl-dev zlib1g-dev libsystemd-dev libsecret-1-dev libfontconfig1-dev \
+            libwayland-dev libxkbcommon-dev wayland-protocols libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxi-dev libgl1-mesa-dev
+      - uses: actions/setup-java@v4
+        if: steps.version.outputs.new == '1'
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: SDK packages
+        if: steps.version.outputs.new == '1'
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" "build-tools;36.1.0" "platforms;android-36.1" >/dev/null
+      - name: Signing key
+        if: steps.version.outputs.new == '1'
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          [ -n "$KEYSTORE" ] || { echo "secret ANDROID_KEYSTORE_B64 is missing" >&2; exit 1; }
+          mkdir -p ~/.cache/jackdaw/android
+          echo "$KEYSTORE" | base64 -d >~/.cache/jackdaw/android/debug.keystore
+      - name: Release ${{ steps.version.outputs.tag }}
+        if: steps.version.outputs.new == '1'
+        run: platform/release.sh
