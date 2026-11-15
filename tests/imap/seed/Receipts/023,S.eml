@@ -1,0 +1,63 @@
+From: Field Gear Shop <orders@fieldgear.example>
+To: Jackdaw Tester <jackdaw@localhost>
+Subject: Your order FG-4711
+Date: Fri, 16 Oct 2026 17:56:00 +0100
+Message-ID: <179477331064.563982.18116328887295988224@fieldgear.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="===============8945461131636484217=="
+
+--===============8945461131636484217==
+Content-Type: multipart/alternative;
+ boundary="===============8919942433459007604=="
+
+--===============8919942433459007604==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Order FG-4711
+Binoculars 8x42 x1: 189.00 EUR
+Lens cloth x2: 9.00 EUR
+Total 198.00 EUR
+
+--===============8919942433459007604==
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+<html><body style=3D"font-family: Arial, sans-serif">
+<h2 style=3D"color:#2e3440">Thanks for your order</h2><p>Order <b>FG-4711</b>=
+, placed 16 Oct 2026.</p>
+<table style=3D"border-collapse: collapse; width: 100%">
+<tr style=3D"background:#e5e9f0"><th style=3D"text-align:left; padding:6px">I=
+tem</th><th style=3D"padding:6px">Qty</th>
+<th style=3D"text-align:right; padding:6px">Price</th></tr><tr><td style=3D"p=
+adding:6px">Binoculars 8x42</td><td style=3D"text-align:center">1</td><td sty=
+le=3D"text-align:right; padding:6px">189.00 EUR</td></tr><tr><td style=3D"pad=
+ding:6px">Lens cloth</td><td style=3D"text-align:center">2</td><td style=3D"t=
+ext-align:right; padding:6px">9.00 EUR</td></tr>
+<tr><td style=3D"padding:6px"><b>Total</b></td><td></td><td style=3D"text-ali=
+gn:right; padding:6px"><b>198.00 EUR</b></td></tr>
+</table><p style=3D"color:#777; font-size:12px">Questions? Reply to this mail=
+.</p></body></html>
+
+--===============8919942433459007604==--
+
+--===============8945461131636484217==
+Content-Type: application/pdf
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="invoice-FG-4711.pdf"
+MIME-Version: 1.0
+
+JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2Jq
+CjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2Jq
+CjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIg
+NzkyXSAvQ29udGVudHMgNCAwIFIgL1Jlc291cmNlcyA8PCAvRm9udCA8PCAvRjEgNSAwIFIgPj4g
+Pj4gPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA0NiA+PgpzdHJlYW0KQlQgL0YxIDE4IFRm
+IDcyIDcyMCBUZCAoSW52b2ljZSBGRy00NzExKSBUaiBFVAplbmRzdHJlYW0KZW5kb2JqCjUgMCBv
+YmoKPDwgL1R5cGUgL0ZvbnQgL1N1YnR5cGUgL1R5cGUxIC9CYXNlRm9udCAvSGVsdmV0aWNhID4+
+CmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAK
+MDAwMDAwMDA1OCAwMDAwMCBuIAowMDAwMDAwMTE1IDAwMDAwIG4gCjAwMDAwMDAyNDEgMDAwMDAg
+biAKMDAwMDAwMDMzNyAwMDAwMCBuIAp0cmFpbGVyCjw8IC9TaXplIDYgL1Jvb3QgMSAwIFIgPj4K
+c3RhcnR4cmVmCjQwNwolJUVPRgo=
+
+--===============8945461131636484217==--

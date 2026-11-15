@@ -1,0 +1,23 @@
+From: Ada Lovelace <ada@example.org>
+To: Jackdaw Tester <jackdaw@localhost>
+Subject: Tickets
+Date: Mon, 09 Nov 2026 16:11:00 +0100
+Message-ID: <179477331113.563982.509452585245629943@example.org>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="===============8104850696498795664=="
+
+--===============8104850696498795664==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+The tickets are attached.
+
+--===============8104850696498795664==
+Content-Type: text/plain
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="tickets.txt"
+MIME-Version: 1.0
+
+VGlja2V0IDE6IEJyZW1lbiBIYmYgMDk6MDAKVGlja2V0IDI6IHJldHVybiAxODozMAo=
+
+--===============8104850696498795664==--

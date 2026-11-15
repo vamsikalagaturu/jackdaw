@@ -1,0 +1,16 @@
+compatibility_level = 3.6
+myhostname = localhost
+mydestination =
+inet_interfaces = all
+inet_protocols = ipv4
+maillog_file = /dev/stdout
+virtual_mailbox_domains = localhost
+virtual_transport = lmtp:unix:private/dovecot-lmtp
+smtpd_tls_cert_file = /etc/dovecot/test.crt
+smtpd_tls_key_file = /etc/dovecot/test.key
+smtpd_tls_security_level = may
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = private/auth
+smtpd_relay_restrictions = permit_sasl_authenticated, reject_unauth_destination
+# nothing leaves the test container: mail for other domains waits in the queue
+defer_transports = smtp

@@ -1,0 +1,274 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+
+#include "app.h"
+#include "core/util.h"
+#include "ui/icons.h"
+
+typedef enum {
+    M_NONE, M_OPEN_TAB, M_REPLY, M_REPLY_ALL, M_FORWARD, M_READ, M_FLAG, M_ARCHIVE, M_MOVE, M_COPY, M_DELETE,
+    M_F_NEW, M_F_RENAME, M_F_DELETE, M_F_ALL_READ, M_SEP
+} menu_item;
+
+typedef struct {
+    menu_item item;
+    const char *label, *icon, *keys;
+} entry;
+
+static const entry row_menu[] = {
+    {M_OPEN_TAB, "Open in a tab", "external-link", "Shift+Enter"}, {M_SEP, NULL, NULL, NULL},
+    {M_REPLY, "Reply", "reply", "r"}, {M_REPLY_ALL, "Reply all", "reply-all", "R"},
+    {M_FORWARD, "Forward", "forward", "F"}, {M_SEP, NULL, NULL, NULL},
+    {M_READ, "Read / unread", "mail-open", "u"}, {M_FLAG, "Flag", "star", "s"},
+    {M_ARCHIVE, "Archive", "archive", "e"}, {M_MOVE, "Move to...", "folder-input", "m"},
+    {M_COPY, "Copy to...", "copy", "c"}, {M_DELETE, "Delete", "trash-2", "dd"}, {M_NONE, NULL, NULL, NULL},
+};
+
+static const entry folder_menu[] = {
+    {M_F_ALL_READ, "Mark all as read", "mail-open", NULL}, {M_SEP, NULL, NULL, NULL},
+    {M_F_NEW, "New folder inside...", "folder-plus", "a"}, {M_F_RENAME, "Rename...", "pencil", "Shift+R"},
+    {M_F_DELETE, "Delete folder...", "trash-2", "Shift+D"}, {M_NONE, NULL, NULL, NULL},
+};
+
+static void run(jd_app *app, menu_item item)
+{
+    int64_t source = app->nrows ? app->rows[app->row].latest : 0;
+    const jd_folder_row *f = app->nfolders ? &app->folders[app->folder] : NULL;
+    switch (item) {
+    case M_OPEN_TAB: reader_open(app, 1); break;
+    case M_REPLY: compose_open(app, COMPOSE_REPLY, source); break;
+    case M_REPLY_ALL: compose_open(app, COMPOSE_REPLY_ALL, source); break;
+    case M_FORWARD: compose_open(app, COMPOSE_FORWARD, source); break;
+    case M_READ: act_toggle_read(app); break;
+    case M_FLAG: act_toggle_flag(app); break;
+    case M_ARCHIVE: act_archive(app); break;
+    case M_MOVE: dialog_open(app, DLG_PICK_FOLDER, ACT_MOVE, "Move to", NULL); break;
+    case M_COPY: dialog_open(app, DLG_PICK_FOLDER, ACT_COPY, "Copy to", NULL); break;
+    case M_DELETE: act_delete(app); break;
+    case M_F_ALL_READ:
+        if (f && app->sync) {
+            jd_list_query q = {.folder = f->id, .unread = 1};
+            int n;
+            jd_thread_row *rows = jd_store_list(app->view, &q, &n);
+            int64_t *ids = jd_alloc(sizeof *ids * (size_t)(n + 1));
+            for (int i = 0; i < n; i++) ids[i] = rows[i].latest;
+            jd_sync_set_flag(app->sync, ids, n, JD_SEEN, 1);
+            free(ids);
+            jd_thread_rows_free(rows, n);
+        }
+        break;
+    case M_F_NEW:
+        if (f) {
+            char *prefix = f->delim && strcasecmp(f->name, "INBOX") ? jd_printf("%s%c", f->name, f->delim) : jd_strdup("");
+            dialog_open(app, DLG_PROMPT, ACT_CREATE_FOLDER, "New folder (full path)", prefix);
+            free(prefix);
+        }
+        break;
+    case M_F_RENAME:
+        if (f && strcasecmp(f->name, "INBOX")) dialog_open(app, DLG_PROMPT, ACT_RENAME_FOLDER, "Rename folder (full path)", f->name);
+        break;
+    case M_F_DELETE:
+        if (f && strcasecmp(f->name, "INBOX")) {
+            char *title = jd_printf("Delete the folder %s and all %d messages in it, on the server?", f->name, f->total);
+            dialog_open(app, DLG_CONFIRM, ACT_DELETE_FOLDER, title, NULL);
+            free(title);
+        }
+        break;
+    default: break;
+    }
+}
+
+void menu_draw(jd_app *app)
+{
+    jd_menu *m = &app->menu;
+    if (!m->open) return;
+    jd_ui *ui = &app->ui;
+    const entry *items = m->on_folder ? folder_menu : row_menu;
+    int n = 0;
+    float h = 8;
+    for (; items[n].item != M_NONE; n++) h += items[n].item == M_SEP ? 9 : 30;
+    float w = 250, x = m->at.x, y = m->at.y;
+    if (x + w > jd_screen_w() - 4) x = jd_screen_w() - w - 4;
+    if (y + h > jd_screen_h() - 4) y = jd_screen_h() - h - 4;
+    Rectangle box = {x, y, w, h};
+    DrawRectangleRounded((Rectangle){x + 3, y + 4, w, h}, 0.04f, 6, ColorAlpha(BLACK, 0.25f));
+    DrawRectangleRounded(box, 0.04f, 6, JD_NORD1);
+    DrawRectangleRoundedLinesEx(box, 0.04f, 6, 1, JD_NORD2);
+    float yy = y + 4;
+    for (int i = 0; i < n; i++) {
+        if (items[i].item == M_SEP) {
+            DrawRectangle((int)x + 8, (int)yy + 4, (int)w - 16, 1, JD_NORD2);
+            yy += 9;
+            continue;
+        }
+        Rectangle row = {x + 4, yy, w - 8, 28};
+        int hover = CheckCollisionPointRec(GetMousePosition(), row);
+        if (hover) DrawRectangleRounded(row, 0.2f, 6, JD_NORD2);
+        jd_icon(items[i].icon, row.x + 8, yy + 6, 16, hover ? JD_NORD8 : JD_NORD4);
+        jd_text(ui, items[i].label, row.x + 34, yy + 7, 14, JD_NORD6, 0);
+        if (items[i].keys) {
+            float kw = jd_text_width(ui, items[i].keys, 12, 0);
+            jd_text(ui, items[i].keys, row.x + row.width - kw - 8, yy + 8, 12, JD_MUTED, 0);
+        }
+        if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            m->open = 0;
+            run(app, items[i].item);
+            return;
+        }
+        yy += 30;
+    }
+    int outside = !CheckCollisionPointRec(GetMousePosition(), box);
+    if (IsKeyPressed(KEY_ESCAPE) || (outside && (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))))
+        m->open = 0;
+}
+
+static const char *help_lines[][2] = {
+    {"Everywhere", NULL},
+    {"Ctrl+Tab  Ctrl+1..9", "switch tabs"}, {"Ctrl+W", "close the tab"}, {"Ctrl+N", "new message"},
+    {"Ctrl+,", "settings"}, {"Ctrl+R", "sync now"}, {"Ctrl+B", "sidebar full or icons only"}, {"?", "this help"},
+    {"Modes", NULL},
+    {"v", "visual: j/k extend the selection, then an action (Esc leaves)"},
+    {"Esc  i  a  o", "compose: normal mode, back to insert (I A O: line start, end, line above)"},
+    {"h j k l  w b  0 $  gg G", "compose body, normal mode: move; Tab to the next field"},
+    {"v  V", "compose body: select characters, whole lines; then d x y c, or Ctrl+B / I / K to format"},
+    {"x  dd  yy  p", "compose body: delete a character, cut a line, copy a line, paste"},
+    {"Shift+arrows  Ctrl+A", "compose, typing: select; Ctrl+C Ctrl+X Ctrl+V copy, cut, paste"},
+    {"Enter", "on a list item: the next item; on an empty one: the list ends"},
+    {"Mail", NULL},
+    {"/  Ctrl+K", "search (Enter runs it, Ctrl+Enter asks the server too)"},
+    {"from:  is:  after:", "search operators become pills after a space; dates DD-MM-YYYY"},
+    {"Backspace", "at the start of the search: the last pill back into the text"},
+    {"Tab  h  l", "folders / list / reader"},
+    {"j  k  gg  G", "move"},
+    {"gi  gs  gd  ga  gt  gj", "go to Inbox, Sent, Drafts, Archive, Trash, Junk"}, {"Enter  Shift+Enter", "open, open in a tab"}, {"x  Shift+j/k  Ctrl+A", "select"},
+    {"t", "conversations or single messages"}, {"p", "reading pane right, bottom or off"},
+    {"fu  ff  fa  fs  fc", "filter: unread, flagged, files, this sender, clear"},
+    {"Messages", NULL},
+    {"r  R  F", "reply, reply all, forward"}, {"u  s", "read/unread, flag"},
+    {"e  dd  m  c", "archive, delete (d in visual mode, or Delete), move, copy"}, {"z", "undo the last move or delete"},
+    {"Shift+M", "make a rule from the search"}, {"Ctrl+Shift+L  Ctrl+Shift+F", "rules, server filters"},
+    {"Reader", NULL},
+    {"Space  j  k", "scroll"}, {"o  Shift+P", "expand all, plain text or HTML"},
+    {"v", "a caret: h j k l w b 0 $ gg G move (k above the text: From, To, Cc, In); v again selects, y copies, Esc leaves"},
+    {"Drag  Ctrl+C", "select text (body, subject, sender, To, Cc) and copy it; right click for a menu"}, {"Shift+A", "save all attachments"},
+    {"Click  ↓", "an attachment opens it; its download icon saves it"},
+    {"Ctrl+S  Ctrl+P", "save the message as .eml in Downloads, print"},
+    {"Folders", NULL},
+    {"Space  a  Shift+R  Shift+D", "collapse, new, rename, delete"},
+};
+
+/* a line is shown when the filter is empty, or found in its keys, its description or its section's name */
+static int help_shown(int i, int section, const char *filter)
+{
+    if (!filter || !filter[0]) return 1;
+    return strcasestr(help_lines[section][0], filter) || strcasestr(help_lines[i][0], filter) ||
+           (help_lines[i][1] && strcasestr(help_lines[i][1], filter));
+}
+
+static int help_rows(const char *filter)
+{
+    int n = (int)(sizeof help_lines / sizeof *help_lines), rows = 0;
+    for (int i = 0, section = 0; i < n; i++) {
+        if (!help_lines[i][1]) {
+            section = i;
+            int any = 0;
+            for (int k = i + 1; k < n && help_lines[k][1] && !any; k++) any = help_shown(k, section, filter);
+            rows += any;
+        } else rows += help_shown(i, section, filter);
+    }
+    return rows;
+}
+
+/* the same sizes as the rest of the interface: 15 for text, 13 for section names */
+enum { HELP_ROW = 26 };
+
+float help_content(jd_app *app, float x, float y, float w, const char *filter)
+{
+    jd_ui *ui = &app->ui;
+    int n = (int)(sizeof help_lines / sizeof *help_lines);
+    /* the descriptions start in one column, after the widest keys */
+    float kw = 0;
+    for (int i = 0; i < n; i++)
+        if (help_lines[i][1]) {
+            float t = jd_text_width(ui, help_lines[i][0], 15, 1);
+            if (t > kw) kw = t;
+        }
+    if (kw > w * 0.45f) kw = w * 0.45f;
+    float dx = x + 12 + kw + 24;
+    for (int i = 0, section = 0; i < n; i++) {
+        if (!help_lines[i][1]) {
+            section = i;
+            int any = 0;
+            for (int k = i + 1; k < n && help_lines[k][1] && !any; k++) any = help_shown(k, section, filter);
+            if (any) jd_text(ui, help_lines[i][0], x, y + 8, 13, JD_MUTED, 1), y += HELP_ROW + 4;
+            continue;
+        }
+        if (!help_shown(i, section, filter)) continue;
+        jd_text_fit(ui, help_lines[i][0], x + 12, y + 4, kw, 15, JD_NORD8, 1);
+        jd_text_fit(ui, help_lines[i][1], dx, y + 4, x + w - dx, 15, JD_NORD6, 0);
+        y += HELP_ROW;
+    }
+    if (!help_rows(filter)) {
+        jd_text(ui, "No key matches.", x, y + 4, 15, JD_MUTED, 0);
+        y += HELP_ROW;
+    }
+    return y;
+}
+
+/* The ? overlay: what is typed narrows it; Esc clears that first, then closes; a click outside closes */
+void help_draw(jd_app *app)
+{
+    static jd_field filter;
+    if (!app->help) {
+        jd_field_set(&filter, NULL);
+        return;
+    }
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        if (filter.len) jd_field_set(&filter, NULL);
+        else app->help = 0;
+        return;
+    }
+    jd_field_input(&filter);
+    float sw = jd_screen_w(), sh = jd_screen_h();
+    DrawRectangleV((Vector2){0, 0}, (Vector2){sw, sh}, ColorAlpha(BLACK, 0.45f));
+    float w = sw - 80 < 820 ? sw - 80 : 820;
+    float h = 0;
+    {
+        /* measured as drawn: sections and rows the filter keeps */
+        int n = (int)(sizeof help_lines / sizeof *help_lines);
+        for (int i = 0, section = 0; i < n; i++) {
+            if (!help_lines[i][1]) {
+                section = i;
+                int any = 0;
+                for (int k = i + 1; k < n && help_lines[k][1] && !any; k++) any = help_shown(k, section, filter.text);
+                h += any ? HELP_ROW + 4 : 0;
+            } else if (help_shown(i, section, filter.text)) h += HELP_ROW;
+        }
+        if (!help_rows(filter.text)) h += HELP_ROW;
+    }
+    float content = h;
+    h += 124;
+    if (h > sh - 40) h = sh - 40;
+    Rectangle box = {(sw - w) / 2, (sh - h) / 2 > 20 ? (sh - h) / 2 : 20, w, h};
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(GetMousePosition(), box)) {
+        app->help = 0;
+        return;
+    }
+    DrawRectangleRounded(box, 0.03f, 8, JD_NORD1);
+    jd_icon("keyboard", box.x + 24, box.y + 22, 20, JD_NORD8);
+    jd_text(&app->ui, "Keyboard", box.x + 54, box.y + 22, 18, JD_NORD6, 1);
+    filter.placeholder = "Type to find a key or an action";
+    jd_field_draw(&app->ui, &filter, (Rectangle){box.x + 24, box.y + 56, w - 48, 34}, 1);
+    /* taller than the window: the list scrolls under the search field */
+    static float scroll;
+    Rectangle list = {box.x, box.y + 100, w, h - 112};
+    if (CheckCollisionPointRec(GetMousePosition(), list)) scroll -= GetMouseWheelMove() * 60;
+    if (scroll > content - list.height) scroll = content - list.height;
+    if (scroll < 0) scroll = 0;
+    jd_scissor(list.x, list.y, list.width, list.height);
+    help_content(app, box.x + 24, list.y + 4 - scroll, w - 48, filter.text);
+    jd_scissor_end();
+    jd_scrollbar(list, content + 8, &scroll);
+}

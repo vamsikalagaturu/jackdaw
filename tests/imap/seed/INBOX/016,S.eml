@@ -1,0 +1,15 @@
+From: =?utf-8?b?0J7Qu9GM0LPQsCDQmNCy0LDQvdC+0LLQsA==?= <olga@example.ru>
+To: dev list <dev@lists.example.org>
+Subject: [dev] RFC: drop the legacy config format
+Date: Sat, 07 Nov 2026 15:57:00 +0100
+Message-ID: <179477331063.563982.15869225516133802047@example.ru>
+List-Id: <dev.lists.example.org>
+List-Unsubscribe: <mailto:unsubscribe@dev.lists.example.org>
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+Hi everyone,
+
+RFC: drop the legacy config format =E2=80=94 opinions welcome. Details in the=
+ tracker.

@@ -1,0 +1,141 @@
+#pragma once
+#include <stdint.h>
+
+/* mail.db: the sync worker writes through one connection, the UI reads through its own (WAL allows both). */
+typedef struct jd_store jd_store;
+
+enum { JD_SEEN = 1, JD_ANSWERED = 2, JD_FLAGGED = 4, JD_DELETED = 8, JD_DRAFT = 16 };
+enum { JD_ROLE_FROM, JD_ROLE_TO, JD_ROLE_CC, JD_ROLE_REPLY_TO, JD_ROLE_COUNT };
+
+typedef struct {
+    char *name, *addr;
+} jd_addr;
+
+typedef struct {
+    uint32_t uid;
+    uint64_t modseq;
+    int flags;
+    char *keywords;
+    int64_t internaldate, date, size;
+    char *msgid, *in_reply_to, *subject;
+    jd_addr *addrs[JD_ROLE_COUNT];
+    int naddrs[JD_ROLE_COUNT];
+    char **refs;
+    int nrefs;
+    int has_attachment;
+} jd_header;
+
+void jd_header_free(jd_header *h);
+
+jd_store *jd_store_open(const char *path, char *err, int errlen);
+void jd_store_close(jd_store *s);
+int jd_store_begin(jd_store *s);
+int jd_store_commit(jd_store *s);
+
+typedef struct {
+    int64_t id;
+    uint32_t uidvalidity, uidnext;
+    uint64_t highestmodseq;
+    int count;
+} jd_folder_state;
+
+/* Folders not upserted between mark_absent and sweep_absent are gone from the server and dropped. */
+void jd_folders_mark_absent(jd_store *s);
+int64_t jd_folder_upsert(jd_store *s, const char *name, char delim, const char *special_use);
+void jd_folders_sweep_absent(jd_store *s);
+int jd_folder_state_get(jd_store *s, int64_t folder, jd_folder_state *st);
+void jd_folder_state_set(jd_store *s, int64_t folder, uint32_t uidvalidity, uint32_t uidnext, uint64_t modseq);
+/* every message of the folder, for a changed UIDVALIDITY */
+void jd_folder_clear(jd_store *s, int64_t folder);
+
+uint32_t *jd_folder_uids(jd_store *s, int64_t folder, int *n);
+/* Inserts the message and threads it, or updates its flags when (folder, uid) is known; returns its id. */
+int64_t jd_message_put(jd_store *s, int64_t folder, const jd_header *h, int *is_new);
+void jd_message_set_flags(jd_store *s, int64_t folder, uint32_t uid, int flags, const char *keywords, uint64_t modseq);
+void jd_message_delete(jd_store *s, int64_t folder, uint32_t uid);
+void jd_message_set_body(jd_store *s, int64_t id, const char *text);
+int jd_message_locate(jd_store *s, int64_t id, int64_t *folder, char **folder_name, uint32_t *uid, int64_t *size);
+/* uids in folder without a cached body, of messages at or after since and at most max_size bytes */
+uint32_t *jd_folder_uncached(jd_store *s, int64_t folder, int64_t since, int64_t max_size, int *n);
+int64_t jd_message_id(jd_store *s, int64_t folder, uint32_t uid);
+int64_t jd_message_thread(jd_store *s, int64_t id);
+/* refreshes threads.last_date and threads.unread for the folder's threads and drops empty threads */
+void jd_threads_refresh(jd_store *s, int64_t folder);
+
+/* $dir/bodies/<folder>/<uidvalidity>-<uid>.eml */
+char *jd_body_path(const char *account_dir, int64_t folder, uint32_t uidvalidity, uint32_t uid);
+
+typedef struct {
+    int64_t id;
+    char *name, *special_use;
+    char delim;
+    int collapsed;
+    int total, unread;
+} jd_folder_row;
+
+void jd_folder_set_collapsed(jd_store *s, int64_t folder, int collapsed);
+
+/* Inbox first, then the special-use folders, then the rest by name */
+jd_folder_row *jd_store_folders(jd_store *s, int *n);
+void jd_folder_rows_free(jd_folder_row *rows, int n);
+
+/* What the message list shows: a folder (or every folder), narrowed by filters and search terms. */
+typedef struct {
+    int64_t folder; /* 0: every folder */
+    int grouped;    /* one row per conversation, else one per message */
+    int unread, read, flagged, attachment;
+    char *from, *to, *subject; /* substrings of names/addresses, of the subject */
+    char *text;                /* words for the full-text index, all must match */
+    int64_t after, before;     /* message date range, 0 = open */
+    const int64_t *extra;      /* messages the server found for text, shown as matches too */
+    int nextra;
+    const int64_t *only;       /* when set, nothing outside these messages */
+    int nonly;
+} jd_list_query;
+
+/* A row of the list: a conversation (count >= 1) or a single message, counts over the matching messages */
+typedef struct {
+    int64_t thread, latest;
+    char *subject, *senders;
+    char *snippet, *sender_addr; /* of the newest message */
+    char *folders;               /* the folders the matching messages are in, comma-separated */
+    int64_t date;
+    int count, unread, flagged, has_attachment;
+} jd_thread_row;
+
+jd_thread_row *jd_store_list(jd_store *s, const jd_list_query *q, int *n);
+void jd_thread_rows_free(jd_thread_row *rows, int n);
+int64_t jd_store_folder_by_name(jd_store *s, const char *name);
+/* the folder with this RFC 6154 special use, 0 when none */
+int64_t jd_store_special(jd_store *s, const char *use, char **name);
+/* messages in folder with this Message-ID */
+int64_t *jd_store_by_msgid(jd_store *s, int64_t folder, const char *msgid, int *n);
+/* Message-ID and References of a message, for replying; refs space-separated */
+int jd_store_reply_ids(jd_store *s, int64_t id, char **msgid, char **refs);
+
+/* addresses seen in mail whose name or address starts with prefix (or a word of the name does), the ones
+   written to most first */
+typedef struct {
+    char *name, *addr;
+} jd_contact;
+jd_contact *jd_store_contacts(jd_store *s, const char *prefix, int limit, int *n);
+void jd_contacts_free(jd_contact *c, int n);
+
+/* Every message of a conversation in any folder, oldest first */
+typedef struct {
+    int64_t id, folder, date;
+    uint32_t uid, uidvalidity;
+    int flags, body_cached, has_attachment;
+    char *subject, *from, *to, *cc, *reply_to, *folder_name;
+    char *special_use; /* of its folder */
+} jd_message_row;
+
+void jd_message_row_clear(jd_message_row *r);
+
+jd_message_row *jd_store_conversation(jd_store *s, int64_t thread, int *n);
+/* the conversation's messages in folder (every folder when 0) */
+int64_t *jd_store_thread_ids(jd_store *s, int64_t thread, int64_t folder, int *n);
+void jd_message_rows_free(jd_message_row *rows, int n);
+
+void jd_store_set_flag(jd_store *s, int64_t id, int flag, int on);
+void jd_message_delete_id(jd_store *s, int64_t id);

@@ -1,0 +1,10 @@
+From: Bob Builder <bob@example.org>
+To: Jackdaw Tester <jackdaw@localhost>
+Subject: Old note
+Date: Sun, 06 Sep 2026 17:40:00 +0100
+Message-ID: <179477331113.563982.5110022828541329588@example.org>
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+MIME-Version: 1.0
+
+This one is older than the prefetch window.

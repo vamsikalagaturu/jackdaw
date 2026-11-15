@@ -1,0 +1,30 @@
+From: Lena Schmidt <lena@example.de>
+To: Jackdaw Tester <jackdaw@localhost>
+Subject: Notes from the infrastructure meeting
+Date: Tue, 10 Nov 2026 14:17:00 +0100
+Message-ID: <179477331113.563982.3098421600795405239@example.de>
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+Hi,
+
+here are my notes.
+
+1. Storage
+The migration plan has three phases. The migration plan has three phases. The=
+ migration plan has three phases. The migration plan has three phases. The mi=
+gration plan has three phases. The migration plan has three phases. The migra=
+tion plan has three phases. The migration plan has three phases. The migratio=
+n plan has three phases. The migration plan has three phases. The migration p=
+lan has three phases. The migration plan has three phases.
+
+2. Backups
+   - nightly to the NAS
+   - weekly offsite
+
+3. Open questions
+   * who owns the DNS change?
+   * budget for Q1
+
+Lena

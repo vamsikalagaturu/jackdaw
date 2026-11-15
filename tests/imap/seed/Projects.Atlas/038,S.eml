@@ -1,0 +1,23 @@
+From: Priya Raman <priya@uni-bremen.example>
+To: Jackdaw Tester <jackdaw@localhost>
+Subject: Atlas: data model review
+Date: Sun, 01 Nov 2026 15:29:00 +0100
+Message-ID: <179477331114.563982.12401760261682660519@uni-bremen.example>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="===============2344943286283368771=="
+
+--===============2344943286283368771==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Can you review the Turtle shapes before Monday? The SHACL report is attached.
+
+--===============2344943286283368771==
+Content-Type: text/plain
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="shacl-report.txt"
+MIME-Version: 1.0
+
+VmFsaWRhdGlvbiByZXBvcnQ6IDAgdmlvbGF0aW9ucywgMyB3YXJuaW5ncwo=
+
+--===============2344943286283368771==--

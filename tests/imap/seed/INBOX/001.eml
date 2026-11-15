@@ -1,0 +1,34 @@
+From: Field Photos <photos@fieldphotos.example>
+To: Jackdaw Tester <jackdaw@localhost>
+Subject: Field photos: November
+Date: Sun, 15 Nov 2026 12:40:00 +0100
+Message-ID: <179477331050.563982.15981332884568839163@fieldphotos.example>
+MIME-Version: 1.0
+Content-Type: multipart/alternative;
+ boundary="===============3903710005690281068=="
+
+--===============3903710005690281068==
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Three reader photos this month (pictures on the web).
+
+--===============3903710005690281068==
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+<html><body style=3D"font-family: Arial, sans-serif; color: #222">
+<h2>Field photos: November</h2><p>Three pictures from our readers this month.=
+</p>
+<table><tr><td style=3D"padding:4px"><img src=3D"http://127.0.0.1:9080/photos=
+/1.png" width=3D"200" height=3D"140" alt=3D"photo 1"></td><td style=3D"paddin=
+g:4px"><img src=3D"http://127.0.0.1:9080/photos/2.png" width=3D"200" height=
+=3D"140" alt=3D"photo 2"></td><td style=3D"padding:4px"><img src=3D"http://12=
+7.0.0.1:9080/photos/3.png" width=3D"200" height=3D"140" alt=3D"photo 3"></td>=
+</tr></table>
+<p style=3D"font-size:12px; color:#777">Pictures load from our server.
+<img src=3D"http://127.0.0.1:9080/pixel.png" width=3D"1" height=3D"1" alt=3D"=
+"></p></body></html>
+
+--===============3903710005690281068==--

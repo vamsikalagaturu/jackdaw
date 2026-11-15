@@ -1,0 +1,29 @@
+From: =?utf-8?b?zp3Or866zr/PgiDOoM6xz4DOsc60z4zPgM6/z4XOu86/z4I=?=
+ <nikos@example.gr>
+To: dev list <dev@lists.example.org>
+Subject: Re: [dev] Release 2.4 freeze
+Date: Thu, 29 Oct 2026 16:33:00 +0100
+Message-ID: <179477331062.563982.1322116249617451728@example.gr>
+In-Reply-To: <179477331062.563982.10127996448322786917@example.de>
+References: <179477331062.563982.1660314403812823584@example.org>
+ <179477331062.563982.6426478169542960461@example.org>
+ <179477331062.563982.10127996448322786917@example.de>
+List-Id: <dev.lists.example.org>
+List-Unsubscribe: <mailto:unsubscribe@dev.lists.example.org>
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+Logs attached in the tracker, see comment 14.
+
+On Wed, 28 Oct 2026 at 16:58, Lena Schmidt <lena@example.de> wrote:
+> +1 from me.
+>=20
+> On Tue, 27 Oct 2026 at 16:02, Bob Builder <bob@example.org> wrote:
+> > We tried this last year; it broke the Windows build. Can we gate it behin=
+d a flag first?
+> >=20
+> > On Mon, 26 Oct 2026 at 15:26, Ada Lovelace <ada@example.org> wrote:
+> > > Hi everyone,
+> > >=20
+> > > Release 2.4 freeze =E2=80=94 opinions welcome. Details in the tracker.

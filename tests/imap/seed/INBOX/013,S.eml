@@ -1,0 +1,17 @@
+From: Carol Danvers <carol@example.org>
+To: dev list <dev@lists.example.org>
+Subject: Re: [dev] Flaky CI on arm64
+Date: Mon, 02 Nov 2026 16:57:00 +0100
+Message-ID: <179477331063.563982.12774200339151833502@example.org>
+In-Reply-To: <179477331062.563982.2762394839201704613@example.gr>
+References: <179477331062.563982.2762394839201704613@example.gr>
+List-Id: <dev.lists.example.org>
+List-Unsubscribe: <mailto:unsubscribe@dev.lists.example.org>
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: base64
+MIME-Version: 1.0
+
+KzEgZnJvbSBtZS4KCk9uIFN1biwgMDEgTm92IDIwMjYgYXQgMTU6NTYsIM6dzq/Ous6/z4IgzqDO
+sc+AzrHOtM+Mz4DOv8+FzrvOv8+CIDxuaWtvc0BleGFtcGxlLmdyPiB3cm90ZToKPiBIaSBldmVy
+eW9uZSwKPiAKPiBGbGFreSBDSSBvbiBhcm02NCDigJQgb3BpbmlvbnMgd2VsY29tZS4gRGV0YWls
+cyBpbiB0aGUgdHJhY2tlci4K

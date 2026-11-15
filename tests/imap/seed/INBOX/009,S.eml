@@ -1,0 +1,20 @@
+From: Bob Builder <bob@example.org>
+To: dev list <dev@lists.example.org>
+Subject: Re: [dev] Release 2.4 freeze
+Date: Tue, 27 Oct 2026 16:02:00 +0100
+Message-ID: <179477331062.563982.6426478169542960461@example.org>
+In-Reply-To: <179477331062.563982.1660314403812823584@example.org>
+References: <179477331062.563982.1660314403812823584@example.org>
+List-Id: <dev.lists.example.org>
+List-Unsubscribe: <mailto:unsubscribe@dev.lists.example.org>
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+We tried this last year; it broke the Windows build. Can we gate it behind a =
+flag first?
+
+On Mon, 26 Oct 2026 at 15:26, Ada Lovelace <ada@example.org> wrote:
+> Hi everyone,
+>=20
+> Release 2.4 freeze =E2=80=94 opinions welcome. Details in the tracker.

@@ -1,0 +1,137 @@
+cmake_minimum_required(VERSION 3.20)
+project(jackdaw VERSION 0.1.0 DESCRIPTION "Mail client for Linux and Android" LANGUAGES C CXX)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+# litehtml (HTML mail) is C++17; everything else is C
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(JD_REPO ${CMAKE_CURRENT_SOURCE_DIR})
+set(JD_ASSETS ${JD_REPO}/assets)
+set(JD_WARNINGS -Wall -Wextra -Wno-unused-parameter)
+
+# <symbol>[] and <symbol>_size, NUL-terminated
+function(jd_embed out symbol file)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${file})
+  file(READ ${file} hex HEX)
+  string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," bytes "${hex}")
+  file(WRITE ${out}.tmp "const unsigned char ${symbol}[] = {${bytes}0x00};\nconst int ${symbol}_size = sizeof(${symbol}) - 1;\n")
+  configure_file(${out}.tmp ${out} COPYONLY)
+endfunction()
+
+set(JD_GEN ${CMAKE_CURRENT_BINARY_DIR}/generated)
+jd_embed(${JD_GEN}/font_regular.c jd_font_regular ${JD_ASSETS}/Inter-Regular.ttf)
+jd_embed(${JD_GEN}/font_semibold.c jd_font_semibold ${JD_ASSETS}/Inter-SemiBold.ttf)
+set(JD_ASSET_SOURCES ${JD_GEN}/font_regular.c ${JD_GEN}/font_semibold.c)
+# Lucide icons, looked up by file name through jd_icon_files (src/ui/icons.c)
+file(GLOB JD_ICONS CONFIGURE_DEPENDS ${JD_ASSETS}/icons/*.svg)
+set(JD_ICON_DECLS "")
+set(JD_ICON_TABLE "")
+foreach(icon ${JD_ICONS})
+  get_filename_component(name ${icon} NAME_WE)
+  string(MAKE_C_IDENTIFIER ${name} id)
+  jd_embed(${JD_GEN}/icon_${id}.c jd_icon_${id} ${icon})
+  list(APPEND JD_ASSET_SOURCES ${JD_GEN}/icon_${id}.c)
+  string(APPEND JD_ICON_DECLS "extern const unsigned char jd_icon_${id}[];\nextern const int jd_icon_${id}_size;\n")
+  string(APPEND JD_ICON_TABLE "  {\"${name}\", jd_icon_${id}, &jd_icon_${id}_size},\n")
+endforeach()
+file(WRITE ${JD_GEN}/icon_table.c.tmp "#include \"ui/icons.h\"\n${JD_ICON_DECLS}const jd_icon_file jd_icon_files[] = {\n${JD_ICON_TABLE}  {0, 0, 0}\n};\n")
+configure_file(${JD_GEN}/icon_table.c.tmp ${JD_GEN}/icon_table.c COPYONLY)
+list(APPEND JD_ASSET_SOURCES ${JD_GEN}/icon_table.c)
+
+# JD_RELEASE=1 in the environment is the plain version, anything else X.Y.Z-dev+hash[.dirty], fixed at configure time
+set(JD_VERSION_STRING "${PROJECT_VERSION}")
+if(NOT "$ENV{JD_RELEASE}" STREQUAL "1")
+  set(JD_VERSION_STRING "${PROJECT_VERSION}-dev")
+  find_package(Git QUIET)
+  if(GIT_FOUND)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD WORKING_DIRECTORY "${JD_REPO}"
+                    OUTPUT_VARIABLE JD_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE JD_GIT_FAILED)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
+                    WORKING_DIRECTORY "${JD_REPO}" OUTPUT_VARIABLE JD_GIT_CHANGES ERROR_QUIET)
+    if(NOT JD_GIT_FAILED AND JD_GIT_COMMIT)
+      set(JD_VERSION_STRING "${JD_VERSION_STRING}+${JD_GIT_COMMIT}")
+      if(JD_GIT_CHANGES)
+        set(JD_VERSION_STRING "${JD_VERSION_STRING}.dirty")
+      endif()
+    endif()
+  endif()
+endif()
+message(STATUS "jackdaw ${JD_VERSION_STRING}")
+# the day the build was configured, shown with the version in the sidebar
+string(TIMESTAMP JD_BUILD_DATE "%d-%m-%Y")
+
+# Options from https://sqlite.org/compile.html#recommended_compile_time_options, plus FTS5 for search
+set(JD_SQLITE_DIR ${JD_REPO}/thirdparty/sqlite-3540100)
+add_library(jd_sqlite STATIC ${JD_SQLITE_DIR}/sqlite3.c)
+target_include_directories(jd_sqlite SYSTEM PUBLIC ${JD_SQLITE_DIR})
+target_compile_definitions(jd_sqlite PRIVATE SQLITE_ENABLE_FTS5 SQLITE_DQS=0 SQLITE_DEFAULT_MEMSTATUS=0
+                           SQLITE_LIKE_DOESNT_MATCH_BLOBS SQLITE_OMIT_DEPRECATED SQLITE_OMIT_SHARED_CACHE
+                           SQLITE_OMIT_LOAD_EXTENSION SQLITE_USE_ALLOCA)
+target_compile_options(jd_sqlite PRIVATE -w)
+find_package(Threads REQUIRED)
+target_link_libraries(jd_sqlite PUBLIC Threads::Threads m)
+
+# libetpan, static, as platform/*/deps.sh builds it
+set(JD_LIBETPAN_DIR "" CACHE PATH "libetpan's install prefix (include/libetpan, lib/libetpan.a)")
+if(NOT EXISTS "${JD_LIBETPAN_DIR}/lib/libetpan.a")
+  message(FATAL_ERROR "JD_LIBETPAN_DIR: no lib/libetpan.a in '${JD_LIBETPAN_DIR}' (platform/*/deps.sh builds it)")
+endif()
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(JD_SSL REQUIRED IMPORTED_TARGET openssl)
+pkg_check_modules(JD_ZLIB REQUIRED IMPORTED_TARGET zlib)
+add_library(jd_etpan STATIC IMPORTED GLOBAL)
+set_target_properties(jd_etpan PROPERTIES IMPORTED_LOCATION ${JD_LIBETPAN_DIR}/lib/libetpan.a
+                      INTERFACE_INCLUDE_DIRECTORIES ${JD_LIBETPAN_DIR}/include
+                      INTERFACE_LINK_LIBRARIES "PkgConfig::JD_SSL;PkgConfig::JD_ZLIB;Threads::Threads")
+
+# mail, storage and helpers: no window, shared by every platform
+file(GLOB JD_CORE_SOURCES CONFIGURE_DEPENDS src/core/*.c src/mail/*.c src/store/*.c)
+add_library(jdcore STATIC ${JD_CORE_SOURCES})
+target_include_directories(jdcore PUBLIC src)
+target_compile_options(jdcore PRIVATE ${JD_WARNINGS})
+pkg_check_modules(JD_CURL REQUIRED IMPORTED_TARGET libcurl)
+target_link_libraries(jdcore PUBLIC jd_etpan jd_sqlite PkgConfig::JD_CURL)
+
+set(LITEHTML_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+add_subdirectory(${JD_REPO}/thirdparty/litehtml-0.10 ${CMAKE_CURRENT_BINARY_DIR}/litehtml EXCLUDE_FROM_ALL)
+target_compile_options(litehtml PRIVATE -w)
+target_compile_options(gumbo PRIVATE -w)
+
+find_package(raylib 6.2 REQUIRED CONFIG)
+pkg_check_modules(JD_SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+# the interface, everything but main(): the app and the tests that drive it link the same code
+file(GLOB JD_UI_SOURCES CONFIGURE_DEPENDS src/ui/*.c src/ui/*.cpp src/app/*.c)
+list(REMOVE_ITEM JD_UI_SOURCES ${JD_REPO}/src/app/main.c)
+add_library(jdapp STATIC ${JD_UI_SOURCES} platform/linux/secret_linux.c platform/linux/notify_linux.c platform/linux/portal_linux.c ${JD_ASSET_SOURCES})
+target_include_directories(jdapp PUBLIC src)
+target_include_directories(jdapp SYSTEM PRIVATE ${JD_REPO}/thirdparty/nanosvg)
+target_compile_definitions(jdapp PUBLIC JD_VERSION="${JD_VERSION_STRING}" JD_BUILD_DATE="${JD_BUILD_DATE}")
+target_compile_options(jdapp PRIVATE ${JD_WARNINGS})
+pkg_check_modules(JD_FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
+target_link_libraries(jdapp PUBLIC jdcore litehtml raylib m PkgConfig::JD_SYSTEMD PkgConfig::JD_FONTCONFIG)
+pkg_check_modules(JD_LIBSECRET IMPORTED_TARGET libsecret-1>=0.19)
+if(JD_LIBSECRET_FOUND)
+  target_compile_definitions(jdapp PRIVATE JD_HAVE_LIBSECRET)
+  target_link_libraries(jdapp PUBLIC PkgConfig::JD_LIBSECRET)
+else()
+  message(STATUS "libsecret-1 not found: passwords last until jackdaw quits")
+endif()
+add_executable(jackdaw src/app/main.c)
+target_compile_options(jackdaw PRIVATE ${JD_WARNINGS})
+target_link_libraries(jackdaw PRIVATE jdapp)
+
+# ctest: the interface driven by simulated keys on a seeded mailbox; needs a display (xvfb-run in CI), skips
+# without one
+option(JD_BUILD_TESTS "Build the tests" ON)
+if(JD_BUILD_TESTS)
+  enable_testing()
+  add_executable(jackdaw_keys_test tests/ui/keys_test.c)
+  target_compile_options(jackdaw_keys_test PRIVATE ${JD_WARNINGS})
+  target_link_libraries(jackdaw_keys_test PRIVATE jdapp)
+  add_test(NAME keys COMMAND jackdaw_keys_test)
+  # the test exits without tearing the interface down; leaks it reports at exit are not findings
+  set_tests_properties(keys PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
+endif()
+include(GNUInstallDirs)
+install(TARGETS jackdaw RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

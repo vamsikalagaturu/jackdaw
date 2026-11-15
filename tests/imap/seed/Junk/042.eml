@@ -1,0 +1,10 @@
+From: IT Support <support@it-helpdesk.example>
+To: Jackdaw Tester <jackdaw@localhost>
+Subject: Your mailbox is full
+Date: Tue, 10 Nov 2026 17:32:00 +0100
+Message-ID: <179477331114.563982.9458883424240625479@it-helpdesk.example>
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+MIME-Version: 1.0
+
+Verify your password at http://it-helpdesk.example/verify
