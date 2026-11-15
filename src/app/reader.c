@@ -853,7 +853,6 @@ static float address_line(jd_app *app, jd_conv *c, int id, const char *label, co
     struct {
         char name[256], addr[256];
         int start, end;
-        float x, y;
     } a[MAX_ADDR];
     int n = 0;
     jd_buf shown = {0};
@@ -879,34 +878,52 @@ static float address_line(jd_app *app, jd_conv *c, int id, const char *label, co
     if (!n) return y + lh;
     const char *text = shown.s;
     int reg = header_register(c, id, text, y, ts) ? nhreg - 1 : -1;
-    /* lay the addresses out, each with its comma, wrapping before one that does not fit */
-    float cx = lx, cy = y;
+    /* Laid out as pieces of the text: each address with its comma, wrapping before one that does not fit; one too
+       wide for a row of its own breaks after its name, its <address> going to the next row. */
+    struct {
+        int addr, start, end; /* end is before the comma */
+        int part;             /* 0 the whole address, 1 its name, 2 its <address> */
+        float x, y;
+    } pc[MAX_ADDR * 2];
+    int npc = 0;
+    float cx = lx, cy = y, space = label_x(ui, " ", 1, ts, 0);
     for (int i = 0; i < n; i++) {
-        float aw = label_x(ui, text + a[i].start, a[i].end - a[i].start + (i + 1 < n ? 1 : 0), ts, 0);
+        int comma = i + 1 < n;
+        float aw = label_x(ui, text + a[i].start, a[i].end - a[i].start + comma, ts, 0);
         if (cx > lx && cx + aw > right) cx = lx, cy += lh;
-        a[i].x = cx, a[i].y = cy;
+        if (cx + aw > right && a[i].name[0]) {
+            int name_end = a[i].start + (int)strlen(a[i].name) + 1;
+            pc[npc++] = (__typeof__(pc[0])){i, a[i].start, name_end, 1, cx, cy};
+            header_piece(reg, a[i].start, cx, cy);
+            cx = lx, cy += lh;
+            pc[npc++] = (__typeof__(pc[0])){i, name_end, a[i].end, 2, cx, cy};
+            header_piece(reg, name_end, cx, cy);
+            cx += label_x(ui, text + name_end, a[i].end - name_end + comma, ts, 0) + space;
+            continue;
+        }
+        pc[npc++] = (__typeof__(pc[0])){i, a[i].start, a[i].end, 0, cx, cy};
         header_piece(reg, a[i].start, cx, cy);
-        cx += aw + label_x(ui, " ", 1, ts, 0);
+        cx += aw + space;
     }
 
     Vector2 mp = GetMousePosition();
     int free_mouse = CheckCollisionPointRec(mp, clip) && !app->dialog.kind && !app->menu.open && !chip_menu.open &&
                      !reader_menu.open;
     int under = -1;
-    for (int i = 0; i < n && free_mouse; i++) {
-        float aw = label_x(ui, text + a[i].start, a[i].end - a[i].start, ts, 0);
-        if (CheckCollisionPointRec(mp, (Rectangle){a[i].x, a[i].y - 2, aw, ts + 4})) under = i;
+    for (int k = 0; k < npc && free_mouse; k++) {
+        float pw = label_x(ui, text + pc[k].start, pc[k].end - pc[k].start, ts, 0);
+        if (CheckCollisionPointRec(mp, (Rectangle){pc[k].x, pc[k].y - 2, pw, ts + 4})) under = pc[k].addr;
     }
     /* the place in the text under the mouse, for selecting */
     int at = -1;
     if (free_mouse && mp.y >= y - 2 && mp.y < cy + lh && mp.x >= lx - 4 && mp.x < right) {
         int row_first = -1;
-        for (int i = 0; i < n; i++)
-            if (mp.y >= a[i].y - 2 && mp.y < a[i].y + lh - 2) {
-                if (row_first < 0) row_first = i;
-                if (mp.x >= a[i].x || i == row_first) {
-                    int local = mp.x < a[i].x ? 0 : label_hit(ui, text + a[i].start, mp.x - a[i].x, ts, 0);
-                    at = a[i].start + local;
+        for (int k = 0; k < npc; k++)
+            if (mp.y >= pc[k].y - 2 && mp.y < pc[k].y + lh - 2) {
+                if (row_first < 0) row_first = k;
+                if (mp.x >= pc[k].x || k == row_first) {
+                    int local = mp.x < pc[k].x ? 0 : label_hit(ui, text + pc[k].start, mp.x - pc[k].x, ts, 0);
+                    at = pc[k].start + local;
                 }
             }
         SetMouseCursor(MOUSE_CURSOR_IBEAM);
@@ -932,35 +949,37 @@ static float address_line(jd_app *app, jd_conv *c, int id, const char *label, co
     }
 
     int sel = hl.conv == c && hl.id == id && hl.to > hl.from;
-    for (int i = 0; i < n; i++) {
-        int s = a[i].start, e = a[i].end + (i + 1 < n ? 1 : 0);
+    for (int k = 0; k < npc; k++) {
+        int i = pc[k].addr, last = pc[k].part != 1, comma = last && i + 1 < n;
+        int s = pc[k].start, e = pc[k].end + comma;
         if (sel && hl.from < e && hl.to > s) {
             int f = hl.from > s ? hl.from : s, t = hl.to < e ? hl.to : e;
             float x0 = label_x(ui, text + s, f - s, ts, 0), x1 = label_x(ui, text + s, t - s, ts, 0);
-            DrawRectangleV((Vector2){a[i].x + x0, a[i].y + ts * 0.5f - ts * 0.65f}, (Vector2){x1 - x0, ts * 1.3f},
+            DrawRectangleV((Vector2){pc[k].x + x0, pc[k].y + ts * 0.5f - ts * 0.65f}, (Vector2){x1 - x0, ts * 1.3f},
                            ColorAlpha(JD_NORD10, 0.55f));
         }
-        float px = a[i].x;
+        float px = pc[k].x;
         int lit = i == under;
-        if (a[i].name[0]) {
-            char part[300];
+        char part[300];
+        /* the name in the text colour, the <address> muted */
+        if (a[i].name[0] && pc[k].part != 2) {
             snprintf(part, sizeof part, "%s ", a[i].name);
-            jd_text(ui, part, px, a[i].y, ts, lit ? JD_NORD8 : JD_NORD6, 0);
+            jd_text(ui, part, px, pc[k].y, ts, lit ? JD_NORD8 : JD_NORD6, 0);
             px += label_x(ui, part, (int)strlen(part), ts, 0);
-            snprintf(part, sizeof part, "<%s>", a[i].addr);
-            jd_text(ui, part, px, a[i].y, ts, lit ? JD_NORD8 : JD_MUTED, 0);
-            px += label_x(ui, part, (int)strlen(part), ts, 0);
-        } else {
-            jd_text(ui, a[i].addr, px, a[i].y, ts, lit ? JD_NORD8 : JD_NORD6, 0);
-            px += label_x(ui, a[i].addr, (int)strlen(a[i].addr), ts, 0);
         }
-        if (i + 1 < n) jd_text(ui, ",", px, a[i].y, ts, JD_MUTED, 0);
+        if (pc[k].part != 1) {
+            if (a[i].name[0]) snprintf(part, sizeof part, "<%s>", a[i].addr);
+            else snprintf(part, sizeof part, "%s", a[i].addr);
+            jd_text(ui, part, px, pc[k].y, ts, lit ? JD_NORD8 : a[i].name[0] ? JD_MUTED : JD_NORD6, 0);
+            px += label_x(ui, part, (int)strlen(part), ts, 0);
+        }
+        if (comma) jd_text(ui, ",", px, pc[k].y, ts, JD_MUTED, 0);
     }
     if (header_caret_here(c, id)) {
         int k = 0;
-        while (k + 1 < n && a[k + 1].start <= rv.hc) k++;
-        float px = a[k].x + label_x(ui, text + a[k].start, rv.hc - a[k].start, ts, 0);
-        DrawRectangleV((Vector2){px - 1, a[k].y + ts * 0.5f - ts * 0.625f}, (Vector2){2, ts * 1.25f}, JD_NORD8);
+        while (k + 1 < npc && pc[k + 1].start <= rv.hc) k++;
+        float px = pc[k].x + label_x(ui, text + pc[k].start, rv.hc - pc[k].start, ts, 0);
+        DrawRectangleV((Vector2){px - 1, pc[k].y + ts * 0.5f - ts * 0.625f}, (Vector2){2, ts * 1.25f}, JD_NORD8);
     }
     jd_buf_free(&shown);
     return cy + lh;
@@ -1075,18 +1094,22 @@ static float remote_images(jd_app *app, jd_reading *m, float x, float y, float w
         return y;
     }
     jd_ui *ui = &app->ui;
-    Rectangle bar = {x, y, w, 40 * K};
-    DrawRectangleRounded(bar, 0.2f, 6, JD_NORD0);
-    jd_icon("eye-off", x + 12, y + 12 * K, 16 * K, JD_NORD13);
     char line[96];
     snprintf(line, sizeof line, "%d remote image%s not loaded", n, n == 1 ? "" : "s");
-    jd_text(ui, line, x + 18 + 20 * K, y + 12 * K, 13 * K, JD_NORD6, 0);
     float bx = x + 24 + 20 * K + jd_text_width(ui, line, 13 * K, 0);
     const char *once = "Load images", *always = "Always from this sender";
     float ow = jd_text_width(ui, once, 15, 1) + 20, aw = jd_text_width(ui, always, 15, 1) + 20;
-    if (bx + ow + aw + 8 > x + w) aw = 0;
+    /* a narrow pane (a phone) puts the buttons on a row of their own under the line */
+    int below = bx + ow > x + w - 8;
+    if (below) bx = x + 12;
+    if (bx + ow + aw + 8 > x + w - 8) aw = 0;
+    float bar_h = below ? 40 * K + 36 : 40 * K;
+    Rectangle bar = {x, y, w, bar_h};
+    DrawRectangleRounded(bar, 0.2f / (below ? 2 : 1), 6, JD_NORD0);
+    jd_icon("eye-off", x + 12, y + 12 * K, 16 * K, JD_NORD13);
+    jd_text(ui, line, x + 18 + 20 * K, y + 12 * K, 13 * K, JD_NORD6, 0);
     int hover_clip = CheckCollisionPointRec(GetMousePosition(), clip);
-    float by = y + (40 * K - 28) / 2;
+    float by = below ? y + 40 * K : y + (40 * K - 28) / 2;
     if (jd_button(ui, once, (Rectangle){bx, by, ow, 28}, 0) && hover_clip) {
         m->load_images = 1;
         request_images(app, m);
@@ -1099,7 +1122,7 @@ static float remote_images(jd_app *app, jd_reading *m, float x, float y, float w
         notify_user(app, "Images from %s load from now on (Settings, Reading).", addr);
     }
     free(addr);
-    return y + 40 * K + 10;
+    return y + bar_h + 10;
 }
 
 static float draw_files(jd_app *app, jd_reading *m, float x, float y, float w, Rectangle clip)

@@ -150,7 +150,6 @@ typedef struct {
     int settings_section, settings_focus;
     float settings_scroll;
     jd_editor sig_new, sig_reply;
-    jd_field rule_match, rule_action;
 
     /* tabs: 0 is the mail view, whose conv is the preview pane */
     jd_tab *tabs;
@@ -211,6 +210,37 @@ int folder_hidden(jd_app *app, int i);
 void list_reload(jd_app *app);
 /* the coloured circle with initials the list and the reader show for a sender */
 void sender_avatar(jd_app *app, const char *name, const char *addr, float cx, float cy, float r);
+/* a suggestion for the word being typed in a query (search, rules): what replaces it, and what is shown */
+typedef struct {
+    char insert[300]; /* a trailing space makes an operator a pill at once */
+    char label[300], note[80];
+} jd_hint;
+/* the operators or values (contacts, folders, flags, dates) that fit word, at most max */
+int query_hints(jd_app *app, const char *word, jd_hint *out, int max);
+/* the icon and colour of a filter ("from:…", "in:…", "is:…"), as pills and hints show them */
+void filter_kind(const char *text, const char **icon, Color *tint);
+
+/* A query typed as in the search box but for rules: complete operators become pills, hints under it */
+typedef struct {
+    jd_field text;
+    char **pills;
+    int npills;
+    jd_hint hints[10];
+    int nhints, sel;
+    char hints_for[300];
+    Rectangle hints_box;
+} jd_qfield;
+void qfield_clear(jd_qfield *q);
+/* the pills and the typed words as one query; malloc'd, NULL when empty */
+char *qfield_query(const jd_qfield *q);
+/* typing, Backspace into the last pill, hints with Up/Down/Tab; 1 when Enter was pressed with no hint picked */
+int qfield_keys(jd_app *app, jd_qfield *q);
+/* the field in box; returns 1 when clicked. Its hints are drawn by qfield_hints_draw, over what follows. */
+int qfield_draw(jd_app *app, jd_qfield *q, Rectangle box, int focused);
+void qfield_hints_draw(jd_app *app, jd_qfield *q, int focused);
+/* a query's tokens as they show in a pill field, without editing: returns the width used */
+float query_pills_draw(jd_app *app, const char *query, float x, float y, float w);
+
 /* the search as one query: scope (with_scope), quick filters, pills and typed words; NULL when empty. free() it */
 char *search_full_query(jd_app *app, int with_scope);
 void list_draw(jd_app *app, Rectangle r);

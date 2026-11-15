@@ -6,6 +6,7 @@
 
 #include "app.h"
 #include "core/util.h"
+#include "platform.h"
 #include "ui/icons.h"
 
 enum { TAB_H = 34, BAR_H = 28, SPLIT = 5 };
@@ -68,7 +69,10 @@ void fonts_release(jd_app *app)
 void apply_prefs(jd_app *app)
 {
     jd_theme_set(app->prefs.light);
-    jd_scale = (float)(app->prefs.scale ? app->prefs.scale : 100) / 100.0f;
+    jd_scale = plat_density() * (float)(app->prefs.scale ? app->prefs.scale : 100) / 100.0f;
+    /* a phone has no room for a reading pane beside or under the list */
+    /* and keeps its tabs in a bar on top, the sidebar being hidden behind what is open */
+    if (plat_touch()) app->prefs.reader_pos = 2, app->prefs.tabs_side = 0;
     app->grouped = app->prefs.conversations;
     app->side_w = (float)app->prefs.sidebar_width;
     app->list_w = (float)app->prefs.list_width;
@@ -247,7 +251,7 @@ static void preview_draw(jd_app *app, Rectangle r)
 /* the pane with the keys is framed in the accent colour */
 static void focus_line(jd_app *app, int pane, Rectangle r)
 {
-    if (app->tab == 0 && app->pane == pane) DrawRectangleLinesEx(r, 2, JD_NORD8);
+    if (app->tab == 0 && app->pane == pane && !plat_touch()) DrawRectangleLinesEx(r, 2, JD_NORD8);
 }
 
 /* the list and the reading pane, right of the sidebar */
@@ -320,12 +324,16 @@ static void footer(jd_app *app, float sw, float sh)
     static const char *names[] = {"NORMAL", "VISUAL", "INSERT"};
     Color colors[] = {JD_NORD10, (Color){0xb4, 0x8e, 0xad, 0xff}, (Color){0x8f, 0xa8, 0x76, 0xff}};
     jd_mode m = current_mode(app);
-    float mw = jd_text_width(ui, names[m], 12, 1) + 20;
-    DrawRectangleV((Vector2){0, y}, (Vector2){mw, BAR_H}, colors[m]);
-    jd_text(ui, names[m], 10, y + 8, 12, (Color){0xff, 0xff, 0xff, 0xff}, 1);
-    float x = mw + 12;
+    float x = 12;
+    /* the mode and the pane with the keys mean nothing on a touch screen */
+    if (!plat_touch()) {
+        float mw = jd_text_width(ui, names[m], 12, 1) + 20;
+        DrawRectangleV((Vector2){0, y}, (Vector2){mw, BAR_H}, colors[m]);
+        jd_text(ui, names[m], 10, y + 8, 12, (Color){0xff, 0xff, 0xff, 0xff}, 1);
+        x = mw + 12;
+    }
     /* which pane has the keys, beside the mode */
-    if (app->tab == 0) {
+    if (app->tab == 0 && !plat_touch()) {
         static const char *panes[] = {"Folders", "List", "Reader"};
         const char *pane = panes[app->pane % 3];
         jd_text(ui, pane, x, y + 7, 13, JD_NORD8, 1);
@@ -398,15 +406,51 @@ void mail_frame(jd_app *app)
     float side = app->prefs.sidebar_rail ? 60 : (app->side_w ? app->side_w : 230);
     float body_h = sh - top - BAR_H;
     SetMouseCursor(MOUSE_CURSOR_DEFAULT);
-    sidebar_draw(app, (Rectangle){0, top, side, body_h});
+    /* On a phone the full sidebar is a drawer over the page, which is too narrow to share: the page is not drawn
+       behind it (so it takes no taps), and a tap on the dimmed rest closes it, as choosing a folder does. */
+    if (plat_touch() && !app->prefs.sidebar_rail && app->tabs[app->tab].kind == TAB_MAIL) {
+        float dw = sw * 0.8f < 300 ? sw * 0.8f : 300;
+        Rectangle rest = {dw, top, sw - dw, body_h};
+        DrawRectangleRec(rest, ColorAlpha(BLACK, 0.45f));
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), rest)) {
+            app->prefs.sidebar_rail = 1;
+            save_prefs(app);
+        }
+        sidebar_draw(app, (Rectangle){0, top, dw, body_h});
+        footer(app, sw, sh);
+        jd_tooltip_draw(&app->ui);
+        menu_draw(app);
+        dialog_draw(app);
+        return;
+    }
+    /* a phone gives what is open (a message, compose, settings) the whole width; the folders are the list's */
+    int bare = plat_touch() && app->tabs[app->tab].kind != TAB_MAIL;
+    if (bare) side = 0;
+    else sidebar_draw(app, (Rectangle){0, top, side, body_h});
     focus_line(app, PANE_FOLDERS, (Rectangle){0, top, side, body_h});
     float bx = side;
-    if (!app->prefs.sidebar_rail) {
+    if (!app->prefs.sidebar_rail && !bare) {
         app->side_w = splitter(app, 1, (Rectangle){side, top, SPLIT, body_h}, 1, 0, side, 170, sw * 0.4f);
         bx = side + SPLIT;
     }
     Rectangle page = {bx, top, sw - bx, body_h};
     jd_tab *t = &app->tabs[app->tab];
+    /* a phone has no Esc to close what is open: a back bar does it, to the folder it came from */
+    if (plat_touch() && (t->kind == TAB_CONV || t->kind == TAB_COMPOSE || t->kind == TAB_FILTERS)) {
+        Rectangle back = {page.x, page.y, page.width, 44};
+        int hover = CheckCollisionPointRec(GetMousePosition(), back) && !app->dialog.kind && !app->menu.open;
+        DrawRectangleRec(back, hover ? JD_NORD2 : JD_NORD1);
+        jd_icon("chevron-left", back.x + 14, back.y + 14, 16, JD_NORD8);
+        const char *to = app->nfolders ? folder_label(&app->folders[app->folder]) : "Back";
+        jd_text(&app->ui, to, back.x + 38, back.y + 14, 15, JD_NORD8, 1);
+        page.y += 44, page.height -= 44;
+        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            /* the page under the bar is not drawn this frame: the tap would land on it (the search box) too */
+            tab_close(app, app->tab);
+            footer(app, sw, sh);
+            return;
+        }
+    }
     if (t->kind == TAB_MAIL) mail_draw(app, page);
     else if (t->kind == TAB_CONV) conv_draw(app, &t->conv, page, 1);
     else if (t->kind == TAB_FILTERS) filters_draw(app, page);

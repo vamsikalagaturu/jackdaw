@@ -7,6 +7,7 @@ typedef struct {
     jd_fonts fonts;
     jd_fonts list, reader, mono;
     const jd_fonts *active;
+    int touch; /* a touch screen: menus leave out keyboard shortcuts */
 } jd_ui;
 
 void jd_ui_use(jd_ui *ui, const jd_fonts *role);

@@ -19,10 +19,19 @@ void jd_theme_set(int light)
 
 static Camera2D camera;
 
+/* screen pixels the system covers at the top (status bar, camera cutout) and bottom (navigation, soft keyboard) */
+static float inset_top, inset_bottom;
+
+void jd_set_insets(float top, float bottom)
+{
+    inset_top = top, inset_bottom = bottom;
+}
+
 void jd_scale_begin(void)
 {
-    camera = (Camera2D){.zoom = jd_scale};
+    camera = (Camera2D){.zoom = jd_scale, .offset = {0, inset_top}};
     SetMouseScale(1 / jd_scale, 1 / jd_scale);
+    SetMouseOffset(0, (int)-inset_top);
     BeginMode2D(camera);
 }
 
@@ -38,7 +47,7 @@ float jd_screen_w(void)
 
 float jd_screen_h(void)
 {
-    return (float)GetScreenHeight() / jd_scale;
+    return ((float)GetScreenHeight() - inset_top - inset_bottom) / jd_scale;
 }
 
 /* raylib's scissor does not nest: a stack of logical rectangles, each cut to the one around it */
@@ -47,7 +56,7 @@ static int nclips;
 
 static void apply(Rectangle c)
 {
-    BeginScissorMode((int)(c.x * jd_scale), (int)(c.y * jd_scale), (int)(c.width * jd_scale + 0.5f),
+    BeginScissorMode((int)(c.x * jd_scale), (int)(c.y * jd_scale + inset_top), (int)(c.width * jd_scale + 0.5f),
                      (int)(c.height * jd_scale + 0.5f));
 }
 

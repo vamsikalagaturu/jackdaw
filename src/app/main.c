@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "app.h"
 #include "core/util.h"
@@ -129,14 +130,23 @@ int main(int argc, char **argv)
         puts("jackdaw " JD_VERSION);
         return 0;
     }
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
+    plat_init();
+    /* a phone's GPU (and the emulator's) may offer no multisampled surface: asking for one leaves no window */
+    if (!plat_touch()) SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
     SetTraceLogLevel(LOG_WARNING);
-    InitWindow(1100, 720, "jackdaw");
+    /* a phone's window is its whole screen */
+    if (plat_touch()) InitWindow(0, 0, "jackdaw");
+    else InitWindow(1100, 720, "jackdaw");
     SetExitKey(KEY_NULL);
+    plat_window_ready();
     jd_app app = {.grouped = 1, .pane = PANE_LIST};
+    app.ui.touch = plat_touch();
 
     char err[512];
+    int first_run = access(jd_settings_path(), F_OK) != 0;
     jd_prefs_load(&app.prefs);
+    /* a phone starts with the room a phone has: icons for the folders, messages opening on their own */
+    if (plat_touch() && first_run) app.prefs.reader_pos = 2, app.prefs.sidebar_rail = 1;
     tab_add(&app, TAB_MAIL);
     apply_prefs(&app);
     app.have_account = jd_account_load(&app.account, err, sizeof err) == 0;
@@ -145,6 +155,7 @@ int main(int argc, char **argv)
     else form_open(&app, NULL);
 
     while (!WindowShouldClose()) {
+        plat_frame(current_mode(&app) == MODE_INSERT);
         handle_events(&app);
         char *url;
         int ok;

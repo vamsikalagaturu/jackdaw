@@ -30,6 +30,15 @@ SQLITE_VERSION=3540100
 SQLITE_URL=https://sqlite.org/2026/sqlite-autoconf-$SQLITE_VERSION.tar.gz
 SQLITE_SHA256=926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e
 
+# Android only (Linux links the system's): OpenSSL for libetpan and libcurl (3.5 is the LTS line, to April 2030),
+# and libcurl for remote images in mail
+OPENSSL_VERSION=3.5.9
+OPENSSL_URL=https://github.com/openssl/openssl/releases/download/openssl-$OPENSSL_VERSION/openssl-$OPENSSL_VERSION.tar.gz
+OPENSSL_SHA256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
+CURL_VERSION=8.23.0
+CURL_URL=https://curl.se/download/curl-$CURL_VERSION.tar.xz
+CURL_SHA256=8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5
+
 # download $1 to $2 once and check it against SHA-256 $3
 fetch() {
     [ -f "$2" ] || { curl -fL -o "$2.part" "$1" && mv "$2.part" "$2"; }
@@ -44,6 +53,15 @@ fetch_unpacked() {
     fetch "$1" "$4/thirdparty/$3.tar.gz" "$2"
     mkdir -p "$4/thirdparty/$3.part"
     tar -xzf "$4/thirdparty/$3.tar.gz" -C "$4/thirdparty/$3.part" --strip-components=1
+    mv "$4/thirdparty/$3.part" "$4/thirdparty/$3"
+}
+
+# tarball $1 (SHA-256 $2, .tar.xz) unpacked as thirdparty/$3 ($4 = repo root)
+fetch_unpacked_xz() {
+    [ -d "$4/thirdparty/$3" ] && return 0
+    fetch "$1" "$4/thirdparty/$3.tar.xz" "$2"
+    mkdir -p "$4/thirdparty/$3.part"
+    tar -xJf "$4/thirdparty/$3.tar.xz" -C "$4/thirdparty/$3.part" --strip-components=1
     mv "$4/thirdparty/$3.part" "$4/thirdparty/$3"
 }
 

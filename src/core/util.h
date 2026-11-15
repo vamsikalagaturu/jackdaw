@@ -6,6 +6,8 @@
 void *jd_alloc(size_t n);
 void *jd_realloc(void *p, size_t n);
 char *jd_strdup(const char *s);
+/* zeroes n bytes in a way the compiler keeps (explicit_bzero, which Android's libc lacks) */
+void jd_wipe(void *p, size_t n);
 char *jd_strndup(const char *s, size_t n);
 char *jd_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 int jd_streq(const char *a, const char *b);

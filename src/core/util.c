@@ -25,6 +25,12 @@ void *jd_realloc(void *p, size_t n)
     return p;
 }
 
+void jd_wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = p;
+    while (n--) *v++ = 0;
+}
+
 char *jd_strdup(const char *s)
 {
     return s ? jd_strndup(s, strlen(s)) : NULL;

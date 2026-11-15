@@ -7,6 +7,7 @@
 
 #include "app.h"
 #include "core/util.h"
+#include "platform.h"
 #include "ui/icons.h"
 
 const char *folder_label(const jd_folder_row *f)
@@ -63,8 +64,17 @@ static void toggle_collapsed(jd_app *app, int i)
     jd_folder_set_collapsed(app->view, f->id, f->collapsed);
 }
 
+/* on a phone the full sidebar is a drawer (mail_frame): whatever is chosen in it closes it */
+static void drawer_done(jd_app *app)
+{
+    if (!plat_touch() || app->prefs.sidebar_rail) return;
+    app->prefs.sidebar_rail = 1;
+    save_prefs(app);
+}
+
 static void select_folder(jd_app *app, int i)
 {
+    drawer_done(app);
     app->tab = 0;
     if (i == app->folder) return;
     app->folder = i;
@@ -181,21 +191,23 @@ static void rail_draw(jd_app *app, Rectangle r)
     const char *tip = NULL;
     Vector2 tip_at = {0};
     float cx = r.x + (r.width - 40) / 2;
-    Rectangle mark = {cx, r.y + 8, 40, 36};
-    jd_icon("bird", cx + 9, r.y + 15, 22, JD_NORD8);
+    /* in line with the list's header: the mark with the search field (the panel starts at its top), the toggle
+       with the folder's name, the pencil with the filter chips (list_draw) */
+    Rectangle mark = {cx, r.y + 14, 40, 34};
+    jd_icon("bird", cx + 9, r.y + 20, 22, JD_NORD8);
     if (CheckCollisionPointRec(GetMousePosition(), mark))
         tip = "jackdaw " JD_VERSION ", built " JD_BUILD_DATE, tip_at = (Vector2){mark.x + 46, mark.y + 6};
-    if (icon_button(app, "panel-left-open", (Rectangle){cx, r.y + 50, 40, 36}, "Show the sidebar (Ctrl+B)", JD_NORD4, &tip, &tip_at)) {
+    if (icon_button(app, "panel-left-open", (Rectangle){cx, r.y + 49, 40, 36}, "Show the sidebar (Ctrl+B)", JD_NORD4, &tip, &tip_at)) {
         app->prefs.sidebar_rail = 0;
         save_prefs(app);
     }
-    Rectangle write = {cx, r.y + 94, 40, 40};
+    Rectangle write = {cx, r.y + 85, 40, 36};
     int hover_write = CheckCollisionPointRec(GetMousePosition(), write) && !app->dialog.kind && !app->menu.open;
     DrawRectangleRounded(write, 0.3f, 6, hover_write ? ColorBrightness(JD_NORD10, 0.12f) : JD_NORD10);
-    jd_icon("pencil", write.x + 11, write.y + 11, 18, JD_ON_ACCENT);
-    if (hover_write) tip = "New message (Ctrl+N)", tip_at = (Vector2){write.x + 46, write.y + 8};
+    jd_icon("pencil", write.x + 11, write.y + 9, 18, JD_ON_ACCENT);
+    if (hover_write) tip = "New message (Ctrl+N)", tip_at = (Vector2){write.x + 46, write.y + 6};
     if (hover_write && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) compose_open(app, COMPOSE_NEW, 0);
-    float y = r.y + 144;
+    float y = r.y + 134;
     if (app->prefs.tabs_side && app->ntabs > 1) y = tab_rows(app, r, y, 1);
     float bottom = r.y + r.height - 50;
     for (int i = 0; i < app->nfolders && y < bottom - 40; i++) {
@@ -227,11 +239,16 @@ void sidebar_draw(jd_app *app, Rectangle r)
     jd_ui *ui = &app->ui;
     const float row = 30;
     int free_input = !app->dialog.kind && !app->menu.open;
-    DrawRectangleRec(r, JD_NORD1);
     if (app->prefs.sidebar_rail) {
+        /* the rail's panel starts level with the list's search field, its top corner rounded */
+        Rectangle panel = {r.x, r.y + 14, r.width, r.height - 14};
+        DrawRectangleRounded((Rectangle){panel.x, panel.y, panel.width, 40}, 0.3f, 6, JD_NORD1);
+        DrawRectangleRec((Rectangle){panel.x, panel.y + 12, panel.width, panel.height - 12}, JD_NORD1);
+        DrawRectangleRec((Rectangle){panel.x, panel.y, 12, 12}, JD_NORD1);
         rail_draw(app, r);
         return;
     }
+    DrawRectangleRec(r, JD_NORD1);
     /* the app's name and mark, then the account */
     jd_icon("bird", r.x + 16, r.y + 16, 22, JD_NORD8);
     jd_text(ui, "jackdaw", r.x + 46, r.y + 17, 18, JD_NORD6, 1);
@@ -256,7 +273,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
     DrawRectangleRounded(write, 0.3f, 6, hover_write ? ColorBrightness(JD_NORD10, 0.12f) : JD_NORD10);
     jd_icon("pencil", write.x + 14, write.y + 11, 16, JD_ON_ACCENT);
     jd_text(ui, "New message", write.x + 40, write.y + 11, 14, JD_ON_ACCENT, 1);
-    if (hover_write && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) compose_open(app, COMPOSE_NEW, 0);
+    if (hover_write && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) drawer_done(app), compose_open(app, COMPOSE_NEW, 0);
 
     float y = r.y + 154, bottom = r.y + r.height - 82;
     if (app->prefs.tabs_side && app->ntabs > 1) y = tab_rows(app, r, y, 0);
@@ -267,7 +284,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
         int hover = CheckCollisionPointRec(GetMousePosition(), box) && free_input;
         if (i == app->folder && app->tab == 0) {
             DrawRectangleRounded(box, 0.25f, 6, JD_NORD2);
-            if (app->pane == PANE_FOLDERS) DrawRectangleRoundedLinesEx(box, 0.25f, 6, 1.5f, JD_NORD8);
+            if (app->pane == PANE_FOLDERS && !plat_touch()) DrawRectangleRoundedLinesEx(box, 0.25f, 6, 1.5f, JD_NORD8);
         }
         else if (hover) DrawRectangleRounded(box, 0.25f, 6, ColorAlpha(JD_NORD2, 0.5f));
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
@@ -309,6 +326,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
         jd_icon(foot[k].icon, fx + 10, bottom + 16, 16, hover ? JD_NORD8 : JD_NORD4);
         jd_text(ui, foot[k].label, fx + 32, bottom + 17, 13, JD_NORD4, 0);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            drawer_done(app);
             if (k == 0) settings_open(app);
             else app->help = 1;
         }

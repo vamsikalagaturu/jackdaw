@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "core/util.h"
+#include "mail/imap.h"
 
 typedef struct {
     int fd;
@@ -176,7 +177,7 @@ static int open_conn(conn *c, const jd_account *a, const char *password, char *e
     if (send_all(c, "STARTTLS\r\n", 10) != 0 || response(c, NULL, NULL, err, errlen) != 0) return -1;
     c->ctx = SSL_CTX_new(TLS_client_method());
     SSL_CTX_set_verify(c->ctx, SSL_VERIFY_PEER, NULL);
-    SSL_CTX_set_default_verify_paths(c->ctx);
+    jd_tls_trust(c->ctx);
     SSL_CTX_set_min_proto_version(c->ctx, TLS1_2_VERSION);
     c->ssl = SSL_new(c->ctx);
     SSL_set_fd(c->ssl, c->fd);
@@ -207,10 +208,10 @@ static int open_conn(conn *c, const jd_account *a, const char *password, char *e
         jd_buf_add(&cmd, q, 4);
     }
     jd_buf_adds(&cmd, "\"\r\n");
-    explicit_bzero(plain.s, plain.len);
+    jd_wipe(plain.s, plain.len);
     jd_buf_free(&plain);
     int r = send_all(c, cmd.s, cmd.len) == 0 ? response(c, NULL, NULL, err, errlen) : -1;
-    explicit_bzero(cmd.s, cmd.len);
+    jd_wipe(cmd.s, cmd.len);
     jd_buf_free(&cmd);
     if (r != 0) {
         char why[256];

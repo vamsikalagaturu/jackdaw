@@ -8,10 +8,23 @@
 #include "ui/icons.h"
 
 enum { S_ACCOUNT, S_APPEARANCE, S_FONTS, S_LAYOUT, S_READING, S_COMPOSE, S_NOTIFY, S_SYNC, S_RULES, S_FILTERS, S_KEYS, S_COUNT };
-enum { FOCUS_NONE = -1, FOCUS_SIG_NEW = 100, FOCUS_SIG_REPLY, FOCUS_RULE_MATCH, FOCUS_RULE_ACTION, FOCUS_FONT, FOCUS_KEYS };
+enum { FOCUS_NONE = -1, FOCUS_SIG_NEW = 100, FOCUS_SIG_REPLY, FOCUS_RULE_MATCH, FOCUS_FONT, FOCUS_KEYS };
 
 /* what the Keyboard section is narrowed to */
 static jd_field keys_filter;
+
+/* the new rule: its match (a query, as in search), what it does (actions[]) and the folder of a move or copy */
+static jd_qfield rule_match;
+static int rule_act;
+static char rule_folder[256];
+static const struct {
+    const char *label, *icon, *action;
+} actions[] = {{"Mark read", "mail-open", "read"}, {"Flag", "star", "flag"}, {"Delete", "trash-2", "delete"},
+               {"Move to", "folder-input", "move:"}, {"Copy to", "copy", "copy:"}};
+
+/* A phone's width (narrow): the list of sections, then the section chosen from it (narrow_detail; Back returns
+   to the list), each control under its explanation (label()) */
+static int narrow, narrow_detail;
 
 static const struct {
     const char *label, *icon;
@@ -37,12 +50,11 @@ void settings_open(jd_app *app)
     form_fill(app);
     jd_editor_set(&app->sig_new, app->prefs.signature_new);
     jd_editor_set(&app->sig_reply, app->prefs.signature_reply);
-    jd_field_set(&app->rule_match, NULL);
-    jd_field_set(&app->rule_action, "move:");
-    app->rule_match.placeholder = "from:news.example subject:digest";
-    app->rule_action.placeholder = "read, flag, delete, move:<folder>, copy:<folder>";
+    qfield_clear(&rule_match);
+    rule_act = 3, rule_folder[0] = 0;
     app->settings_focus = FOCUS_NONE;
     app->settings_scroll = 0;
+    narrow_detail = 0;
 }
 
 static void changed(jd_app *app)
@@ -64,11 +76,19 @@ static void save_signatures(jd_app *app)
 
 static void add_rule(jd_app *app)
 {
-    if (!app->rule_match.len || !app->rule_action.len) return;
-    jd_prefs_add_rule(&app->prefs, app->rule_match.text, app->rule_action.text);
+    char *match = qfield_query(&rule_match);
+    int folder = rule_act >= 3;
+    if (!match || (folder && !rule_folder[0])) {
+        notify_user(app, !match ? "Type what the rule matches first." : "Choose the folder to %s to.",
+                    rule_act == 3 ? "move" : "copy");
+        free(match);
+        return;
+    }
+    char *action = jd_printf("%s%s", actions[rule_act].action, folder ? rule_folder : "");
+    jd_prefs_add_rule(&app->prefs, match, action);
     save_prefs(app);
-    jd_field_set(&app->rule_match, NULL);
-    jd_field_set(&app->rule_action, "move:");
+    free(match), free(action);
+    qfield_clear(&rule_match);
 }
 
 void settings_keys(jd_app *app)
@@ -78,6 +98,7 @@ void settings_keys(jd_app *app)
     if (IsKeyPressed(KEY_ESCAPE)) {
         if (f == FOCUS_FONT) font_open = -1;
         if (f != FOCUS_NONE) app->settings_focus = FOCUS_NONE;
+        else if (narrow && narrow_detail) narrow_detail = 0;
         else tab_close(app, app->tab);
         return;
     }
@@ -102,10 +123,8 @@ void settings_keys(jd_app *app)
     } else if (f == FOCUS_SIG_NEW || f == FOCUS_SIG_REPLY) {
         if (ctrl && IsKeyPressed(KEY_S)) save_signatures(app);
         else jd_editor_input(&app->ui, f == FOCUS_SIG_NEW ? &app->sig_new : &app->sig_reply);
-    } else if (f == FOCUS_RULE_MATCH || f == FOCUS_RULE_ACTION) {
-        if (IsKeyPressed(KEY_TAB)) app->settings_focus = f == FOCUS_RULE_MATCH ? FOCUS_RULE_ACTION : FOCUS_RULE_MATCH;
-        else if (IsKeyPressed(KEY_ENTER)) add_rule(app);
-        else jd_field_input(f == FOCUS_RULE_MATCH ? &app->rule_match : &app->rule_action);
+    } else if (f == FOCUS_RULE_MATCH) {
+        if (qfield_keys(app, &rule_match)) add_rule(app);
     }
 }
 
@@ -119,33 +138,64 @@ static void reach(float y)
 
 /* the height of the row label() drew last: taller when its explanation wraps */
 static float row_h = 56;
+static float narrow_w;
 
-/* a setting's name and explanation in a column on the left of a row, the explanation wrapped to the column;
-   returns the x where its control goes */
-static float label(jd_app *app, float x, float y, const char *name, const char *hint)
+/* A setting's name and explanation in a column on the left of a row, the explanation wrapped to the column;
+   returns the x where its control goes. When narrow the text takes the width and *y moves below it, so the
+   control lands under it. */
+static float label(jd_app *app, float x, float *y, const char *name, const char *hint)
 {
-    const float column = 340;
-    jd_text_fit(&app->ui, name, x, y + 4, column, 15, JD_NORD6, 1);
+    const float column = narrow ? narrow_w : 340;
+    jd_text_fit(&app->ui, name, x, *y + 4, column, 15, JD_NORD6, 1);
     row_h = 56;
+    int n = 0;
     if (hint) {
-        int n;
         int *starts = jd_wrap(&app->ui, hint, column, 13, &n);
         for (int i = 0; i < n; i++)
-            jd_text_range(&app->ui, hint, starts[i], i + 1 < n ? starts[i + 1] : (int)strlen(hint), x, y + 26 + (float)i * 18,
+            jd_text_range(&app->ui, hint, starts[i], i + 1 < n ? starts[i + 1] : (int)strlen(hint), x, *y + 26 + (float)i * 18,
                           13, JD_MUTED, 0);
         free(starts);
         if (n > 1) row_h = 26 + (float)n * 18 + 12;
     }
-    reach(y + row_h);
+    if (narrow) {
+        *y += 26 + (float)n * 18 + 4;
+        row_h = 50;
+        reach(*y + row_h);
+        return x;
+    }
+    reach(*y + row_h);
     return x + column + 20;
 }
 
+/* text wrapped to w from y; returns the y below it */
+static float para(jd_app *app, const char *text, float x, float y, float w, float size, Color c)
+{
+    int n;
+    int *starts = jd_wrap(&app->ui, text, w, size, &n);
+    for (int i = 0; i < n; i++)
+        jd_text_range(&app->ui, text, starts[i], i + 1 < n ? starts[i + 1] : (int)strlen(text), x, y + (float)i * (size + 6),
+                      size, c, 0);
+    free(starts);
+    return y + (float)n * (size + 6);
+}
+
+/* a section's title, and its explanation wrapped to the section's width */
 static float heading(jd_app *app, float x, float y, const char *title, const char *sub)
 {
     jd_text(&app->ui, title, x, y, 22, JD_NORD6, 1);
-    if (sub) jd_text(&app->ui, sub, x, y + 34, 14, JD_MUTED, 0);
-    reach(y + 76);
-    return y + (sub ? 76 : 50);
+    if (!sub) {
+        reach(y + 50);
+        return y + 50;
+    }
+    int n;
+    int *starts = jd_wrap(&app->ui, sub, narrow_w, 14, &n);
+    for (int i = 0; i < n; i++)
+        jd_text_range(&app->ui, sub, starts[i], i + 1 < n ? starts[i + 1] : (int)strlen(sub), x, y + 34 + (float)i * 20, 14,
+                      JD_MUTED, 0);
+    free(starts);
+    float end = y + 34 + (float)n * 20 + 22;
+    reach(end);
+    return end;
 }
 
 static float divider(float x, float y, float w)
@@ -189,25 +239,25 @@ static void appearance(jd_app *app, float x, float y, float w)
     jd_prefs *p = &app->prefs;
     y = heading(app, x, y, "Appearance", NULL);
     static const char *const themes[] = {"Dark", "Light"};
-    float cx = label(app, x, y, "Theme", "Nord Polar Night or Snow Storm");
+    float cx = label(app, x, &y, "Theme", "Nord Polar Night or Snow Storm");
     int t = jd_segmented(&app->ui, cx, y + 6, themes, 2, p->light);
     if (t != p->light) p->light = t, changed(app);
     y = divider(x, y + row_h, w);
-    cx = label(app, x, y, "Interface size", "Text and controls, 50 to 200 percent");
+    cx = label(app, x, &y, "Interface size", "Text and controls, 50 to 200 percent");
     if (stepper(app, cx, y + 6, &p->scale, 10, 50, 200, "%")) changed(app);
     y = divider(x, y + row_h, w);
-    cx = label(app, x, y, "Message list text", "Sender and subject in the list, on top of the interface size");
+    cx = label(app, x, &y, "Message list text", "Sender and subject in the list, on top of the interface size");
     if (stepper(app, cx, y + 6, &p->list_text, 1, 8, 40, " px")) changed(app);
     y = divider(x, y + row_h, w);
-    cx = label(app, x, y, "Message text", "The mail being read; HTML mail that sets its own sizes keeps them");
+    cx = label(app, x, &y, "Message text", "The mail being read; HTML mail that sets its own sizes keeps them");
     if (stepper(app, cx, y + 6, &p->reader_text, 1, 8, 40, " px")) changed(app);
     y = divider(x, y + row_h, w);
     static const char *const densities[] = {"Comfortable", "Compact"};
-    cx = label(app, x, y, "Message list", "Compact fits one line per message");
+    cx = label(app, x, &y, "Message list", "Compact fits one line per message");
     int d = jd_segmented(&app->ui, cx, y + 6, densities, 2, p->compact);
     if (d != p->compact) p->compact = d, changed(app);
     y = divider(x, y + row_h, w);
-    cx = label(app, x, y, "Preview text", "The first words of each message under its subject");
+    cx = label(app, x, &y, "Preview text", "The first words of each message under its subject");
     if (jd_switch(&app->ui, cx, y + 10, p->snippets)) p->snippets = !p->snippets, changed(app);
 }
 
@@ -251,7 +301,7 @@ static float font_row(jd_app *app, float x, float y, float w, int role, const ch
     jd_ui *ui = &app->ui;
     static const char *defaults[] = {"Inter (built in)", "Inter (built in)", "Inter (built in)", "DejaVu Sans Mono"};
     const char *now = *font_pref(&app->prefs, role);
-    float cx = label(app, x, y, name, hint);
+    float cx = label(app, x, &y, name, hint);
     Rectangle b = {cx, y + 4, w - (cx - x) > 360 ? 360 : w - (cx - x), 34};
     int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind;
     DrawRectangleRounded(b, 0.2f, 6, hover || font_open == role ? JD_NORD2 : JD_NORD1);
@@ -311,7 +361,7 @@ static void fonts(jd_app *app, float x, float y, float w)
     y = divider(x, font_row(app, x, y, w, 1, "Message list", "Senders, subjects and previews"), w);
     y = divider(x, font_row(app, x, y, w, 2, "Message text", "Plain-text mail, and HTML mail that names no font"), w);
     y = divider(x, font_row(app, x, y, w, 3, "Monospace", "Plain-text mail when the switch below is on"), w);
-    float cx = label(app, x, y, "Plain-text mail in monospace", "Keeps tables and ASCII art drawn in fixed width aligned");
+    float cx = label(app, x, &y, "Plain-text mail in monospace", "Keeps tables and ASCII art drawn in fixed width aligned");
     if (jd_switch(&app->ui, cx, y + 10, p->mono_plain)) p->mono_plain = !p->mono_plain, changed(app);
 }
 
@@ -320,32 +370,39 @@ static void layout(jd_app *app, float x, float y, float w)
     jd_prefs *p = &app->prefs;
     y = heading(app, x, y, "Layout", NULL);
     static const char *const panes[] = {"Right", "Bottom", "Off"};
-    float cx = label(app, x, y, "Reading pane", "Where the open message shows (p); off opens messages in tabs");
-    int r = jd_segmented(&app->ui, cx, y + 6, panes, 3, p->reader_pos);
-    if (r != p->reader_pos) {
-        p->reader_pos = r;
-        if (r == 2) reader_close(app);
-        changed(app);
+    float cx;
+    /* on a phone messages always open on their own */
+    if (!plat_touch()) {
+        cx = label(app, x, &y, "Reading pane", "Where the open message shows (p); off opens messages in tabs");
+        int r = jd_segmented(&app->ui, cx, y + 6, panes, 3, p->reader_pos);
+        if (r != p->reader_pos) {
+            p->reader_pos = r;
+            if (r == 2) reader_close(app);
+            changed(app);
+        }
+        y = divider(x, y + row_h, w);
     }
-    y = divider(x, y + row_h, w);
     static const char *const sides[] = {"Full", "Icons only"};
-    cx = label(app, x, y, "Sidebar", "Icons only keeps folders one click away (Ctrl+B)");
+    cx = label(app, x, &y, "Sidebar", "Icons only keeps folders one click away (Ctrl+B)");
     int sr = jd_segmented(&app->ui, cx, y + 6, sides, 2, p->sidebar_rail);
     if (sr != p->sidebar_rail) p->sidebar_rail = sr, changed(app);
     y = divider(x, y + row_h, w);
-    static const char *const tabs[] = {"Top", "Sidebar"};
-    cx = label(app, x, y, "Tabs", "Above the content (shown when more than one is open), or listed in the sidebar");
-    int tr = jd_segmented(&app->ui, cx, y + 6, tabs, 2, p->tabs_side);
-    if (tr != p->tabs_side) p->tabs_side = tr, changed(app);
-    y = divider(x, y + row_h, w);
-    cx = label(app, x, y, "Group conversations", "Replies join the message they answer, across folders (t)");
+    /* a phone keeps its tabs on top */
+    if (!plat_touch()) {
+        static const char *const tabs[] = {"Top", "Sidebar"};
+        cx = label(app, x, &y, "Tabs", "Above the content (shown when more than one is open), or listed in the sidebar");
+        int tr = jd_segmented(&app->ui, cx, y + 6, tabs, 2, p->tabs_side);
+        if (tr != p->tabs_side) p->tabs_side = tr, changed(app);
+        y = divider(x, y + row_h, w);
+    }
+    cx = label(app, x, &y, "Group conversations", "Replies join the message they answer, across folders (t)");
     if (jd_switch(&app->ui, cx, y + 10, p->conversations)) {
         p->conversations = !p->conversations;
         changed(app);
         reader_close(app);
     }
     y = divider(x, y + row_h, w);
-    cx = label(app, x, y, "Pane sizes", "Drag the edges between panes; this resets them");
+    cx = label(app, x, &y, "Pane sizes", "Drag the edges between panes; this resets them");
     if (jd_button(&app->ui, "Reset", (Rectangle){cx, y + 4, 100, 32}, 0)) {
         p->sidebar_width = p->list_width = p->list_height = 0;
         changed(app);
@@ -357,15 +414,15 @@ static void reading(jd_app *app, float x, float y, float w)
     jd_prefs *p = &app->prefs;
     y = heading(app, x, y, "Reading", NULL);
     static const char *const formats[] = {"HTML", "Plain text"};
-    float cx = label(app, x, y, "Show mail as", "HTML when the sender wrote it, or always plain (Shift+P switches)");
+    float cx = label(app, x, &y, "Show mail as", "HTML when the sender wrote it, or always plain (Shift+P switches)");
     int f = jd_segmented(&app->ui, cx, y + 6, formats, 2, p->prefer_plain);
     if (f != p->prefer_plain) p->prefer_plain = f, changed(app);
     y = divider(x, y + row_h, w);
-    cx = label(app, x, y, "Mark as read when opened", "Otherwise only u marks it read");
+    cx = label(app, x, &y, "Mark as read when opened", "Otherwise only u marks it read");
     if (jd_switch(&app->ui, cx, y + 10, p->mark_read)) p->mark_read = !p->mark_read, changed(app);
     y = divider(x, y + row_h, w);
     static const char *const remote[] = {"Ask", "Always load"};
-    cx = label(app, x, y, "Remote images", "Loading them tells the sender when you read, and your IP address");
+    cx = label(app, x, &y, "Remote images", "Loading them tells the sender when you read, and your IP address");
     int ri = jd_segmented(&app->ui, cx, y + 6, remote, 2, p->remote_images);
     if (ri != p->remote_images) p->remote_images = ri, changed(app);
     y = divider(x, y + row_h, w);
@@ -390,7 +447,7 @@ static void reading(jd_app *app, float x, float y, float w)
         }
     }
     free(copy);
-    if (!any) jd_text(&app->ui, "None yet: \"Always from this sender\" on a message adds one.", x, y, 13, JD_MUTED, 0);
+    if (!any) y = para(app, "None yet: \"Always from this sender\" on a message adds one.", x, y, w, 13, JD_MUTED);
     reach(y + 40);
 }
 
@@ -399,14 +456,13 @@ static void compose(jd_app *app, float x, float y, float w)
     jd_ui *ui = &app->ui;
     jd_prefs *p = &app->prefs;
     y = heading(app, x, y, "Compose", NULL);
-    float cx = label(app, x, y, "Format with Markdown", "**bold**, *italic*, lists, links and > quotes also go out as HTML");
+    float cx = label(app, x, &y, "Format with Markdown", "**bold**, *italic*, lists, links and > quotes also go out as HTML");
     if (jd_switch(ui, cx, y + 10, p->markdown)) p->markdown = !p->markdown, changed(app);
     y = divider(x, y + row_h, w);
-    cx = label(app, x, y, "List attachments in the message", "A numbered \"[1] name\" list below what you write");
+    cx = label(app, x, &y, "List attachments in the message", "A numbered \"[1] name\" list below what you write");
     if (jd_switch(ui, cx, y + 10, p->attachment_list)) p->attachment_list = !p->attachment_list, changed(app);
     y = divider(x, y + row_h, w);
-    jd_text(ui, "Signatures go below what you write, after a \"-- \" line (RFC 3676).", x, y, 14, JD_MUTED, 0);
-    y += 34;
+    y = para(app, "Signatures go below what you write, after a \"-- \" line (RFC 3676).", x, y, w, 14, JD_MUTED) + 14;
     float fw = w > 640 ? 640 : w;
     jd_text(ui, "New messages", x, y, 15, JD_NORD6, 1);
     if (jd_editor_draw(ui, &app->sig_new, (Rectangle){x, y + 24, fw, 110}, app->settings_focus == FOCUS_SIG_NEW))
@@ -425,10 +481,10 @@ static void notifications(jd_app *app, float x, float y, float w)
 {
     jd_prefs *p = &app->prefs;
     y = heading(app, x, y, "Notifications", NULL);
-    float cx = label(app, x, y, "Desktop notifications", "For new unread mail in the Inbox, after rules ran");
+    float cx = label(app, x, &y, "Desktop notifications", "For new unread mail in the Inbox, after rules ran");
     if (jd_switch(&app->ui, cx, y + 10, p->notify)) p->notify = !p->notify, changed(app);
     y = divider(x, y + row_h, w);
-    cx = label(app, x, y, "Also while jackdaw is in front", "Off: only when another window has the focus");
+    cx = label(app, x, &y, "Also while jackdaw is in front", "Off: only when another window has the focus");
     if (jd_switch(&app->ui, cx, y + 10, p->notify_focused)) p->notify_focused = !p->notify_focused, changed(app);
     y = divider(x, y + row_h, w);
     if (jd_button(&app->ui, "Send a test notification", (Rectangle){x, y, 230, 34}, 0)) {
@@ -441,10 +497,10 @@ static void sync(jd_app *app, float x, float y, float w)
 {
     jd_prefs *p = &app->prefs;
     y = heading(app, x, y, "Sync", "The Inbox updates at once (IMAP IDLE); other folders on a timer.");
-    float cx = label(app, x, y, "Keep recent mail offline", "Inbox messages this many days back are downloaded whole");
+    float cx = label(app, x, &y, "Keep recent mail offline", "Inbox messages this many days back are downloaded whole");
     if (stepper(app, cx, y + 6, &p->prefetch_days, 7, 0, 365, " days")) changed(app);
     y = divider(x, y + row_h, w);
-    cx = label(app, x, y, "Check other folders", "How often every folder is synced");
+    cx = label(app, x, &y, "Check other folders", "How often every folder is synced");
     if (stepper(app, cx, y + 6, &p->check_minutes, 1, 1, 120, " min")) changed(app);
     y = divider(x, y + row_h, w);
     if (jd_button(&app->ui, "Sync now", (Rectangle){x, y, 130, 34}, 1) && app->sync) jd_sync_now(app->sync);
@@ -454,16 +510,25 @@ static void rules(jd_app *app, float x, float y, float w)
 {
     jd_ui *ui = &app->ui;
     jd_prefs *p = &app->prefs;
-    y = heading(app, x, y, "Rules", "Run by jackdaw on new Inbox mail, top to bottom. Match uses the search syntax.");
+    y = heading(app, x, y, "Rules", "Run by jackdaw on new Inbox mail, top to bottom. They match as the search box does.");
+    /* each rule: its match as pills, then what it does ("Move to Receipts") */
     for (int i = 0; i < p->nrules; i++) {
-        Rectangle row = {x, y, w, 40};
+        const char *a = p->rules[i].action;
+        char does[300];
+        if (!strncmp(a, "move:", 5)) snprintf(does, sizeof does, "Move to %s", a + 5);
+        else if (!strncmp(a, "copy:", 5)) snprintf(does, sizeof does, "Copy to %s", a + 5);
+        else if (!strcmp(a, "read")) snprintf(does, sizeof does, "Mark read");
+        else if (!strcmp(a, "flag")) snprintf(does, sizeof does, "Flag");
+        else if (!strcmp(a, "delete")) snprintf(does, sizeof does, "Delete");
+        else snprintf(does, sizeof does, "%s", a);
+        float rh = narrow ? 66 : 42, pw = narrow ? w - 50 : w * 0.6f;
+        Rectangle row = {x, y, w, rh};
         DrawRectangleRounded(row, 0.2f, 6, JD_NORD1);
-        char line[600];
-        snprintf(line, sizeof line, "%s", p->rules[i].match);
-        jd_text_fit(ui, line, x + 14, y + 12, w * 0.55f, 14, JD_NORD6, 0);
-        jd_icon("chevron-right", x + w * 0.58f, y + 12, 16, JD_MUTED);
-        jd_text_fit(ui, p->rules[i].action, x + w * 0.58f + 26, y + 12, w * 0.3f, 14, JD_NORD8, 1);
-        Rectangle del = {x + w - 34, y + 8, 24, 24};
+        query_pills_draw(app, p->rules[i].match, x + 10, y + 9, pw - 10);
+        float ax = narrow ? x + 10 : x + w * 0.6f + 10, ay = narrow ? y + 38 : y + 13;
+        jd_icon("chevron-right", ax, ay, 16, JD_MUTED);
+        jd_text_fit(ui, does, ax + 22, ay, x + w - 44 - ax - 22, 14, JD_NORD8, 1);
+        Rectangle del = {x + w - 34, y + (rh - 24) / 2, 24, 24};
         int hover = CheckCollisionPointRec(GetMousePosition(), del);
         jd_icon("trash-2", del.x + 4, del.y + 4, 16, hover ? JD_NORD11 : JD_MUTED);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
@@ -473,22 +538,72 @@ static void rules(jd_app *app, float x, float y, float w)
             save_prefs(app);
             return;
         }
-        y += 46;
+        y += rh + 6;
     }
     if (!p->nrules) {
         jd_text(ui, "No rules yet.", x, y, 14, JD_MUTED, 0);
         y += 30;
     }
+
+    /* a new rule: what it matches (a pill field with the search box's hints), what it does, and where to */
     y += 10;
     jd_text(ui, "New rule", x, y, 15, JD_NORD6, 1);
-    y += 26;
-    float mw = w * 0.55f;
-    reach(y + 50);
-    if (jd_field_draw(ui, &app->rule_match, (Rectangle){x, y, mw, 34}, app->settings_focus == FOCUS_RULE_MATCH))
-        app->settings_focus = FOCUS_RULE_MATCH;
-    if (jd_field_draw(ui, &app->rule_action, (Rectangle){x + mw + 10, y, w - mw - 120, 34}, app->settings_focus == FOCUS_RULE_ACTION))
-        app->settings_focus = FOCUS_RULE_ACTION;
-    if (jd_button(ui, "Add", (Rectangle){x + w - 100, y, 100, 34}, 1)) add_rule(app);
+    y += 28;
+    int focused = app->settings_focus == FOCUS_RULE_MATCH;
+    Vector2 m = GetMousePosition();
+    int blocked = focused && CheckCollisionPointRec(m, rule_match.hints_box);
+    jd_text(ui, "Matches", x, y, 13, JD_NORD4, 1);
+    y += 20;
+    Rectangle field = {x, y, w, 36};
+    /* a press anywhere else puts the field (and its hints) away */
+    if (focused && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(m, field) && !blocked) {
+        app->settings_focus = FOCUS_NONE;
+        focused = 0;
+    }
+    if (qfield_draw(app, &rule_match, field, focused) && !blocked) app->settings_focus = FOCUS_RULE_MATCH;
+    y += 46;
+    jd_text(ui, "Then", x, y, 13, JD_NORD4, 1);
+    y += 20;
+    /* chips in rows: the actions, then (move, copy) the folders */
+    float cx = x;
+    for (int k = 0; k < (int)(sizeof actions / sizeof *actions); k++) {
+        float cw = jd_text_width(ui, actions[k].label, 13, 1) + 42;
+        if (cx > x && cx + cw > x + w) cx = x, y += 34;
+        Rectangle c = {cx, y, cw, 28};
+        int on = rule_act == k, hover = CheckCollisionPointRec(m, c) && !blocked && !app->dialog.kind;
+        DrawRectangleRounded(c, 0.5f, 6, on ? JD_NORD10 : hover ? JD_NORD2 : JD_NORD1);
+        if (!on) DrawRectangleRoundedLinesEx(c, 0.5f, 6, 1, JD_NORD2);
+        jd_icon(actions[k].icon, cx + 11, y + 7, 14, on ? JD_ON_ACCENT : JD_NORD4);
+        jd_text(ui, actions[k].label, cx + 31, y + 7, 13, on ? JD_ON_ACCENT : JD_NORD6, 1);
+        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) rule_act = k;
+        cx += cw + 6;
+    }
+    y += 40;
+    if (rule_act >= 3) {
+        jd_text(ui, "Folder", x, y, 13, JD_NORD4, 1);
+        y += 20;
+        cx = x;
+        for (int i = 0; i < app->nfolders; i++) {
+            const char *name = app->folders[i].name;
+            if (!strcasecmp(name, "INBOX")) continue;
+            const char *shown = folder_label(&app->folders[i]);
+            float cw = jd_text_width(ui, shown, 13, 0) + 40;
+            if (cx > x && cx + cw > x + w) cx = x, y += 34;
+            Rectangle c = {cx, y, cw, 28};
+            int on = !strcmp(rule_folder, name), hover = CheckCollisionPointRec(m, c) && !blocked && !app->dialog.kind;
+            DrawRectangleRounded(c, 0.5f, 6, on ? JD_NORD10 : hover ? JD_NORD2 : JD_NORD1);
+            if (!on) DrawRectangleRoundedLinesEx(c, 0.5f, 6, 1, JD_NORD2);
+            jd_icon("folder", cx + 10, y + 7, 14, on ? JD_ON_ACCENT : JD_NORD8);
+            jd_text(ui, shown, cx + 30, y + 7, 13, on ? JD_ON_ACCENT : JD_NORD6, 0);
+            if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) snprintf(rule_folder, sizeof rule_folder, "%s", name);
+            cx += cw + 6;
+        }
+        y += 40;
+    }
+    Rectangle add = {x, y + 4, 120, 36};
+    reach(add.y + 60);
+    if (!blocked && jd_icon_button(ui, "check", "Add rule", add, 1)) add_rule(app);
+    qfield_hints_draw(app, &rule_match, focused);
 }
 
 static void server_filters(jd_app *app, float x, float y, float w)
@@ -497,42 +612,79 @@ static void server_filters(jd_app *app, float x, float y, float w)
     char line[96];
     snprintf(line, sizeof line, "ManageSieve on %s, port %d.", app->account.imap.host ? app->account.imap.host : "the IMAP host",
              app->account.sieve_port ? app->account.sieve_port : 4190);
-    jd_text(&app->ui, line, x, y, 14, JD_NORD4, 0);
-    if (jd_button(&app->ui, "Edit server filters", (Rectangle){x, y + 34, 200, 36}, 1)) filters_open(app);
+    y = para(app, line, x, y, w, 14, JD_NORD4);
+    reach(y + 60);
+    if (jd_button(&app->ui, "Edit server filters", (Rectangle){x, y + 14, 200, 36}, 1)) filters_open(app);
 }
 
 void settings_draw(jd_app *app, Rectangle r)
 {
     jd_ui *ui = &app->ui;
-    float nav_w = 230;
-    DrawRectangleRec((Rectangle){r.x, r.y, nav_w, r.height}, JD_NORD1);
-    jd_icon("settings", r.x + 20, r.y + 22, 20, JD_NORD8);
-    jd_text(ui, "Settings", r.x + 50, r.y + 22, 18, JD_NORD6, 1);
-    float y = r.y + 64;
-    for (int i = 0; i < S_COUNT; i++, y += 36) {
-        Rectangle row = {r.x + 8, y, nav_w - 16, 32};
-        int hover = CheckCollisionPointRec(GetMousePosition(), row) && !app->dialog.kind;
-        if (i == app->settings_section) DrawRectangleRounded(row, 0.25f, 6, JD_NORD2);
-        else if (hover) DrawRectangleRounded(row, 0.25f, 6, ColorAlpha(JD_NORD2, 0.5f));
-        jd_icon(sections[i].icon, row.x + 12, y + 8, 16, i == app->settings_section ? JD_NORD8 : JD_NORD4);
-        jd_text(ui, sections[i].label, row.x + 40, y + 8, 14, JD_NORD6, i == app->settings_section);
-        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            app->settings_section = i;
-            app->settings_focus = FOCUS_NONE;
-            app->settings_scroll = 0;
+    /* too narrow for the list beside the section (a phone): one, then the other */
+    narrow = r.width < 640;
+    float nav_w = narrow ? r.width : 230;
+    if (!narrow || !narrow_detail) {
+        DrawRectangleRec((Rectangle){r.x, r.y, nav_w, r.height}, JD_NORD1);
+        /* on a phone the title is the way back out of Settings */
+        Rectangle head = {r.x, r.y, nav_w, 56};
+        int back = plat_touch() && CheckCollisionPointRec(GetMousePosition(), head) && !app->dialog.kind;
+        if (back) DrawRectangleRec(head, JD_NORD2);
+        jd_icon(plat_touch() ? "chevron-left" : "settings", r.x + 20, r.y + 22, 20, JD_NORD8);
+        jd_text(ui, "Settings", r.x + 50, r.y + 22, 18, JD_NORD6, 1);
+        if (back && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            tab_close(app, app->tab);
+            return;
         }
+        float y = r.y + 64, rh = narrow ? 48 : 36;
+        for (int i = 0; i < S_COUNT; i++) {
+            /* no keyboard on a phone to list keys for */
+            if (i == S_KEYS && plat_touch()) continue;
+            Rectangle row = {r.x + 8, y, nav_w - 16, rh - 4};
+            int hover = CheckCollisionPointRec(GetMousePosition(), row) && !app->dialog.kind;
+            int current = i == app->settings_section && !narrow;
+            if (current) DrawRectangleRounded(row, 0.25f, 6, JD_NORD2);
+            else if (hover) DrawRectangleRounded(row, 0.25f, 6, ColorAlpha(JD_NORD2, 0.5f));
+            float ty = y + (rh - 4 - 16) / 2;
+            jd_icon(sections[i].icon, row.x + 12, ty, 16, current ? JD_NORD8 : JD_NORD4);
+            jd_text(ui, sections[i].label, row.x + 40, ty, narrow ? 15 : 14, JD_NORD6, current);
+            if (narrow) jd_icon("chevron-right", row.x + row.width - 28, ty, 16, JD_MUTED);
+            if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                app->settings_section = i;
+                app->settings_focus = FOCUS_NONE;
+                app->settings_scroll = 0;
+                narrow_detail = 1;
+            }
+            y += rh;
+        }
+        if (narrow) return;
     }
 
     Rectangle content = {r.x + nav_w, r.y, r.width - nav_w, r.height};
+    if (narrow) {
+        /* the way back to the list */
+        Rectangle back = {r.x, r.y, r.width, 44};
+        int hover = CheckCollisionPointRec(GetMousePosition(), back) && !app->dialog.kind;
+        DrawRectangleRec(back, hover ? JD_NORD2 : JD_NORD1);
+        jd_icon("chevron-left", r.x + 14, r.y + 14, 16, JD_NORD8);
+        jd_text(ui, "Settings", r.x + 38, r.y + 14, 15, JD_NORD8, 1);
+        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            narrow_detail = 0;
+            app->settings_focus = FOCUS_NONE;
+            return;
+        }
+        content = (Rectangle){r.x, r.y + 44, r.width, r.height - 44};
+    }
     /* clamped before drawing, by last frame's height, so no frame is drawn past the end */
     static float last_height;
     if (CheckCollisionPointRec(GetMousePosition(), content)) app->settings_scroll -= GetMouseWheelMove() * 40;
     if (last_height > 0 && app->settings_scroll > last_height - content.height) app->settings_scroll = last_height - content.height;
     if (app->settings_scroll < 0) app->settings_scroll = 0;
     app->settings_scroll = (float)(int)app->settings_scroll;
-    float w = content.width - 96;
+    float pad = narrow ? 16 : 48;
+    float w = content.width - 2 * pad;
     if (w > 820) w = 820;
-    float x = content.x + 48, top = content.y + 32 - app->settings_scroll;
+    narrow_w = w;
+    float x = content.x + pad, top = content.y + (narrow ? 16 : 32) - app->settings_scroll;
     bottom = 0;
     jd_scissor(content.x, content.y, content.width, content.height);
     switch (app->settings_section) {

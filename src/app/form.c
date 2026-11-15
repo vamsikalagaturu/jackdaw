@@ -136,12 +136,22 @@ void form_frame(jd_app *app)
         int back = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
         app->focus = (app->focus + (back ? F_COUNT - 1 : 1)) % F_COUNT;
     }
-    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) form_submit(app);
+    /* the soft keyboard's Enter goes to the next field, as on a phone's forms; the last one submits */
+    if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
+        if (plat_touch() && app->focus != F_PASSWORD) app->focus = (app->focus + 1) % F_COUNT;
+        else form_submit(app);
+    }
     if (!app->show_form) return;
     if (IsKeyPressed(KEY_ESCAPE) && app->have_account && app->sync) app->show_form = 0;
     jd_field_input(&app->fields[app->focus]);
 
-    float w = 460, x = (jd_screen_w() - w) / 2, y = 48;
+    /* narrower on a phone; scrolled (finger or wheel) when the keyboard leaves too little room */
+    static float scroll, content;
+    float view = jd_screen_h();
+    scroll -= GetMouseWheelMove() * 40;
+    if (scroll > content - view + 24) scroll = content - view + 24;
+    if (scroll < 0) scroll = 0;
+    float w = jd_screen_w() - 32 < 460 ? jd_screen_w() - 32 : 460, x = (jd_screen_w() - w) / 2, y = 48 - scroll;
     jd_text(ui, app->have_account ? "Account" : "Add your mail account", x, y, 24, JD_NORD6, 1);
     y += 36;
     jd_text(ui, plat_secret_available() ? "The password goes to the system keystore."
@@ -152,4 +162,5 @@ void form_frame(jd_app *app)
     if (jd_button(ui, "Save and connect", (Rectangle){x, y, 180, 38}, 1)) form_submit(app);
     if (app->have_account && app->sync && jd_button(ui, "Cancel", (Rectangle){x + 192, y, 110, 38}, 0))
         app->show_form = 0;
+    content = y + 38 + scroll;
 }

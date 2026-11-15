@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "core/util.h"
+#include "mail/imap.h"
 
 static void random_hex(char *out, int bytes)
 {
@@ -287,7 +288,7 @@ static void tls_setup(struct mailstream_ssl_context *ctx, void *data)
     mailstream_ssl_set_server_name(ctx, (char *)host);
     SSL_CTX *ssl = mailstream_ssl_get_openssl_ssl_ctx(ctx);
     SSL_CTX_set_verify(ssl, SSL_VERIFY_PEER, NULL);
-    SSL_CTX_set_default_verify_paths(ssl);
+    jd_tls_trust(ssl);
     SSL_CTX_set_min_proto_version(ssl, TLS1_2_VERSION);
     X509_VERIFY_PARAM *param = SSL_CTX_get0_param(ssl);
     X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);

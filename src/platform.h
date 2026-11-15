@@ -1,6 +1,17 @@
 #pragma once
 #include <stdint.h>
 
+/* The program's life on the platform: plat_init before the window (Android: HOME, XDG_* and certificates),
+   plat_window_ready after it (Android: touch and the soft keyboard), plat_frame at the start of every frame,
+   typing when a text field has the keys (Android shows the soft keyboard then). */
+void plat_init(void);
+void plat_window_ready(void);
+void plat_frame(int typing);
+/* pixels per interface pixel at 100%: 1 on desktops (raylib scales HiDPI itself), the screen density on phones */
+float plat_density(void);
+/* a touch screen without a keyboard to rely on: no vim modes, typing always where text is edited */
+int plat_touch(void);
+
 /* The system keystore. Without one (no libsecret at build time) passwords last until jackdaw quits. */
 int plat_secret_available(void);
 char *plat_secret_load(const char *account);

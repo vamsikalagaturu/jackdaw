@@ -820,7 +820,7 @@ void jd_sync_stop(jd_sync *s)
     }
     for (int i = 0; i < s->nops; i++) op_free(&s->ops[i]);
     free(s->events), free(s->requests), free(s->ops);
-    if (s->password) explicit_bzero(s->password, strlen(s->password));
+    if (s->password) jd_wipe(s->password, strlen(s->password));
     free(s->password), free(s->dir), free(s->db_path);
     jd_account_free(&s->account);
     pthread_mutex_destroy(&s->lock);

@@ -22,6 +22,17 @@ static int ok(int r)
     return r == MAILIMAP_NO_ERROR || r == MAILIMAP_NO_ERROR_AUTHENTICATED || r == MAILIMAP_NO_ERROR_NON_AUTHENTICATED;
 }
 
+/* OpenSSL reads SSL_CERT_FILE and SSL_CERT_DIR only through its "safe" getenv, which returns nothing in a
+   process the kernel marks secure (AT_SECURE), as Android starts apps; so they are loaded by name too. */
+void jd_tls_trust(void *ssl_ctx)
+{
+    SSL_CTX *ssl = ssl_ctx;
+    SSL_CTX_set_default_verify_paths(ssl);
+    const char *file = getenv("SSL_CERT_FILE"), *dir = getenv("SSL_CERT_DIR");
+    if ((file && file[0]) || (dir && dir[0]))
+        SSL_CTX_load_verify_locations(ssl, file && file[0] ? file : NULL, dir && dir[0] ? dir : NULL);
+}
+
 /* libetpan leaves certificates unchecked unless asked: verify the chain against the system's roots and the name
    against the host (RFC 6125), and send SNI. */
 static void tls_setup(struct mailstream_ssl_context *ctx, void *data)
@@ -30,7 +41,7 @@ static void tls_setup(struct mailstream_ssl_context *ctx, void *data)
     mailstream_ssl_set_server_name(ctx, (char *)host);
     SSL_CTX *ssl = mailstream_ssl_get_openssl_ssl_ctx(ctx);
     SSL_CTX_set_verify(ssl, SSL_VERIFY_PEER, NULL);
-    SSL_CTX_set_default_verify_paths(ssl);
+    jd_tls_trust(ssl);
     SSL_CTX_set_min_proto_version(ssl, TLS1_2_VERSION);
     X509_VERIFY_PARAM *param = SSL_CTX_get0_param(ssl);
     X509_VERIFY_PARAM_set_hostflags(param, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);

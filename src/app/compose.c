@@ -840,6 +840,12 @@ void compose_keys(jd_app *app, struct jd_compose *c)
         return;
     }
     if (IsKeyPressed(KEY_ESCAPE)) {
+        /* a phone has no vim modes: Back closes the message, keeping a draft */
+        if (plat_touch()) {
+            for (int t = 0; t < app->ntabs; t++)
+                if (app->tabs[t].kind == TAB_COMPOSE && app->tabs[t].compose == c) tab_close(app, t);
+            return;
+        }
         c->normal = 1;
         c->nsugg = 0;
         jd_editor_deselect(&c->body);

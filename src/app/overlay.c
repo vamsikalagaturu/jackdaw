@@ -108,7 +108,7 @@ void menu_draw(jd_app *app)
         if (hover) DrawRectangleRounded(row, 0.2f, 6, JD_NORD2);
         jd_icon(items[i].icon, row.x + 8, yy + 6, 16, hover ? JD_NORD8 : JD_NORD4);
         jd_text(ui, items[i].label, row.x + 34, yy + 7, 14, JD_NORD6, 0);
-        if (items[i].keys) {
+        if (items[i].keys && !ui->touch) {
             float kw = jd_text_width(ui, items[i].keys, 12, 0);
             jd_text(ui, items[i].keys, row.x + row.width - kw - 8, yy + 8, 12, JD_MUTED, 0);
         }

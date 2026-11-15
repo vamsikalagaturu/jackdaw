@@ -7,12 +7,15 @@
 
 #include "app.h"
 #include "core/util.h"
+#include "platform.h"
 #include "ui/icons.h"
 
 enum { HEADER_H = 28, UNDO_SECONDS = 5 };
 
 /* the mouse is over the search hints, which lie on top of the list: what is under them takes no clicks */
 static int under_hints;
+/* where the search hints were drawn last frame (empty when hidden) */
+static Rectangle hints_box;
 
 static float row_h(jd_app *app)
 {
@@ -942,7 +945,7 @@ static int hover_actions(jd_app *app, int i, float right, float y)
 
 /* each kind of filter has its icon and colour, in the pills and the hints alike: where (folder), who (people),
    what (subject), status, files, when (dates) */
-static void filter_kind(const char *text, const char **icon, Color *tint)
+void filter_kind(const char *text, const char **icon, Color *tint)
 {
     /* not static: the colours follow the theme */
     const struct {
@@ -966,6 +969,15 @@ static void draw_search(jd_app *app, float x, float y, float w)
     Rectangle box = {x, y, w, 34};
     Vector2 mouse = GetMousePosition();
     int free_mouse = !app->dialog.kind && !app->menu.open;
+    /* a press anywhere else leaves the field, as Esc does (the hints over the list are part of it) */
+    if (app->searching && free_mouse && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, box) &&
+        !CheckCollisionPointRec(mouse, hints_box)) {
+        app->searching = 0;
+        if (!app->query) {
+            jd_field_set(&app->search, NULL);
+            app->search_here = 1;
+        }
+    }
     DrawRectangleRounded(box, 0.2f, 6, JD_NORD1);
     DrawRectangleRoundedLinesEx(box, 0.2f, 6, 1.5f, app->searching ? JD_NORD8 : JD_NORD2);
     pill p[32];
@@ -1032,15 +1044,11 @@ static void draw_search(jd_app *app, float x, float y, float w)
 
 /* Hints under the search field while typing: the operators that fit the word being typed, then values for the
    operator (senders and recipients from the contacts, folders, flags, dates). */
-typedef struct {
-    char insert[300]; /* replaces the word; a trailing space makes it a pill at once */
-    char label[300], note[80];
-} hint;
+typedef jd_hint hint;
 
 static hint hints[10];
 static int nhints, hint_sel = -1;
 static char hints_for[300] = "\x01";
-static Rectangle hints_box;
 
 /* the word being typed: from the last space outside quotes to the end, NULL unless the cursor is at the end */
 static const char *typed_word(jd_app *app)
@@ -1132,6 +1140,17 @@ static void hints_build(jd_app *app, const char *word)
     }
 }
 
+int query_hints(jd_app *app, const char *word, jd_hint *out, int max)
+{
+    hints_build(app, word);
+    int n = nhints < max ? nhints : max;
+    memcpy(out, hints, sizeof *out * (size_t)n);
+    /* the search field's own hints are built again when it next shows them */
+    nhints = 0;
+    snprintf(hints_for, sizeof hints_for, "\x01");
+    return n;
+}
+
 static void hints_update(jd_app *app)
 {
     const char *word = app->searching ? typed_word(app) : NULL;
@@ -1179,7 +1198,8 @@ static void hints_draw(jd_app *app, float x, float y, float w)
     if (!nhints) return;
     jd_ui *ui = &app->ui;
     float bw = w < 460 ? w : 460;
-    hints_box = (Rectangle){x, y, bw, (float)nhints * 30 + 8};
+    /* with a keyboard, a last line inside the box says how to take a hint */
+    hints_box = (Rectangle){x, y, bw, (float)nhints * 30 + 8 + (plat_touch() ? 0 : 22)};
     DrawRectangleRounded((Rectangle){x + 2, y + 3, bw, hints_box.height}, 0.06f, 6, ColorAlpha(BLACK, 0.25f));
     DrawRectangleRounded(hints_box, 0.06f, 6, JD_NORD2);
     /* the notes start in one column, after the widest label */
@@ -1204,8 +1224,10 @@ static void hints_draw(jd_app *app, float x, float y, float w)
             break;
         }
     }
-    const char *keys = "Tab takes the first   ↑ ↓ pick";
-    jd_text(ui, keys, x + bw - jd_text_width(ui, keys, 11, 0) - 8, y + hints_box.height + 4, 11, JD_MUTED, 0);
+    if (!plat_touch()) {
+        const char *keys = "Tab takes the first   ↑ ↓ pick";
+        jd_text(ui, keys, x + bw - jd_text_width(ui, keys, 11, 0) - 10, y + hints_box.height - 19, 11, JD_MUTED, 0);
+    }
 }
 
 void list_draw(jd_app *app, Rectangle r)
@@ -1228,7 +1250,8 @@ void list_draw(jd_app *app, Rectangle r)
     } toggles[] = {{app->grouped ? "layout-grid" : "list", app->grouped ? "Conversations" : "Messages"},
                    {pane_icons[app->prefs.reader_pos % 3], NULL}};
     float tx2 = x + w;
-    for (int k = 1; k >= 0; k--) {
+    /* a phone has no room for a reading pane: no toggle for it */
+    for (int k = plat_touch() ? 0 : 1; k >= 0; k--) {
         float bw = toggles[k].label ? jd_text_width(ui, toggles[k].label, 13, 1) + 38 : 30;
         tx2 -= bw;
         Rectangle b = {tx2, y - 2, bw, 26};
@@ -1342,7 +1365,7 @@ void list_draw(jd_app *app, Rectangle r)
         if (picked) DrawRectangleRounded(box, 0.12f, 6, ColorAlpha(JD_NORD10, 0.35f));
         else if (i == app->row) DrawRectangleRounded(box, 0.12f, 6, app->pane == PANE_LIST ? JD_NORD2 : JD_NORD1);
         /* the keyboard's place: outlined only while the list has the keys */
-        if (i == app->row && app->pane == PANE_LIST && app->tab == 0)
+        if (i == app->row && app->pane == PANE_LIST && app->tab == 0 && !plat_touch())
             DrawRectangleRoundedLinesEx(box, 0.12f, 6, 1.5f, JD_NORD8);
         else if (open || hover) DrawRectangleRounded(box, 0.12f, 6, JD_NORD1);
 
@@ -1357,7 +1380,8 @@ void list_draw(jd_app *app, Rectangle r)
         if (hover && !app->dialog.kind) {
             int ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
             int shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-            if (!app->prefs.compact && hover_actions(app, i, right, ry + 8)) handled = 1;
+            /* a touch screen has no hover: its long press opens the row's menu instead */
+            if (!app->prefs.compact && !plat_touch() && hover_actions(app, i, right, ry + 8)) handled = 1;
             else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && (on_avatar || ctrl)) {
                 toggle_pick(app, i);
                 app->anchor = i;

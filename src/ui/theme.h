@@ -33,6 +33,8 @@ void jd_theme_set(int light);
 /* Interface scale: everything is drawn in logical pixels, scaled when it reaches the screen. */
 extern float jd_scale;
 void jd_scale_begin(void);
+/* screen pixels covered by the system at the top and bottom (phones: status bar, cutout, soft keyboard) */
+void jd_set_insets(float top, float bottom);
 void jd_scale_end(void);
 float jd_screen_w(void);
 float jd_screen_h(void);

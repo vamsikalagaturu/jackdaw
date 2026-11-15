@@ -5,6 +5,9 @@
 #include "mail/account.h"
 #include "store/store.h"
 
+/* the trusted roots for an SSL_CTX: the system's, plus SSL_CERT_FILE and SSL_CERT_DIR when set */
+void jd_tls_trust(void *ssl_ctx);
+
 typedef struct jd_imap jd_imap;
 
 enum { JD_IMAP_OK = 0, JD_IMAP_ERROR = -1, JD_IMAP_AUTH = -2 };

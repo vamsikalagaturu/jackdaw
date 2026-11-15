@@ -70,6 +70,10 @@ static int fetch_one(jd_fetcher *f, const char *url)
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(c, CURLOPT_USERAGENT, "jackdaw");
+    /* named, as for IMAP (jd_tls_trust): OpenSSL ignores these variables in an Android app */
+    const char *file = getenv("SSL_CERT_FILE"), *dir = getenv("SSL_CERT_DIR");
+    if (file && file[0]) curl_easy_setopt(c, CURLOPT_CAINFO, file);
+    if (dir && dir[0]) curl_easy_setopt(c, CURLOPT_CAPATH, dir);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, on_data);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &s);
     CURLcode r = curl_easy_perform(c);
