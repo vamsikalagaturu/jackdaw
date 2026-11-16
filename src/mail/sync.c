@@ -383,6 +383,27 @@ static int sync_folder(jd_sync *s, int64_t folder, const char *name)
         }
         free(local);
     }
+    if (r == JD_IMAP_OK && !quitting(s) && jd_folder_texts_stale(s->store, folder)) {
+        int nm;
+        uint32_t *uids = jd_folder_markup_texts(s->store, folder, &nm);
+        jd_store_begin(s->store);
+        for (int i = 0; i < nm; i++) {
+            char *path = jd_body_path(s->dir, folder, sel.uidvalidity, uids[i]);
+            size_t len;
+            char *raw = jd_read_file(path, &len);
+            int64_t id = raw ? jd_message_id(s->store, folder, uids[i]) : 0;
+            if (id) {
+                char *text = jd_mime_body_text(raw, len);
+                jd_message_set_body(s->store, id, text);
+                free(text);
+            }
+            free(raw), free(path);
+        }
+        jd_folder_texts_done(s->store, folder);
+        jd_store_commit(s->store);
+        if (nm) emit(s, JD_EV_CHANGED, NULL, NULL, folder, 0);
+        free(uids);
+    }
     int flags_unchanged = jd_imap_condstore(s->imap) && st.highestmodseq && sel.highestmodseq == st.highestmodseq;
     if (r == JD_IMAP_OK && !flags_unchanged && st.uidvalidity) {
         jd_store_begin(s->store);

@@ -159,6 +159,16 @@ jd_store *jd_store_open(const char *path, char *err, int errlen)
         }
         exec(s, "COMMIT");
     }
+    if (run(prep(s, "PRAGMA user_version")) == 4) {
+        exec(s, "BEGIN IMMEDIATE");
+        if (run(prep(s, "PRAGMA user_version")) == 4) {
+            /* text parts that are HTML themselves now read as their HTML part's text: the snippets and search
+               text made from them before are made again, from the bodies on disk (sync) */
+            exec(s, "ALTER TABLE folders ADD COLUMN texts_stale INTEGER NOT NULL DEFAULT 0;"
+                    "UPDATE folders SET texts_stale = 1; PRAGMA user_version = 5;");
+        }
+        exec(s, "COMMIT");
+    }
     return s;
 bad:
     snprintf(err, (size_t)errlen, "%s: %s", path, s->db ? sqlite3_errmsg(s->db) : "cannot open");
@@ -484,6 +494,28 @@ void jd_folder_headers_done(jd_store *s, int64_t folder)
     sqlite3_stmt *st = prep(s, "UPDATE folders SET headers_stale = 0 WHERE id = ?");
     sqlite3_bind_int64(st, 1, folder);
     run(st);
+}
+
+int jd_folder_texts_stale(jd_store *s, int64_t folder)
+{
+    sqlite3_stmt *st = prep(s, "SELECT texts_stale FROM folders WHERE id = ?");
+    sqlite3_bind_int64(st, 1, folder);
+    return run(st) != 0;
+}
+
+void jd_folder_texts_done(jd_store *s, int64_t folder)
+{
+    sqlite3_stmt *st = prep(s, "UPDATE folders SET texts_stale = 0 WHERE id = ?");
+    sqlite3_bind_int64(st, 1, folder);
+    run(st);
+}
+
+uint32_t *jd_folder_markup_texts(jd_store *s, int64_t folder, int *n)
+{
+    sqlite3_stmt *st = prep(s, "SELECT uid FROM messages WHERE folder_id = ? AND body_cached = 1"
+                               " AND snippet LIKE '%<%' ORDER BY uid");
+    sqlite3_bind_int64(st, 1, folder);
+    return uid_list(st, n);
 }
 
 void jd_message_set_flags(jd_store *s, int64_t folder, uint32_t uid, int flags, const char *keywords, uint64_t modseq)

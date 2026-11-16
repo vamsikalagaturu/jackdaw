@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "mime.h"
 
+#include <ctype.h>
 #include <libetpan/libetpan.h>
 #include <stdlib.h>
 #include <string.h>
@@ -111,21 +112,81 @@ void jd_draft_headers_free(jd_draft_headers *h)
     *h = (jd_draft_headers){0};
 }
 
+/* the tag at s ("<p ...", "</div>") ends a line of text: block elements and <br> */
+static int block_tag(const char *s)
+{
+    static const char *const BLOCKS[] = {"br", "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+                                         "table", "blockquote", "ul", "ol", "hr"};
+    s += 1 + (s[1] == '/');
+    for (size_t i = 0; i < sizeof BLOCKS / sizeof *BLOCKS; i++) {
+        size_t k = strlen(BLOCKS[i]);
+        if (!strncasecmp(s, BLOCKS[i], k) && !isalnum((unsigned char)s[k])) return 1;
+    }
+    return 0;
+}
+
+/* the character reference at s ("&amp;", "&#228;", "&#xe4;") as UTF-8 into out; its length, 0 when there is none */
+static size_t entity(const char *s, size_t n, jd_buf *out)
+{
+    static const struct {
+        const char *name, *utf8;
+    } NAMED[] = {{"nbsp", " "}, {"amp", "&"}, {"lt", "<"}, {"gt", ">"}, {"quot", "\""}, {"apos", "'"}, {"#39", "'"}};
+    const char *semi = memchr(s, ';', n < 12 ? n : 12);
+    if (!semi) return 0;
+    size_t len = (size_t)(semi - s) + 1;
+    for (size_t i = 0; i < sizeof NAMED / sizeof *NAMED; i++)
+        if (len == strlen(NAMED[i].name) + 2 && !strncmp(s + 1, NAMED[i].name, len - 2)) {
+            jd_buf_adds(out, NAMED[i].utf8);
+            return len;
+        }
+    if (s[1] != '#') return 0;
+    char *end;
+    unsigned long cp = s[2] == 'x' || s[2] == 'X' ? strtoul(s + 3, &end, 16) : strtoul(s + 2, &end, 10);
+    if (end != semi || !cp || cp > 0x10ffff) return 0;
+    char u[4];
+    int k = cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+    if (k == 1) u[0] = (char)cp;
+    else {
+        for (int j = k - 1; j > 0; j--) u[j] = (char)(0x80 | (cp & 0x3f)), cp >>= 6;
+        u[0] = (char)((k == 2 ? 0xc0 : k == 3 ? 0xe0 : 0xf0) | cp);
+    }
+    jd_buf_add(out, u, (size_t)k);
+    return len;
+}
+
+/* HTML as text: block elements end lines, character references decoded, style and script left out, runs of spaces
+   and of blank lines made one */
 static void strip_html(jd_buf *out, const char *s, size_t n)
 {
     int in_tag = 0, skip = 0;
+    jd_buf t = {0};
     for (size_t i = 0; i < n; i++) {
         if (s[i] == '<') {
             in_tag = 1;
             if (strncasecmp(s + i, "<style", 6) == 0 || strncasecmp(s + i, "<script", 7) == 0) skip = 1;
             else if (strncasecmp(s + i, "</style", 7) == 0 || strncasecmp(s + i, "</script", 8) == 0) skip = 0;
-            jd_buf_adds(out, " ");
+            jd_buf_adds(&t, block_tag(s + i) ? "\n" : " ");
         } else if (s[i] == '>') {
             in_tag = 0;
         } else if (!in_tag && !skip) {
-            jd_buf_add(out, s + i, 1);
+            size_t k = s[i] == '&' ? entity(s + i, n - i, &t) : 0;
+            if (k) i += k - 1;
+            else jd_buf_add(&t, s + i, 1);
         }
     }
+    int newlines = 2, space = 0;
+    for (size_t i = 0; i < t.len; i++) {
+        char ch = t.s[i] == '\t' || t.s[i] == '\r' ? ' ' : t.s[i];
+        if (ch == '\n') newlines++, space = 0;
+        else if (ch == ' ') space = 1;
+        else {
+            if (newlines) jd_buf_adds(out, newlines > 1 && out->len ? "\n\n" : out->len ? "\n" : "");
+            else if (space) jd_buf_adds(out, " ");
+            jd_buf_add(out, &ch, 1);
+            newlines = space = 0;
+        }
+    }
+    jd_buf_free(&t);
 }
 
 static void add_part(jd_buf *out, struct mailmime *mime, int want_html)
@@ -456,6 +517,20 @@ char *jd_mime_body_html(const char *raw, size_t len)
     return out;
 }
 
+/* text with HTML tags in it ('<', an optional '/', a name, then space, '/' or '>'), as some mail sends for its
+   text/plain part; two or more, so one stray <b> or "a < b" does not count. <user@host> and <https://...> are no
+   tags: their name ends at '@' or ':'. */
+static int looks_like_html(const char *s)
+{
+    int tags = 0;
+    for (const char *p = strchr(s, '<'); p && tags < 2; p = strchr(p + 1, '<')) {
+        const char *q = p + 1 + (p[1] == '/'), *name = q;
+        while (isalnum((unsigned char)*q)) q++;
+        if (q > name && isalpha((unsigned char)*name) && (*q == ' ' || *q == '/' || *q == '>') && strchr(q, '>')) tags++;
+    }
+    return tags >= 2;
+}
+
 char *jd_mime_body_text(const char *raw, size_t len)
 {
     size_t idx = 0;
@@ -463,6 +538,13 @@ char *jd_mime_body_text(const char *raw, size_t len)
     if (mailmime_parse(raw, len, &idx, &mime) != MAILIMF_NO_ERROR) return jd_strdup("");
     jd_buf out = {0};
     walk(&out, mime, 0);
+    /* a text part that is HTML itself: the HTML part's text reads as the sender meant */
+    if (out.len && looks_like_html(out.s)) {
+        jd_buf html = {0};
+        walk(&html, mime, 1);
+        if (html.len) jd_buf_free(&out), out = html;
+        else jd_buf_free(&html);
+    }
     if (!out.len) walk(&out, mime, 1);
     mailmime_free(mime);
     return out.s ? out.s : jd_strdup("");

@@ -1847,25 +1847,16 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         jd_text(ui, date, tx + tw - dw, name_y + 2 * K, 13 * K, JD_NORD4, 0);
         if (shown) card_icons(app, c, i, icons_right, icons_cy, r, narrow, 1);
         if (!shown) {
-            /* the first line of what was written, quotes left out; markup some mail puts in its text part (a
-               newsletter's <a ...> tags) is left out too, and a line of nothing else skipped */
+            /* the first line of what was written, quotes left out */
             char line[200] = "";
-            for (const char *p = m->text; p && *p && !line[0];) {
+            for (const char *p = m->text; p && *p;) {
                 const char *nl = strchr(p, '\n');
                 int len = nl ? (int)(nl - p) : (int)strlen(p);
                 while (len && (*p == ' ' || *p == '\t')) p++, len--;
+                while (len && (p[len - 1] == '\r' || p[len - 1] == ' ')) len--;
                 if (len && *p != '>') {
-                    int n = 0, in_tag = 0;
-                    for (int i = 0; i < len && n < (int)sizeof line - 1; i++) {
-                        if (p[i] == '<' && i + 1 < len && (isalpha((unsigned char)p[i + 1]) || p[i + 1] == '/')) in_tag = 1;
-                        else if (in_tag && p[i] == '>') in_tag = 0;
-                        else if (!in_tag && p[i] != '\r') line[n++] = p[i];
-                    }
-                    while (n && line[n - 1] == ' ') n--;
-                    line[n] = 0;
-                    int start = 0;
-                    while (line[start] == ' ') start++;
-                    memmove(line, line + start, (size_t)(n - start + 1));
+                    snprintf(line, sizeof line, "%.*s", len < 199 ? len : 199, p);
+                    break;
                 }
                 p = nl ? nl + 1 : p + len;
             }
@@ -1879,16 +1870,17 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         y += head_h + 10;
         if (!m->addresses) y = address_summary(app, m, ix, y, iw, r);
         else {
-            /* the chevron at the right folds them back into one line */
-            Rectangle fold = {ix + iw - 22 * K, y - 2, 22 * K, 20 * K};
+            /* the chevron stays where the one line's is, turned down; the lines move beside it */
+            Rectangle fold = {ix - 2, y - 2, 18 * K, 20 * K};
             int on_fold = CheckCollisionPointRec(GetMousePosition(), fold) && CheckCollisionPointRec(GetMousePosition(), r);
-            jd_icon("chevron-down", fold.x + 4 * K, y, 13 * K, on_fold ? JD_NORD8 : JD_MUTED);
+            if (on_fold) SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
+            jd_icon("chevron-down", ix - 2, y, 13 * K, on_fold ? JD_NORD8 : JD_MUTED);
             if (clicked(fold, r, app)) m->addresses = 0;
-            float aw = iw - 26 * K;
-            y = address_line(app, c, i * 16 + 6, "From", m->row.from, ix, y, aw, r);
-            y = address_line(app, c, i * 16 + 3, "To", m->row.to, ix, y, aw, r);
-            y = address_line(app, c, i * 16 + 4, "Cc", m->row.cc, ix, y, aw, r);
-            y = header_line(app, c, i * 16 + 5, "In", m->row.folder_name, ix, y, aw, r);
+            float ax = ix + 18 * K, aw = iw - 18 * K;
+            y = address_line(app, c, i * 16 + 6, "From", m->row.from, ax, y, aw, r);
+            y = address_line(app, c, i * 16 + 3, "To", m->row.to, ax, y, aw, r);
+            y = address_line(app, c, i * 16 + 4, "Cc", m->row.cc, ax, y, aw, r);
+            y = header_line(app, c, i * 16 + 5, "In", m->row.folder_name, ax, y, aw, r);
         }
         y += 10;
         float x0 = x, w0 = w;
