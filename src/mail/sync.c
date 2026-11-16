@@ -385,7 +385,7 @@ static int sync_folder(jd_sync *s, int64_t folder, const char *name)
     }
     if (r == JD_IMAP_OK && !quitting(s) && jd_folder_texts_stale(s->store, folder)) {
         int nm;
-        uint32_t *uids = jd_folder_markup_texts(s->store, folder, &nm);
+        uint32_t *uids = jd_folder_cached(s->store, folder, &nm);
         jd_store_begin(s->store);
         for (int i = 0; i < nm; i++) {
             char *path = jd_body_path(s->dir, folder, sel.uidvalidity, uids[i]);

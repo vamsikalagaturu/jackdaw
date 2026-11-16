@@ -115,8 +115,8 @@ void jd_draft_headers_free(jd_draft_headers *h)
 /* the tag at s ("<p ...", "</div>") ends a line of text: block elements and <br> */
 static int block_tag(const char *s)
 {
-    static const char *const BLOCKS[] = {"br", "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6",
-                                         "table", "blockquote", "ul", "ol", "hr"};
+    static const char *const BLOCKS[] = {"br", "p", "div", "tr", "td", "th", "li", "h1", "h2", "h3", "h4", "h5",
+                                         "h6", "table", "blockquote", "ul", "ol", "hr"};
     s += 1 + (s[1] == '/');
     for (size_t i = 0; i < sizeof BLOCKS / sizeof *BLOCKS; i++) {
         size_t k = strlen(BLOCKS[i]);
@@ -154,26 +154,47 @@ static size_t entity(const char *s, size_t n, jd_buf *out)
     return len;
 }
 
-/* HTML as text: block elements end lines, character references decoded, style and script left out, runs of spaces
-   and of blank lines made one */
+/* HTML as text: block elements end lines, character references decoded, runs of spaces and of blank lines made one.
+   Left out: the head (its title is no text of the mail), comments (Outlook's <!--[if mso]> settings), style and
+   script, and blocks of link text alone, a newsletter's chrome ("View in browser", a menu, the sender's site). */
 static void strip_html(jd_buf *out, const char *s, size_t n)
 {
-    int in_tag = 0, skip = 0;
+    int in_tag = 0, skip = 0, in_link = 0, plain = 0;
+    size_t block = 0;
     jd_buf t = {0};
     for (size_t i = 0; i < n; i++) {
-        if (s[i] == '<') {
+        if (s[i] == '<' && !strncmp(s + i, "<!--", 4)) {
+            size_t j = i + 4;
+            while (j + 2 < n && strncmp(s + j, "-->", 3)) j++;
+            i = j + 2;
+        } else if (s[i] == '<') {
             in_tag = 1;
-            if (strncasecmp(s + i, "<style", 6) == 0 || strncasecmp(s + i, "<script", 7) == 0) skip = 1;
-            else if (strncasecmp(s + i, "</style", 7) == 0 || strncasecmp(s + i, "</script", 8) == 0) skip = 0;
-            jd_buf_adds(&t, block_tag(s + i) ? "\n" : " ");
+            static const char *const HIDDEN[] = {"head", "style", "script", "title"};
+            int close = s[i + 1] == '/';
+            const char *name = s + i + 1 + close;
+            for (size_t h = 0; h < sizeof HIDDEN / sizeof *HIDDEN; h++) {
+                size_t k = strlen(HIDDEN[h]);
+                if (!strncasecmp(name, HIDDEN[h], k) && !isalnum((unsigned char)name[k])) skip = !close;
+            }
+            if (!strncasecmp(name, "a", 1) && !isalnum((unsigned char)name[1])) in_link = !close;
+            if (block_tag(s + i)) {
+                if (!plain) t.len = block;
+                jd_buf_adds(&t, "\n");
+                block = t.len, plain = 0;
+            } else {
+                jd_buf_adds(&t, " ");
+            }
         } else if (s[i] == '>') {
             in_tag = 0;
         } else if (!in_tag && !skip) {
-            size_t k = s[i] == '&' ? entity(s + i, n - i, &t) : 0;
+            size_t was = t.len, k = s[i] == '&' ? entity(s + i, n - i, &t) : 0;
             if (k) i += k - 1;
             else jd_buf_add(&t, s + i, 1);
+            for (size_t j = was; j < t.len && !in_link; j++)
+                if (!isspace((unsigned char)t.s[j])) plain = 1;
         }
     }
+    if (!plain) t.len = block;
     int newlines = 2, space = 0;
     for (size_t i = 0; i < t.len; i++) {
         char ch = t.s[i] == '\t' || t.s[i] == '\r' ? ' ' : t.s[i];

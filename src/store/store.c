@@ -162,8 +162,8 @@ jd_store *jd_store_open(const char *path, char *err, int errlen)
     if (run(prep(s, "PRAGMA user_version")) == 4) {
         exec(s, "BEGIN IMMEDIATE");
         if (run(prep(s, "PRAGMA user_version")) == 4) {
-            /* text parts that are HTML themselves now read as their HTML part's text: the snippets and search
-               text made from them before are made again, from the bodies on disk (sync) */
+            /* HTML now reads as text without its chrome, and a text part that is HTML itself as its HTML part:
+               the snippets and search text made before are made again, from the bodies on disk (sync) */
             exec(s, "ALTER TABLE folders ADD COLUMN texts_stale INTEGER NOT NULL DEFAULT 0;"
                     "UPDATE folders SET texts_stale = 1; PRAGMA user_version = 5;");
         }
@@ -510,10 +510,9 @@ void jd_folder_texts_done(jd_store *s, int64_t folder)
     run(st);
 }
 
-uint32_t *jd_folder_markup_texts(jd_store *s, int64_t folder, int *n)
+uint32_t *jd_folder_cached(jd_store *s, int64_t folder, int *n)
 {
-    sqlite3_stmt *st = prep(s, "SELECT uid FROM messages WHERE folder_id = ? AND body_cached = 1"
-                               " AND snippet LIKE '%<%' ORDER BY uid");
+    sqlite3_stmt *st = prep(s, "SELECT uid FROM messages WHERE folder_id = ? AND body_cached = 1 ORDER BY uid");
     sqlite3_bind_int64(st, 1, folder);
     return uid_list(st, n);
 }

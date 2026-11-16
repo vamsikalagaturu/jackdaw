@@ -59,11 +59,12 @@ int64_t jd_message_refresh(jd_store *s, int64_t folder, const jd_header *h);
 /* headers stored before every charset could be decoded (Android before schema 4): sync fetches them again, once */
 int jd_folder_headers_stale(jd_store *s, int64_t folder);
 void jd_folder_headers_done(jd_store *s, int64_t folder);
-/* snippets and search text made before text parts that are HTML read as their HTML part (schema 5): sync makes
-   them again from the bodies on disk, once; jd_folder_markup_texts lists the messages whose snippet has a '<' */
+/* snippets and search text made before HTML read as text without its chrome (schema 5): sync makes them again
+   from the bodies on disk, once */
 int jd_folder_texts_stale(jd_store *s, int64_t folder);
 void jd_folder_texts_done(jd_store *s, int64_t folder);
-uint32_t *jd_folder_markup_texts(jd_store *s, int64_t folder, int *n);
+/* uids in folder with a cached body */
+uint32_t *jd_folder_cached(jd_store *s, int64_t folder, int *n);
 int jd_message_locate(jd_store *s, int64_t id, int64_t *folder, char **folder_name, uint32_t *uid, int64_t *size);
 /* uids in folder without a cached body, of messages at or after since and at most max_size bytes */
 uint32_t *jd_folder_uncached(jd_store *s, int64_t folder, int64_t since, int64_t max_size, int *n);
