@@ -185,6 +185,23 @@ static float tab_rows(jd_app *app, Rectangle r, float y, int rail)
     return y + 12;
 }
 
+/* sel: the selected row's offset in the content, -1 when it is not shown */
+static void folder_scroll(jd_app *app, Rectangle view, float content, float sel, float row)
+{
+    if (CheckCollisionPointRec(GetMousePosition(), view) && !app->dialog.kind && !app->menu.open)
+        app->side_scroll -= jd_wheel_y(row * 2);
+    if (app->folder != app->side_followed && sel >= 0) {
+        app->side_followed = app->folder;
+        if (sel < app->side_scroll) app->side_scroll = sel;
+        else if (sel + row > app->side_scroll + view.height) app->side_scroll = sel + row - view.height;
+    }
+    float max = content - view.height;
+    if (app->side_scroll > max) app->side_scroll = max;
+    if (app->side_scroll < 0) app->side_scroll = 0;
+}
+
+static int in_view(Rectangle view, Rectangle b) { return b.y + b.height > view.y && b.y < view.y + view.height; }
+
 /* icons only: compose, tabs, folders with unread badges, settings; tooltips name them */
 static void rail_draw(jd_app *app, Rectangle r)
 {
@@ -195,7 +212,11 @@ static void rail_draw(jd_app *app, Rectangle r)
        with the folder's name, the pencil with the filter chips (list_draw) */
     Rectangle mark = {cx, r.y + 14, 40, 34};
     jd_icon("bird", cx + 9, r.y + 20, 22, JD_NORD8);
-    if (CheckCollisionPointRec(GetMousePosition(), mark))
+    /* a tap leaves no hover behind: on a touch screen it shows the version for a while */
+    static double shown_until;
+    int on_mark = CheckCollisionPointRec(GetMousePosition(), mark);
+    if (app->ui.touch && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) shown_until = on_mark ? GetTime() + 4 : 0;
+    if ((on_mark && !app->ui.touch) || GetTime() < shown_until)
         tip = "jackdaw " JD_VERSION ", built " JD_BUILD_DATE, tip_at = (Vector2){mark.x + 46, mark.y + 6};
     if (icon_button(app, "panel-left-open", (Rectangle){cx, r.y + 49, 40, 36}, "Show the sidebar (Ctrl+B)", JD_NORD4, &tip, &tip_at)) {
         app->prefs.sidebar_rail = 0;
@@ -210,13 +231,28 @@ static void rail_draw(jd_app *app, Rectangle r)
     float y = r.y + 134;
     if (app->prefs.tabs_side && app->ntabs > 1) y = tab_rows(app, r, y, 1);
     float bottom = r.y + r.height - 50;
-    for (int i = 0; i < app->nfolders && y < bottom - 40; i++) {
+    Rectangle view = {r.x, y, r.width, bottom - 4 - y};
+    float content = 0, sel = -1;
+    for (int i = 0; i < app->nfolders; i++) {
+        if (folder_hidden(app, i) || depth_of(&app->folders[i]) > 0) continue;
+        if (i == app->folder) sel = content;
+        content += 40;
+    }
+    folder_scroll(app, view, content, sel, 40);
+    jd_scissor(view.x, view.y, view.width, view.height);
+    y = view.y - app->side_scroll;
+    int over = CheckCollisionPointRec(GetMousePosition(), view);
+    for (int i = 0; i < app->nfolders; i++) {
         if (folder_hidden(app, i) || depth_of(&app->folders[i]) > 0) continue;
         const jd_folder_row *f = &app->folders[i];
         Rectangle b = {cx, y, 40, 36};
+        if (!in_view(view, b)) {
+            y += 40;
+            continue;
+        }
         int active = i == app->folder && app->tab == 0;
         if (active) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
-        if (icon_button(app, folder_icon(f), b, folder_label(f), active ? JD_NORD8 : JD_NORD4, &tip, &tip_at))
+        if (icon_button(app, folder_icon(f), b, folder_label(f), active ? JD_NORD8 : JD_NORD4, &tip, &tip_at) && over)
             select_folder(app, i);
         if (f->unread) {
             char count[16];
@@ -228,6 +264,8 @@ static void rail_draw(jd_app *app, Rectangle r)
         }
         y += 40;
     }
+    jd_scissor_end();
+    jd_scrollbar(view, content, &app->side_scroll);
     DrawRectangle((int)r.x + 10, (int)bottom, (int)r.width - 20, 1, JD_NORD2);
     if (icon_button(app, "settings", (Rectangle){cx, bottom + 8, 40, 34}, "Settings (Ctrl+,)", JD_NORD4, &tip, &tip_at))
         settings_open(app);
@@ -277,11 +315,28 @@ void sidebar_draw(jd_app *app, Rectangle r)
 
     float y = r.y + 154, bottom = r.y + r.height - 82;
     if (app->prefs.tabs_side && app->ntabs > 1) y = tab_rows(app, r, y, 0);
-    for (int i = 0; i < app->nfolders && y < bottom - row; i++) {
+    Rectangle view = {r.x, y, r.width, bottom - 4 - y};
+    float content = 0, sel = -1;
+    for (int i = 0; i < app->nfolders; i++) {
+        if (folder_hidden(app, i)) continue;
+        if (i == app->folder) sel = content;
+        content += row;
+    }
+    folder_scroll(app, view, content, sel, row);
+    /* room for the scrollbar beside the counts */
+    float bar = content > view.height ? 10 : 0;
+    jd_scissor(view.x, view.y, view.width, view.height);
+    y = view.y - app->side_scroll;
+    int over = CheckCollisionPointRec(GetMousePosition(), view);
+    for (int i = 0; i < app->nfolders; i++) {
         if (folder_hidden(app, i)) continue;
         const jd_folder_row *f = &app->folders[i];
-        Rectangle box = {r.x + 8, y, r.width - 16, row - 2};
-        int hover = CheckCollisionPointRec(GetMousePosition(), box) && free_input;
+        Rectangle box = {r.x + 8, y, r.width - 16 - bar, row - 2};
+        if (!in_view(view, box)) {
+            y += row;
+            continue;
+        }
+        int hover = CheckCollisionPointRec(GetMousePosition(), box) && over && free_input;
         if (i == app->folder && app->tab == 0) {
             DrawRectangleRounded(box, 0.25f, 6, JD_NORD2);
             if (app->pane == PANE_FOLDERS && !plat_touch()) DrawRectangleRoundedLinesEx(box, 0.25f, 6, 1.5f, JD_NORD8);
@@ -299,7 +354,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
         if (has_children(app, i)) {
             Rectangle arrow = {box.x + indent - 20, y, 18, row - 2};
             jd_icon(f->collapsed ? "chevron-right" : "chevron-down", arrow.x + 2, y + 7, 14, JD_NORD4);
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), arrow))
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && over && CheckCollisionPointRec(GetMousePosition(), arrow))
                 toggle_collapsed(app, i);
         }
         jd_icon(folder_icon(f), box.x + indent, y + 6, 16, i == app->folder ? JD_NORD8 : JD_NORD4);
@@ -311,6 +366,8 @@ void sidebar_draw(jd_app *app, Rectangle r)
         if (f->unread) jd_text(ui, count, box.x + box.width - cw - 10, y + 7, 14, JD_NORD8, 1);
         y += row;
     }
+    jd_scissor_end();
+    jd_scrollbar(view, content, &app->side_scroll);
 
     if (tip) tooltip(app, tip, tip_at.x, tip_at.y);
     DrawRectangle((int)r.x + 12, (int)bottom, (int)r.width - 24, 1, JD_NORD2);
@@ -332,7 +389,5 @@ void sidebar_draw(jd_app *app, Rectangle r)
         }
         fx += fw + 4;
     }
-    /* two lines, so a narrow sidebar does not cut the build date off */
-    jd_text_fit(ui, "jackdaw " JD_VERSION, r.x + 22, bottom + 46, r.width - 34, 11, JD_MUTED, 0);
-    jd_text_fit(ui, "built " JD_BUILD_DATE, r.x + 22, bottom + 61, r.width - 34, 11, JD_MUTED, 0);
+    jd_text_fit(ui, "jackdaw " JD_VERSION " · built " JD_BUILD_DATE, r.x + 22, bottom + 50, r.width - 34, 12, JD_NORD4, 0);
 }

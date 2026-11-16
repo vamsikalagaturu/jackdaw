@@ -42,6 +42,7 @@ typedef struct {
     int mark_read;       /* [reading] mark_read = true: opening a message marks it read */
     int notify;          /* [notifications] enabled, default true */
     int notify_focused;  /* [notifications] when_focused: also while jackdaw is in front, default true */
+    int push;            /* [notifications] push: Android keeps IMAP IDLE open while closed, default true */
     int prefetch_days;   /* [sync] prefetch_days, default 30; 0 downloads bodies only when opened */
     int check_minutes;   /* [sync] check_minutes, default 5: all folders; the Inbox waits in IDLE */
     char *signature_new, *signature_reply;      /* [signature] new, reply */

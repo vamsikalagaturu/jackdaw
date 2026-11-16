@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -626,7 +627,8 @@ static float format_bar(jd_app *app, struct jd_compose *c, float x, float y, flo
         }
         bx += 34;
     }
-    jd_text_fit(ui, "Markdown: sent as formatted HTML and as this text", bx + 12, y + 9, x + w - bx - 12, 13, JD_MUTED, 0);
+    if (x + w - bx - 12 > 160)
+        jd_text_fit(ui, "Markdown: sent as formatted HTML and as this text", bx + 12, y + 9, x + w - bx - 12, 13, JD_MUTED, 0);
     if (tip) jd_tooltip(tip, tip_x, y + 34);
     return y + 36;
 }
@@ -902,29 +904,32 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
         UnloadDroppedFiles(dropped);
     }
 
-    float x = r.x + 28, w = r.width - 56, y = r.y + 18;
+    const int narrow = r.width < 560;
+    float margin = narrow ? 12 : 28;
+    float x = r.x + margin, w = r.width - 2 * margin, y = r.y + (narrow ? 12 : 18);
     if (w > 980) {
         x += (w - 980) / 2;
         w = 980;
     }
     static const char *labels[] = {"To", "Cc", "Bcc", "Subject"};
     static const char *icons[] = {"user", "users", "eye-off", "type"};
+    float label_w = narrow ? 28 : 92, cc_w = narrow ? 64 : 96;
     float sugg_y = 0;
     for (int f = 0; f <= C_SUBJECT; f++) {
         if (!visible(c, f)) continue;
         Color lc = c->focus == f ? JD_NORD8 : JD_NORD4;
         jd_icon(icons[f], x, y + 9, 16, lc);
-        jd_text(ui, labels[f], x + 24, y + 10, 13, lc, 1);
-        Rectangle box = {x + 92, y, w - 92 - (f == C_TO ? 104 : 0), 34};
+        if (!narrow) jd_text(ui, labels[f], x + 24, y + 10, 13, lc, 1);
+        Rectangle box = {x + label_w, y, w - label_w - (f == C_TO ? cc_w + 8 : 0), 34};
         if (jd_field_draw(ui, &c->fields[f], box, c->focus == f)) c->focus = f, c->normal = 0;
-        if (f == C_TO && jd_icon_button(ui, c->show_cc ? "chevron-down" : "chevron-right", "Cc Bcc",
-                                        (Rectangle){x + w - 96, y, 96, 34}, 0))
+        if (f == C_TO && jd_icon_button(ui, c->show_cc ? "chevron-down" : "chevron-right", narrow ? "Cc" : "Cc Bcc",
+                                        (Rectangle){x + w - cc_w, y, cc_w, 34}, 0))
             c->show_cc = !c->show_cc;
         if (f == c->focus) sugg_y = y + 36;
         y += 42;
     }
     if (app->prefs.markdown) y = format_bar(app, c, x, y + 2, w);
-    float bottom = r.y + r.height - 58;
+    float bottom = r.y + r.height - (narrow ? 56 : 58);
     if (c->nparts) bottom -= 36;
     if (c->error[0]) bottom -= 24;
     Rectangle body = {x, y + 4, w, bottom - y - 4};
@@ -965,15 +970,19 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
         jd_text_fit(ui, c->error, x, y, w, 13, JD_NORD11, 0);
         y += 24;
     }
-    if (jd_icon_button(ui, "send", c->sending ? "Sending..." : "Send", (Rectangle){x, y, 130, 36}, 1)) send(app, c);
-    if (jd_icon_button(ui, "paperclip", "Attach", (Rectangle){x + 140, y, 110, 36}, 0) && plat_pick_files("Attach files") != 0)
+    Rectangle bsend = narrow ? (Rectangle){x, y, w - 2 * (48 + 8), 40} : (Rectangle){x, y, 130, 36};
+    Rectangle battach = narrow ? (Rectangle){x + w - 104, y, 48, 40} : (Rectangle){x + 140, y, 110, 36};
+    Rectangle bdraft = narrow ? (Rectangle){x + w - 48, y, 48, 40} : (Rectangle){x + 260, y, 136, 36};
+    if (jd_icon_button(ui, "send", c->sending ? "Sending..." : "Send", bsend, 1)) send(app, c);
+    if (jd_icon_button(ui, "paperclip", narrow ? NULL : "Attach", battach, 0) && plat_pick_files("Attach files") != 0)
         snprintf(c->error, sizeof c->error, "No file chooser available; drop files on the window instead.");
-    if (jd_icon_button(ui, "file-pen", "Save draft", (Rectangle){x + 260, y, 136, 36}, 0)) save_draft(app, c);
-    jd_text_fit(ui, "Ctrl+Enter sends · Ctrl+S saves · Esc normal mode, i insert · Ctrl+W closes", x + 412, y + 11,
-                w - 412, 13, JD_MUTED, 0);
+    if (jd_icon_button(ui, "file-pen", narrow ? NULL : "Save draft", bdraft, 0)) save_draft(app, c);
+    if (!plat_touch())
+        jd_text_fit(ui, "Ctrl+Enter sends · Ctrl+S saves · Esc normal mode, i insert · Ctrl+W closes", x + 412,
+                    y + 11, w - 412, 13, JD_MUTED, 0);
 
     if (c->nsugg && c->focus <= C_BCC && sugg_y > 0) {
-        Rectangle box = {x + 92, sugg_y, 420, (float)c->nsugg * 30 + 8};
+        Rectangle box = {x + label_w, sugg_y, fminf(420, w - label_w), (float)c->nsugg * 30 + 8};
         DrawRectangleRounded(box, 0.06f, 6, JD_NORD2);
         for (int i = 0; i < c->nsugg; i++) {
             Rectangle row = {box.x + 4, box.y + 4 + (float)i * 30, box.width - 8, 28};

@@ -2,6 +2,7 @@
 #include "imap.h"
 
 #include <libetpan/libetpan.h>
+#include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 #include <stdio.h>
@@ -33,6 +34,16 @@ void jd_tls_trust(void *ssl_ctx)
         SSL_CTX_load_verify_locations(ssl, file && file[0] ? file : NULL, dir && dir[0] ? dir : NULL);
 }
 
+/* why the last handshake on this thread failed: libetpan reports only that it did */
+static _Thread_local char tls_why[160];
+
+static int verify_cb(int good, X509_STORE_CTX *x)
+{
+    if (!good && !tls_why[0])
+        snprintf(tls_why, sizeof tls_why, "certificate: %s", X509_verify_cert_error_string(X509_STORE_CTX_get_error(x)));
+    return good;
+}
+
 /* libetpan leaves certificates unchecked unless asked: verify the chain against the system's roots and the name
    against the host (RFC 6125), and send SNI. */
 static void tls_setup(struct mailstream_ssl_context *ctx, void *data)
@@ -40,7 +51,7 @@ static void tls_setup(struct mailstream_ssl_context *ctx, void *data)
     const char *host = data;
     mailstream_ssl_set_server_name(ctx, (char *)host);
     SSL_CTX *ssl = mailstream_ssl_get_openssl_ssl_ctx(ctx);
-    SSL_CTX_set_verify(ssl, SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_verify(ssl, SSL_VERIFY_PEER, verify_cb);
     jd_tls_trust(ssl);
     SSL_CTX_set_min_proto_version(ssl, TLS1_2_VERSION);
     X509_VERIFY_PARAM *param = SSL_CTX_get0_param(ssl);
@@ -60,6 +71,8 @@ jd_imap *jd_imap_connect(const jd_account *a, const char *password, int *status,
     mailimap *s = mailimap_new(0, NULL);
     mailimap_set_timeout(s, 60);
     int r;
+    tls_why[0] = 0;
+    ERR_clear_error();
     if (a->imap.security == JD_SEC_TLS) {
         r = mailimap_ssl_connect_with_callback(s, a->imap.host, (uint16_t)a->imap.port, tls_setup, a->imap.host);
     } else {
@@ -67,7 +80,10 @@ jd_imap *jd_imap_connect(const jd_account *a, const char *password, int *status,
         if (ok(r)) r = mailimap_socket_starttls_with_callback(s, tls_setup, a->imap.host);
     }
     if (!ok(r)) {
-        snprintf(err, (size_t)errlen, "cannot reach %s:%d securely (error %d)", a->imap.host, a->imap.port, r);
+        unsigned long e = ERR_peek_last_error();
+        const char *why = tls_why[0] ? tls_why : e ? ERR_reason_error_string(e) : NULL;
+        if (why) snprintf(err, (size_t)errlen, "cannot reach %s:%d securely (%s)", a->imap.host, a->imap.port, why);
+        else snprintf(err, (size_t)errlen, "cannot reach %s:%d (no connection, error %d)", a->imap.host, a->imap.port, r);
         mailimap_free(s);
         return NULL;
     }

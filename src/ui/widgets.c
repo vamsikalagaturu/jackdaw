@@ -1,19 +1,21 @@
 #include "widgets.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "icons.h"
+#include "platform.h"
 
 static const jd_fonts *role(jd_ui *ui)
 {
     return ui->active ? ui->active : &ui->fonts;
 }
 
-static Font font(jd_ui *ui, int bold)
+static Font font(jd_ui *ui, int bold, float size)
 {
-    return bold ? role(ui)->semibold : role(ui)->regular;
+    return jd_font_at(bold ? role(ui)->semibold : role(ui)->regular, size);
 }
 
 void jd_ui_use(jd_ui *ui, const jd_fonts *r)
@@ -21,14 +23,23 @@ void jd_ui_use(jd_ui *ui, const jd_fonts *r)
     ui->active = r;
 }
 
+/* on a whole screen pixel, so glyphs rasterised for their size land texel on pixel */
+static float snap(float v)
+{
+    float d = jd_text_density();
+    return floorf(v * d + 0.5f) / d;
+}
+
 void jd_text(jd_ui *ui, const char *s, float x, float y, float size, Color c, int bold)
 {
-    DrawTextEx(font(ui, bold), s, (Vector2){x, y}, size, 0, c);
+    size = jd_text_size(size);
+    DrawTextEx(font(ui, bold, size), s, (Vector2){snap(x), snap(y)}, size, 0, c);
 }
 
 float jd_text_width(jd_ui *ui, const char *s, float size, int bold)
 {
-    return MeasureTextEx(font(ui, bold), s, size, 0).x;
+    size = jd_text_size(size);
+    return MeasureTextEx(font(ui, bold, size), s, size, 0).x;
 }
 
 static int utf8_prev(const char *s, int i)
@@ -51,15 +62,23 @@ void jd_text_fit(jd_ui *ui, const char *s, float x, float y, float width, float 
         jd_text(ui, s, x, y, size, c, bold);
         return;
     }
-    char buf[1024];
-    int n = (int)strlen(s);
-    if (n > (int)sizeof buf - 4) n = (int)sizeof buf - 4;
-    memcpy(buf, s, (size_t)n);
-    while (n > 0) {
-        n = utf8_prev(buf, n);
-        memcpy(buf + n, "...", 4);
-        if (jd_text_width(ui, buf, size, bold) <= width) break;
+    /* one pass over the advances: cutting a character at a time and measuring again cost a phone most of its frame */
+    size = jd_text_size(size);
+    Font f = font(ui, bold, size);
+    float scale = size / (float)f.baseSize, room = width - jd_text_width(ui, "...", size, bold), w = 0;
+    int n = (int)strlen(s), cut = 0;
+    for (int i = 0; i < n;) {
+        int len;
+        int g = GetGlyphIndex(f, GetCodepointNext(s + i, &len));
+        w += (f.glyphs[g].advanceX ? (float)f.glyphs[g].advanceX : f.recs[g].width) * scale;
+        if (w > room) break;
+        i += len;
+        cut = i;
     }
+    char buf[1024];
+    if (cut > (int)sizeof buf - 4) cut = (int)sizeof buf - 4;
+    memcpy(buf, s, (size_t)cut);
+    memcpy(buf + cut, "...", 4);
     jd_text(ui, buf, x, y, size, c, bold);
 }
 
@@ -116,9 +135,48 @@ void jd_field_input(jd_field *f)
     if (IsKeyPressed(KEY_END)) f->cursor = f->len;
 }
 
+/* the one text field menu: its field must be drawn every frame it stays open, or it closes */
+static struct {
+    jd_field *f;
+    int seen;
+    jd_popup pop;
+} field_menu;
+
+static struct {
+    const void *field; /* the last field that reported, to notice a new one */
+    int pending, have;
+    Rectangle at;
+    float view_h;
+} follow;
+
+void jd_follow_field(const void *field, Rectangle r)
+{
+    if (field != follow.field) follow.field = field, follow.pending = 1;
+    follow.have = 1;
+    follow.at = r;
+}
+
+void jd_follow_begin(void) { follow.have = 0; }
+
+void jd_follow_end(float *scroll, Rectangle view)
+{
+    if (follow.have && (follow.pending || view.height < follow.view_h - 1)) {
+        const float margin = 12;
+        if (follow.at.y + follow.at.height + margin > view.y + view.height)
+            *scroll += follow.at.y + follow.at.height + margin - (view.y + view.height);
+        else if (follow.at.y - margin < view.y)
+            *scroll -= view.y - (follow.at.y - margin);
+        if (*scroll < 0) *scroll = 0;
+        follow.pending = 0;
+    }
+    follow.view_h = view.height;
+    follow.have = 0;
+}
+
 int jd_field_draw(jd_ui *ui, jd_field *f, Rectangle r, int focused)
 {
     const float size = 15, pad = f->bare ? 4 : 10;
+    if (focused) jd_follow_field(f, r);
     if (!f->bare) {
         DrawRectangleRounded(r, 0.2f, 6, JD_NORD1);
         DrawRectangleRoundedLinesEx(r, 0.2f, 6, 1.5f, focused ? JD_NORD8 : JD_NORD2);
@@ -146,13 +204,47 @@ int jd_field_draw(jd_ui *ui, jd_field *f, Rectangle r, int focused)
     if (focused && (int)(GetTime() * 2) % 2 == 0)
         DrawRectangle((int)(r.x + pad + cx - shift), (int)ty, 1, (int)size + 2, JD_NORD8);
     jd_scissor_end();
-    return IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), r);
+    int over = CheckCollisionPointRec(GetMousePosition(), r) &&
+               !(field_menu.pop.open && CheckCollisionPointRec(GetMousePosition(), field_menu.pop.box));
+    if (f == field_menu.f) field_menu.seen = 1;
+    /* a phone's long press arrives as a right click */
+    if (over && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+        field_menu.f = f, field_menu.seen = 1;
+        jd_popup_open(&field_menu.pop);
+        return 1;
+    }
+    return over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+void jd_field_menu_draw(jd_ui *ui)
+{
+    jd_field *f = field_menu.f;
+    if (!f || !field_menu.seen) {
+        field_menu.f = NULL, field_menu.pop.open = 0;
+        return;
+    }
+    field_menu.seen = 0;
+    const char *clip = GetClipboardText();
+    jd_popup_item items[] = {
+        {"Paste", "clipboard", "Ctrl+V", !clip || !clip[0]},
+        {"Copy", "copy", NULL, f->secret || !f->len},
+        {"Cut", "scissors", NULL, f->secret || !f->len},
+        {"Clear", "x", NULL, !f->len},
+    };
+    int k = jd_popup_draw(ui, &field_menu.pop, items, 4);
+    if (k == 0)
+        for (const char *p = clip; p && *p; p++)
+            if ((unsigned char)*p >= 0x20) insert(f, p, 1);
+    if (k == 1 || k == 2) SetClipboardText(f->text);
+    if (k == 2 || k == 3) jd_field_set(f, "");
+    if (!field_menu.pop.open) field_menu.f = NULL;
 }
 
 /* width of bytes [from, to), summed per glyph so a long line costs one pass */
 static float span_width(jd_ui *ui, const char *s, int from, int to, float size)
 {
-    Font f = role(ui)->regular;
+    size = jd_text_size(size);
+    Font f = font(ui, 0, size);
     float scale = size / (float)f.baseSize, w = 0;
     for (int i = from; i < to;) {
         int len;
@@ -179,8 +271,8 @@ int *jd_wrap(jd_ui *ui, const char *text, float width, float size, int *nlines)
             continue;
         }
         int fit = start, last_space = -1;
-        Font rf = role(ui)->regular;
-        float w = 0, scale = size / (float)rf.baseSize;
+        Font rf = font(ui, 0, size);
+        float w = 0, scale = jd_text_size(size) / (float)rf.baseSize;
         while (fit < end) {
             int clen;
             int cp = GetCodepointNext(text + fit, &clen);
@@ -434,10 +526,11 @@ int jd_editor_draw(jd_ui *ui, jd_editor *e, Rectangle r, int focused)
     if (focused) {
         if (cy < e->scroll) e->scroll = cy;
         if (cy + ED_LINE > e->scroll + r.height - 2 * pad) e->scroll = cy + ED_LINE - (r.height - 2 * pad);
+        jd_follow_field(e, (Rectangle){r.x, r.y + pad + cy - e->scroll, r.width, ED_LINE});
     }
     int hover = CheckCollisionPointRec(GetMousePosition(), r);
     if (hover) {
-        e->scroll -= GetMouseWheelMove() * ED_LINE * 3;
+        e->scroll -= jd_wheel_y(ED_LINE * 3);
         float max = (float)e->nlines * ED_LINE - (r.height - 2 * pad);
         if (e->scroll > max) e->scroll = max;
         if (e->scroll < 0) e->scroll = 0;
@@ -495,6 +588,25 @@ void jd_editor_free(jd_editor *e)
     *e = (jd_editor){0};
 }
 
+static int touch_ui;
+
+void jd_set_touch(int touch) { touch_ui = touch; }
+
+float jd_wheel_y(float notch)
+{
+    float dx, dy;
+    if (plat_scroll(&dx, &dy)) return dy;
+    return GetMouseWheelMove() * notch;
+}
+
+float jd_wheel_x(float notch)
+{
+    float dx, dy;
+    if (plat_scroll(&dx, &dy)) return dx;
+    Vector2 m = GetMouseWheelMoveV();
+    return (fabsf(m.x) > fabsf(m.y) ? m.x : m.y) * notch;
+}
+
 void jd_scrollbar(Rectangle view, float content, float *scroll)
 {
     /* the scroll position being dragged, and where in the thumb it was grabbed */
@@ -514,12 +626,15 @@ void jd_scrollbar(Rectangle view, float content, float *scroll)
     float ty = track.y + (track.height - th) * (*scroll / max);
     Rectangle thumb = {track.x, ty, track.width, th};
     Vector2 m = GetMousePosition();
-    int over = CheckCollisionPointRec(m, (Rectangle){track.x - 4, track.y, track.width + 6, track.height});
-    if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+    int near = CheckCollisionPointRec(m, (Rectangle){track.x - 4, track.y, track.width + 6, track.height});
+    /* a touch screen's pointer stays where the last finger was: no hover, and a swipe starting at the edge must not
+       page */
+    int over = near && !touch_ui;
+    if (near && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         if (CheckCollisionPointRec(m, thumb)) {
             dragging = scroll;
             grab = m.y - ty;
-        } else {
+        } else if (!touch_ui) {
             *scroll += (m.y < ty ? -1 : 1) * view.height * 0.9f;
         }
     }

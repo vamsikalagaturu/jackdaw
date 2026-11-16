@@ -50,11 +50,23 @@ mkdir -p "$APK/classes" "$APK/dex"
 javac -nowarn --release 11 -Xlint:-options -cp "$ANDROID_JAR" -d "$APK/classes" $(find "$HERE/java" -name '*.java')
 "$BT/d8" --release --min-api $MIN_API --lib "$ANDROID_JAR" --output "$APK/dex" $(find "$APK/classes" -name '*.class')
 
+PKG=io.github.vamsikalagaturu.jackdaw
+MANIFEST=$HERE/AndroidManifest.xml
+# a dev build is its own app beside the release; the provider's authority must be unique on the device too
+if [ "${JD_RELEASE:-}" != 1 ]; then
+    MANIFEST=$APK/AndroidManifest.xml
+    sed -e "s/$PKG\.files/$PKG.dev.files/" -e 's/android:label="jackdaw"/android:label="jackdaw dev"/' \
+        "$HERE/AndroidManifest.xml" >"$MANIFEST"
+    RENAME=(--rename-manifest-package "$PKG.dev")
+else
+    RENAME=()
+fi
+
 step "resources ($VERSION_NAME)"
 "$BT/aapt2" compile --dir "$HERE/res" -o "$APK/res.zip"
 # versionCode must grow with each release: 1.2.3 -> 10203
 IFS=. read -r V_MAJOR V_MINOR V_PATCH <<<"$JD_VERSION"
-"$BT/aapt2" link -o "$APK/unsigned.apk" -I "$ANDROID_JAR" --manifest "$HERE/AndroidManifest.xml" -R "$APK/res.zip" \
+"$BT/aapt2" link -o "$APK/unsigned.apk" -I "$ANDROID_JAR" --manifest "$MANIFEST" "${RENAME[@]}" -R "$APK/res.zip" \
     --min-sdk-version $MIN_API --target-sdk-version $TARGET_API --debug-mode --auto-add-overlay \
     --version-name "$VERSION_NAME" --version-code $((V_MAJOR * 10000 + V_MINOR * 100 + V_PATCH))
 

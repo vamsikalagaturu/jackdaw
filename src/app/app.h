@@ -14,7 +14,7 @@ enum { PANE_FOLDERS, PANE_LIST, PANE_READER };
 
 typedef enum { DLG_NONE, DLG_PROMPT, DLG_CONFIRM, DLG_PICK_FOLDER, DLG_RULES } dialog_kind;
 typedef enum {
-    ACT_NONE, ACT_CREATE_FOLDER, ACT_RENAME_FOLDER, ACT_DELETE_FOLDER, ACT_MOVE, ACT_COPY, ACT_DESTROY, ACT_ADD_RULE
+    ACT_NONE, ACT_CREATE_FOLDER, ACT_RENAME_FOLDER, ACT_DELETE_FOLDER, ACT_MOVE, ACT_COPY, ACT_DESTROY, ACT_ADD_RULE, ACT_LOGOUT
 } action;
 
 typedef struct {
@@ -140,6 +140,8 @@ typedef struct {
     jd_thread_row *rows;
     int nrows, row;
     float list_scroll;
+    float side_scroll; /* the sidebar's folder rows (full and rail) */
+    int side_followed; /* the folder the sidebar last scrolled to */
     int followed_row; /* the selected row the list last scrolled to; it follows only when the selection moves */
     int pending_g, pending_f, pending_d;
     int64_t *picked; /* multi-select: thread ids (grouped) or message ids */
@@ -160,6 +162,7 @@ typedef struct {
     int visual;          /* visual mode: moving extends the selection from anchor */
     char *fonts_loaded;  /* the families the fonts were loaded for */
     int print_tab;       /* 1 + the tab whose conversation prints after this frame, 0 none */
+    int page_flip;       /* Shift+L: the mail page against the theme; not saved */
     int dragging; /* 0, 1 sidebar edge, 2 list edge */
 
     jd_filters filters;
@@ -199,6 +202,8 @@ void mail_reload(jd_app *app);
 void mail_body_ready(jd_app *app, int64_t id);
 void mail_server_results(jd_app *app, int64_t serial, const int64_t *ids, int n);
 void mail_select_inbox(jd_app *app);
+/* a tapped notification: the Inbox, with that message open */
+void mail_open_message(jd_app *app, int64_t id);
 
 void sidebar_draw(jd_app *app, Rectangle r);
 int sidebar_keys(jd_app *app);
@@ -268,12 +273,19 @@ void apply_prefs(jd_app *app);
 
 jd_conv *preview(jd_app *app);
 void conv_open(jd_app *app, jd_conv *c, int64_t thread, int64_t only_message);
+/* c shows the list's next (dir 1) or previous (-1) conversation; 0 at the list's ends. keep, if given, takes the
+   conversation c showed; conv_close it after */
+int reader_step(jd_app *app, jd_conv *c, int dir, jd_conv *keep);
+/* the list's selection becomes c's conversation, for the act_* functions; 0 (and a notice) when the list lacks it */
+int list_select_conv(jd_app *app, const jd_conv *c);
+void list_refresh(jd_app *app);
 void conv_close(jd_conv *c);
 void conv_refresh(jd_app *app, jd_conv *c);
 void conv_body_ready(jd_app *app, jd_conv *c, int64_t id);
 /* a fetched remote image (ok 0: it failed) for every open message that shows it */
 void images_arrived(jd_app *app, const char *url, int ok);
 void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused);
+static inline int mail_page_dark(const jd_app *app) { return !app->prefs.light != !!app->page_flip; }
 /* the newest message of c as an .eml file in Downloads */
 void conv_save_message(jd_app *app, jd_conv *c);
 /* c as an A4 PDF, handed to the system print dialog; draws off screen, so it runs between frames */
@@ -315,4 +327,6 @@ int64_t *selection_ids(jd_app *app, int *n);
 
 void app_connect(jd_app *app);
 void app_disconnect(jd_app *app);
+/* forgets the account: its password, its settings section and its local mail (to the trash) */
+void app_logout(jd_app *app);
 void format_date(int64_t t, char *out, int len);

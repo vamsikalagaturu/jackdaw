@@ -27,7 +27,7 @@ int jd_mkdirs(const char *path);
 int jd_write_file(const char *path, const void *data, size_t n, int mode);
 char *jd_read_file(const char *path, size_t *n);
 
-/* $XDG_CONFIG_HOME/jackdaw and $XDG_DATA_HOME/jackdaw, per the XDG Base Directory Specification */
+/* $XDG_CONFIG_HOME/JD_APP_NAME and $XDG_DATA_HOME/JD_APP_NAME, per the XDG Base Directory Specification */
 const char *jd_config_dir(void);
 const char *jd_data_dir(void);
 /* XDG_DOWNLOAD_DIR from user-dirs.dirs, else ~/Downloads */

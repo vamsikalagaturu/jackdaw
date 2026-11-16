@@ -28,6 +28,7 @@ target_compile_options(jackdaw PRIVATE -Wall -Wextra -Wno-unused-parameter)
 # -u keeps the glue's entry point, which nothing in the library references. The wraps let android_main.c feed
 # what raylib's Android layer leaves empty: typed text, the wheel (from dragging fingers) and the clipboard.
 target_link_options(jackdaw PRIVATE -u ANativeActivity_onCreate -Wl,--no-undefined -Wl,--gc-sections
-  -Wl,--wrap=GetCharPressed -Wl,--wrap=GetMouseWheelMove -Wl,--wrap=SetClipboardText -Wl,--wrap=GetClipboardText
+  -Wl,--wrap=GetCharPressed -Wl,--wrap=GetMouseWheelMove -Wl,--wrap=GetMouseWheelMoveV -Wl,--wrap=SetClipboardText
+  -Wl,--wrap=GetClipboardText
   -Wl,--exclude-libs,libssl.a:libcrypto.a:libcurl.a:libetpan.a:libjd_sqlite.a:liblitehtml.a:libgumbo.a)
 target_link_libraries(jackdaw PRIVATE jdapp raylib android log m)

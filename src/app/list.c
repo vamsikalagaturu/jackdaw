@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -178,10 +179,13 @@ void list_reload(jd_app *app)
         }
         app->nrows = k;
     }
+    int was = app->row;
     if (app->row >= app->nrows) app->row = app->nrows ? app->nrows - 1 : 0;
     for (int i = 0; i < app->nrows; i++)
         if ((app->grouped && app->rows[i].thread == keep_thread) || (!app->grouped && app->rows[i].latest == keep))
             app->row = i;
+    /* the same message pushed down by new mail is no move of the selection: no follow-scroll */
+    if (app->followed_row == was) app->followed_row = app->row;
 }
 
 static int64_t *ids_for_row(jd_app *app, int i, int *n)
@@ -274,6 +278,25 @@ static void schedule(jd_app *app, int64_t *ids, int n, const char *to, const cha
     clear_picks(app);
     list_reload(app);
     conv_refresh(app, preview(app));
+}
+
+void list_refresh(jd_app *app)
+{
+    if (!app->sync) return;
+    jd_sync_now(app->sync);
+    notify_user(app, "Checking for new mail...");
+}
+
+int list_select_conv(jd_app *app, const jd_conv *c)
+{
+    for (int k = 0; k < app->nrows; k++)
+        if (app->grouped ? app->rows[k].thread == c->thread : app->rows[k].latest == c->message) {
+            clear_picks(app);
+            app->row = k;
+            return 1;
+        }
+    notify_user(app, "This message is not in the list any more: open it from the list to act on it.");
+    return 0;
 }
 
 void act_move_to(jd_app *app, const char *folder, int copy)
@@ -1241,7 +1264,7 @@ void list_draw(jd_app *app, Rectangle r)
     y += 44;
 
     const char *title = app->query ? "Search results" : app->nfolders ? folder_label(&app->folders[app->folder]) : "";
-    jd_text_fit(ui, title, x, y, w - 200, 20, JD_NORD6, 1);
+    jd_text_fit(ui, title, x, y, w - 236, 20, JD_NORD6, 1);
     /* view toggles: conversations or messages, and where the reading pane goes */
     static const char *pane_icons[] = {"panel-right", "panel-bottom", "rows-2"};
     static const char *pane_tips[] = {"Reading pane: right (p)", "Reading pane: bottom (p)", "Reading pane: off (p)"};
@@ -1275,15 +1298,34 @@ void list_draw(jd_app *app, Rectangle r)
         }
         tx2 -= 6;
     }
+    {
+        Rectangle b = {tx2 - 30, y - 2, 30, 26};
+        int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind && !app->menu.open && !under_hints;
+        if (hover) DrawRectangleRounded(b, 0.4f, 6, JD_NORD2);
+        jd_icon("refresh-cw", b.x + 8, y + 3, 14, hover ? JD_NORD8 : JD_NORD4);
+        if (hover && !app->ui.touch) jd_tooltip("Check for new mail (Ctrl+R)", b.x - 120, y + 26);
+        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) list_refresh(app);
+        tx2 -= 36;
+    }
     y += 32;
 
     float cx = x;
     if (chip(app, "Unread", NULL, &cx, y, app->filter_unread)) toggle_filter(app, &app->filter_unread);
     if (chip(app, "Flagged", "star", &cx, y, app->filter_flagged)) toggle_filter(app, &app->filter_flagged);
     if (chip(app, "Files", "paperclip", &cx, y, app->filter_attachment)) toggle_filter(app, &app->filter_attachment);
+    static int to_top;
+    if (app->list_scroll > 1 || to_top) {
+        Rectangle b = {x + w - 34, y, 34, 26};
+        int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind && !app->menu.open && !under_hints;
+        DrawRectangleRounded(b, 0.5f, 8, hover ? JD_NORD2 : JD_NORD1);
+        DrawRectangleRoundedLinesEx(b, 0.5f, 8, 1, JD_NORD2);
+        jd_icon("arrow-up-to-line", b.x + 10, y + 6, 14, hover ? JD_NORD8 : JD_NORD4);
+        if (hover && !app->ui.touch) jd_tooltip("Back to the top", b.x - 70, y + 30);
+        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) to_top = 1;
+    }
     y += 34;
 
-    if (app->npicked) {
+    if (app->npicked && !plat_touch()) {
         char line[80];
         snprintf(line, sizeof line, "%d selected", app->npicked);
         DrawRectangleRounded((Rectangle){x, y, w, 30}, 0.3f, 6, JD_NORD2);
@@ -1310,7 +1352,9 @@ void list_draw(jd_app *app, Rectangle r)
         y += 24;
     }
 
-    Rectangle area = {r.x, y, r.width, r.y + r.height - y};
+    const float pick_bar_h = 50; /* the rail's settings strip (sidebar.c), so their top lines meet */
+    int pick_bar = app->npicked && plat_touch();
+    Rectangle area = {r.x, y, r.width, r.y + r.height - y - (pick_bar ? pick_bar_h : 0)};
     DrawRectangle((int)r.x, (int)y - 1, (int)r.width, 1, JD_NORD1);
     if (!app->nrows) {
         jd_text(ui, app->query ? "Nothing matches." : "No messages here.", x, y + 16, 15, JD_MUTED, 0);
@@ -1320,20 +1364,61 @@ void list_draw(jd_app *app, Rectangle r)
     /* the list's text size, relative to the 15 px it was laid out for */
     float k = (float)(app->prefs.list_text ? app->prefs.list_text : 15) / 15.0f;
     int show_folders = app->query && !app->search_here;
-    /* where each row starts, date headings included */
-    float *top = jd_alloc(sizeof *top * (size_t)(app->nrows + 1));
-    char prev[64] = "", group[64];
-    float yy = 0;
-    for (int i = 0; i < app->nrows; i++) {
-        date_group(app->rows[i].date, group, sizeof group);
-        if (strcmp(group, prev) != 0) {
-            yy += HEADER_H;
-            strcpy(prev, group);
-        }
-        top[i] = yy;
-        yy += rh;
+    /* cached: converting ~1000 dates to local time each frame halved a phone's scrolling frame rate */
+    static struct {
+        const jd_thread_row *rows;
+        int n;
+        float rh;
+        time_t day; /* local midnight */
+        float *top;
+        char (*heading)[24]; /* empty when row i continues the group above */
+        char (*date)[24];
+        float total;
+        uint64_t sig; /* the rows' ids and dates: a reload may hand back the same block with other rows */
+        int64_t anchor;   /* first row on screen last frame (thread or message id) */
+        float anchor_off;
+    } lay;
+    uint64_t sig = 0;
+    for (int i = 0; i < app->nrows; i++)
+        sig = sig * 1099511628211u + (uint64_t)app->rows[i].latest * 31u + (uint64_t)app->rows[i].date;
+    time_t now_t = time(NULL);
+    static time_t day_checked, midnight;
+    if (now_t - day_checked > 30) {
+        struct tm m;
+        localtime_r(&now_t, &m);
+        m.tm_hour = m.tm_min = m.tm_sec = 0;
+        midnight = mktime(&m), day_checked = now_t;
     }
-    float total = yy + 12;
+    if (lay.rows != app->rows || lay.n != app->nrows || lay.rh != rh || lay.day != midnight || lay.sig != sig) {
+        lay.rows = app->rows, lay.n = app->nrows, lay.rh = rh, lay.day = midnight, lay.sig = sig;
+        lay.top = jd_realloc(lay.top, sizeof *lay.top * (size_t)(app->nrows + 1));
+        lay.heading = jd_realloc(lay.heading, sizeof *lay.heading * (size_t)(app->nrows + 1));
+        lay.date = jd_realloc(lay.date, sizeof *lay.date * (size_t)(app->nrows + 1));
+        char prev[24] = "", group[24];
+        float yy = 0;
+        for (int i = 0; i < app->nrows; i++) {
+            date_group(app->rows[i].date, group, sizeof group);
+            lay.heading[i][0] = 0;
+            if (strcmp(group, prev) != 0) {
+                yy += HEADER_H;
+                strcpy(prev, group);
+                strcpy(lay.heading[i], group);
+            }
+            lay.top[i] = yy;
+            yy += rh;
+            format_date(app->rows[i].date, lay.date[i], sizeof lay.date[i]);
+        }
+        lay.total = yy + 12;
+        /* rows came or went above the view: the first row shown keeps its place */
+        if (lay.anchor && app->list_scroll > 0)
+            for (int i = 0; i < app->nrows; i++)
+                if ((app->grouped ? app->rows[i].thread : app->rows[i].latest) == lay.anchor) {
+                    app->list_scroll = lay.top[i] - lay.anchor_off;
+                    break;
+                }
+    }
+    const float *top = lay.top;
+    float total = lay.total;
     /* the list follows the selection only when it moves; otherwise the wheel and the follow fight */
     if (app->row != app->followed_row) {
         if (top[app->row] - HEADER_H < app->list_scroll) app->list_scroll = top[app->row] - HEADER_H;
@@ -1341,22 +1426,56 @@ void list_draw(jd_app *app, Rectangle r)
         app->followed_row = app->row;
     }
     int over = CheckCollisionPointRec(GetMousePosition(), area) && !app->dialog.kind && !app->menu.open && !under_hints;
-    if (over) app->list_scroll -= GetMouseWheelMove() * rh * 2;
+    float move = over ? jd_wheel_y(rh * 2) : 0;
+    /* pull to refresh; a fling reaching the top pulls nothing */
+    static float pull;              /* logical px */
+    static double refreshing_since; /* > 0 while a pulled check runs */
+    static int saw_busy;            /* the sync reported work since the pull (it may not have started yet) */
+    const float PULL_AT = 72, PULL_MAX = 130, REFRESH_H = 56;
+    int pulling = plat_finger_scrolling();
+    if (pulling && (pull > 0 || (app->list_scroll <= 0 && move > 0))) {
+        /* resistance grows as it comes down, as SwipeRefreshLayout's */
+        pull = fmaxf(0, fminf(PULL_MAX, pull + move * (1 - pull / PULL_MAX) * 0.6f));
+        move = 0;
+    } else if (!pulling && pull > 0) {
+        if (pull >= PULL_AT && refreshing_since <= 0) {
+            list_refresh(app);
+            refreshing_since = GetTime(), saw_busy = 0;
+        }
+        float rest = refreshing_since > 0 ? REFRESH_H : 0;
+        pull = rest + (pull - rest) * expf(-GetFrameTime() * 14);
+        if (fabsf(pull - rest) < 0.5f) pull = rest;
+    }
+    if (refreshing_since > 0) {
+        if (app->status) saw_busy = 1;
+        double held = GetTime() - refreshing_since;
+        if ((held > 0.8 && !app->status && (saw_busy || held > 2)) || held > 20) refreshing_since = 0;
+    }
+    app->list_scroll -= move;
+    if (to_top) {
+        if (move != 0 || pulling) to_top = 0;
+        else if ((app->list_scroll *= expf(-GetFrameTime() * 12)) < 0.5f) app->list_scroll = 0, to_top = 0;
+    }
     if (app->list_scroll > total - area.height) app->list_scroll = total - area.height;
     if (app->list_scroll < 0) app->list_scroll = 0;
-    /* whole pixels: a fractional offset makes text shimmer while scrolling */
-    app->list_scroll = (float)(int)app->list_scroll;
+    /* kept fractional: rounding every frame dropped a slow finger's movement (jd_text snaps text to pixels) */
 
     jd_scissor(area.x, area.y, area.width, area.height);
-    prev[0] = 0;
-    for (int i = 0; i < app->nrows; i++) {
-        float ry = area.y + top[i] - app->list_scroll;
-        date_group(app->rows[i].date, group, sizeof group);
-        int heading = strcmp(group, prev) != 0;
-        strcpy(prev, group);
+    int first = 0;
+    for (int lo = 0, hi = app->nrows - 1; lo <= hi;) {
+        int mid = (lo + hi) / 2;
+        if (area.y + top[mid] - app->list_scroll + pull + rh < area.y) lo = mid + 1, first = lo;
+        else hi = mid - 1;
+    }
+    if (first < app->nrows) {
+        lay.anchor = app->grouped ? app->rows[first].thread : app->rows[first].latest;
+        lay.anchor_off = top[first] - app->list_scroll;
+    }
+    for (int i = first; i < app->nrows; i++) {
+        float ry = area.y + top[i] - app->list_scroll + pull;
         if (ry > area.y + area.height) break;
         if (ry + rh < area.y) continue;
-        if (heading) jd_text(ui, group, x, ry - HEADER_H + 9, 12, JD_MUTED, 1);
+        if (lay.heading[i][0]) jd_text(ui, lay.heading[i], x, ry - HEADER_H + 9, 12, JD_MUTED, 1);
         const jd_thread_row *t = &app->rows[i];
         Rectangle box = {r.x + 8, ry + 1, r.width - 16, rh - 2};
         int open = app->grouped ? t->thread == preview(app)->thread : t->latest == preview(app)->message;
@@ -1367,7 +1486,8 @@ void list_draw(jd_app *app, Rectangle r)
         /* the keyboard's place: outlined only while the list has the keys */
         if (i == app->row && app->pane == PANE_LIST && app->tab == 0 && !plat_touch())
             DrawRectangleRoundedLinesEx(box, 0.12f, 6, 1.5f, JD_NORD8);
-        else if (open || hover) DrawRectangleRounded(box, 0.12f, 6, JD_NORD1);
+        /* no hover on a touch screen: its pointer is wherever the last finger was, and rows slide past it */
+        else if (open || (hover && !plat_touch())) DrawRectangleRounded(box, 0.12f, 6, JD_NORD1);
 
         float ax = box.x + (app->prefs.compact ? 20 : 26), ay = ry + (app->prefs.compact ? rh / 2 : 28);
         float ar = app->prefs.compact ? 11 : 17;
@@ -1408,14 +1528,15 @@ void list_draw(jd_app *app, Rectangle r)
         }
         if (handled && i >= app->nrows) break;
 
-        char date[32], count[16] = "";
-        format_date(t->date, date, sizeof date);
+        char count[16] = "";
+        const char *date = lay.date[i];
         jd_ui_use(ui, &ui->list);
         float dw = jd_text_width(ui, date, 12 * k, 0);
         if (t->count > 1) snprintf(count, sizeof count, "%d", t->count);
         float cw = count[0] ? jd_text_width(ui, count, 12 * k, 1) + 12 : 0;
         Color strong = t->unread ? JD_NORD6 : JD_NORD4;
-        int show_meta = !(hover && !app->prefs.compact);
+        /* the hover actions take the date's place; a touch screen has no hover */
+        int show_meta = !(hover && !app->prefs.compact && !plat_touch());
         /* outside the folder being shown, rows say where they are */
         float chips_w = show_folders ? folder_chips(app, t->folders, right, ry + (app->prefs.compact ? rh / 2 - 10 : 52 * k), 1, k) : 0;
         if (app->prefs.compact) {
@@ -1449,7 +1570,44 @@ void list_draw(jd_app *app, Rectangle r)
         jd_ui_use(ui, NULL);
     }
     jd_scissor_end();
-    free(top);
     if (!app->dialog.kind && !app->menu.open) jd_scrollbar(area, total, &app->list_scroll);
+    if (pull > 1) {
+        float cx = area.x + area.width / 2, cy = area.y + pull / 2, rad = 11;
+        float a = (float)GetTime() * 360;
+        if (refreshing_since > 0) {
+            DrawRing((Vector2){cx, cy}, rad - 2.5f, rad, a, a + 270, 32, JD_NORD8);
+        } else {
+            float k = fminf(1, pull / PULL_AT);
+            DrawRing((Vector2){cx, cy}, rad - 2.5f, rad, -90 + k * 120, -90 + k * 120 + k * 300, 32,
+                     k >= 1 ? JD_NORD8 : JD_NORD4);
+        }
+    }
+    if (pick_bar) {
+        Rectangle bar = {r.x, area.y + area.height, r.width, pick_bar_h};
+        DrawRectangleRec(bar, JD_NORD1);
+        DrawRectangle((int)bar.x, (int)bar.y, (int)bar.width, 1, JD_NORD2);
+        struct {
+            const char *icon;
+            void (*fn)(jd_app *);
+        } acts[] = {{"archive", act_archive}, {"trash-2", act_delete}, {"mail-open", act_toggle_read}, {"star", act_toggle_flag}};
+        int free_tap = !app->dialog.kind && !app->menu.open;
+        float step = fminf(64, (bar.width - 110) / 4), bx = bar.x + bar.width - 4 * step - 4;
+        /* slot 0 clears the selection; 1..4 are the actions */
+        for (int k = 0; k < 5; k++) {
+            Rectangle slot = k ? (Rectangle){bx + step * (float)(k - 1), bar.y + 1, step, 48}
+                               : (Rectangle){bar.x + 8, bar.y + 1, 48, 48};
+            Rectangle face = {slot.x + (slot.width - 40) / 2, bar.y + 7, 40, 36};
+            int hover = free_tap && CheckCollisionPointRec(GetMousePosition(), slot);
+            if (hover) DrawRectangleRounded(face, 0.3f, 6, JD_NORD2);
+            jd_icon(k ? acts[k - 1].icon : "x", face.x + 11, face.y + 9, 18, hover ? JD_NORD8 : JD_NORD4);
+            if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                if (k) acts[k - 1].fn(app);
+                else clear_picks(app);
+            }
+        }
+        char line[32];
+        snprintf(line, sizeof line, "%d", app->npicked);
+        jd_text(ui, line, bar.x + 58, bar.y + 14, 18, JD_NORD4, 1);
+    }
     hints_draw(app, x, hints_y, w);
 }

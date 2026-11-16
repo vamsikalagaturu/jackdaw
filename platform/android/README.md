@@ -19,6 +19,9 @@ JD_ABIS=x86_64 platform/android/build.sh   # the emulator's ABI alone, faster
 (`~/.cache/jackdaw/imap-test/ca.crt`, from `tests/imap/start.sh`) besides the system's roots when that file exists;
 `JD_TEST_CA= platform/android/build.sh` builds without it.
 
+A build without `JD_RELEASE=1` is the separate app `io.github.vamsikalagaturu.jackdaw.dev` ("jackdaw dev"), so it
+installs beside a release and never touches its data.
+
 ## Run in the emulator
 
 ```sh
@@ -26,7 +29,7 @@ emulator -avd jackdaw-test -no-audio -no-boot-anim -gpu host &   # AVD: android-
 tests/imap/start.sh
 for p in 9993 9143 9465 9587 14190 9080; do adb reverse tcp:$p tcp:$p; done   # the test server as localhost
 adb install -r ~/.cache/jackdaw/android/out/jackdaw.apk
-adb shell am start -n io.github.vamsikalagaturu.jackdaw/.JackdawActivity
+adb shell am start -n io.github.vamsikalagaturu.jackdaw.dev/io.github.vamsikalagaturu.jackdaw.JackdawActivity
 ```
 
 Test account: `jackdaw@localhost`, user `jackdaw`, password `jackdaw-test`, IMAP `localhost` 9993 TLS, SMTP

@@ -127,7 +127,7 @@ static void handle_events(jd_app *app)
 int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "--version") == 0) {
-        puts("jackdaw " JD_VERSION);
+        puts(JD_APP_NAME " " JD_VERSION);
         return 0;
     }
     plat_init();
@@ -135,12 +135,13 @@ int main(int argc, char **argv)
     if (!plat_touch()) SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
     SetTraceLogLevel(LOG_WARNING);
     /* a phone's window is its whole screen */
-    if (plat_touch()) InitWindow(0, 0, "jackdaw");
-    else InitWindow(1100, 720, "jackdaw");
+    if (plat_touch()) InitWindow(0, 0, JD_APP_NAME);
+    else InitWindow(1100, 720, JD_APP_NAME);
     SetExitKey(KEY_NULL);
     plat_window_ready();
     jd_app app = {.grouped = 1, .pane = PANE_LIST};
     app.ui.touch = plat_touch();
+    jd_set_touch(app.ui.touch);
 
     char err[512];
     int first_run = access(jd_settings_path(), F_OK) != 0;
@@ -163,8 +164,9 @@ int main(int argc, char **argv)
             images_arrived(&app, url, ok);
             free(url);
         }
-        if (plat_notify_poll()) {
-            mail_select_inbox(&app);
+        int64_t tapped = plat_notify_poll();
+        if (tapped) {
+            mail_open_message(&app, tapped);
             SetWindowFocused();
         }
         if (!app.show_form && IsKeyPressed(KEY_COMMA) && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)))
@@ -174,6 +176,7 @@ int main(int argc, char **argv)
         jd_scale_begin();
         if (app.show_form) form_frame(&app);
         else mail_frame(&app);
+        jd_field_menu_draw(&app.ui);
         jd_scale_end();
         EndDrawing();
         if (app.print_tab) {

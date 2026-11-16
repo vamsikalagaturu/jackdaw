@@ -53,7 +53,7 @@ static float doc(jd_app *app, jd_conv *c, float y, int draw)
         y += 10;
         if (m->html && !c->plain) {
             if (m->html_w != CW) m->html_h = jd_html_layout(m->html, CW), m->html_w = CW;
-            if (draw) jd_html_draw(m->html, MARGIN, y, y - LH, y + m->html_h + LH);
+            if (draw) jd_html_set_dark(m->html, 0), jd_html_draw(m->html, MARGIN, y, y - LH, y + m->html_h + LH);
             y += m->html_h;
         } else if (m->text) {
             jd_ui_use(ui, app->prefs.mono_plain ? &ui->mono : &ui->reader);
@@ -131,7 +131,7 @@ void print_conv(jd_app *app, jd_conv *c)
     for (int i = 0; i < c->n; i++) c->reading[i].html_w = 0;
 
     const char *run = getenv("XDG_RUNTIME_DIR");
-    char *dir = run && run[0] ? jd_printf("%s/jackdaw/print", run) : jd_printf("%s/print", app->dir);
+    char *dir = run && run[0] ? jd_printf("%s/" JD_APP_NAME "/print", run) : jd_printf("%s/print", app->dir);
     const char *subject = c->reading[c->n - 1].row.subject;
     char name[200];
     snprintf(name, sizeof name, "%.180s.pdf", subject && subject[0] ? subject : "message");

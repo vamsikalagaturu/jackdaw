@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,7 +35,8 @@ static void unload_fonts(jd_ui *ui)
     jd_fonts_unload(&ui->fonts);
     jd_fonts_unload(&ui->list);
     jd_fonts_unload(&ui->reader);
-    UnloadFont(ui->mono.regular);
+    jd_face_free(ui->mono.regular);
+    ui->mono.regular = ui->mono.semibold = NULL;
 }
 
 /* the font families of prefs, loaded when they differ from what is loaded */
@@ -77,6 +79,7 @@ void apply_prefs(jd_app *app)
     app->side_w = (float)app->prefs.sidebar_width;
     app->list_w = (float)app->prefs.list_width;
     app->list_h = (float)app->prefs.list_height;
+    plat_push(app->prefs.notify && app->prefs.push);
     load_fonts(app);
     /* HTML is laid out with the message text size as its default: open messages are read again for a new one */
     static int laid_out_size;
@@ -112,6 +115,24 @@ void mail_reload(jd_app *app)
 void mail_body_ready(jd_app *app, int64_t id)
 {
     for (int t = 0; t < app->ntabs; t++) conv_body_ready(app, &app->tabs[t].conv, id);
+}
+
+void mail_open_message(jd_app *app, int64_t id)
+{
+    mail_select_inbox(app);
+    int64_t thread = app->view ? jd_message_thread(app->view, id) : 0;
+    /* a test notification names no message */
+    if (!thread) return;
+    for (int k = 0; k < app->nrows; k++)
+        if (app->grouped ? app->rows[k].thread == thread : app->rows[k].latest == id) {
+            app->row = k;
+            app->pane = PANE_LIST;
+            reader_open(app, app->prefs.reader_pos == 2);
+            return;
+        }
+    /* filtered out of the list */
+    jd_tab *t = tab_add(app, TAB_CONV);
+    conv_open(app, &t->conv, thread, app->grouped ? 0 : id);
 }
 
 void mail_select_inbox(jd_app *app)
@@ -170,74 +191,153 @@ static void mail_keys(jd_app *app)
 }
 
 /* a splitter the mouse drags: pos is measured from origin along the drag axis */
-static float splitter(jd_app *app, int id, Rectangle r, int vertical, float origin, float pos, float min, float max)
+/* *pos changes only while dragged, so a window shown small for a moment does not shrink the saved size */
+static void splitter(jd_app *app, int id, Rectangle r, int vertical, float origin, float *pos, float min, float max)
 {
     Vector2 m = GetMousePosition();
     Rectangle grab = vertical ? (Rectangle){r.x - 3, r.y, r.width + 6, r.height} : (Rectangle){r.x, r.y - 3, r.width, r.height + 6};
     int hover = CheckCollisionPointRec(m, grab) && !app->dialog.kind && !app->menu.open;
     if (hover || app->dragging == id) SetMouseCursor(vertical ? MOUSE_CURSOR_RESIZE_EW : MOUSE_CURSOR_RESIZE_NS);
     if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) app->dragging = id;
-    if (app->dragging == id) {
-        pos = (vertical ? m.x : m.y) - origin;
-        if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-            app->dragging = 0;
-            save_prefs(app);
-        }
-    }
     DrawRectangleRec(r, app->dragging == id ? JD_NORD3 : hover ? JD_NORD2 : JD_NORD1);
-    return pos < min ? min : pos > max ? max : pos;
+    if (app->dragging != id) return;
+    float p = (vertical ? m.x : m.y) - origin;
+    *pos = p < min ? min : p > max ? max : p;
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+        app->dragging = 0;
+        save_prefs(app);
+    }
 }
 
 /* reply, forward and the message actions above the preview */
-static void toolbar(jd_app *app, Rectangle r)
+enum { TB_REPLY, TB_REPLY_ALL, TB_FORWARD, TB_ARCHIVE, TB_DELETE, TB_MOVE, TB_UNREAD, TB_FLAG, TB_PLAIN, TB_PAGE,
+       TB_TAB, TB_SAVE, TB_PRINT, TB_COUNT };
+
+/* those that do not fit go into a menu behind the last; returns 1 when a tab's message left it (archived, deleted) */
+static int toolbar_buttons(jd_app *app, jd_conv *c, Rectangle r, int in_tab)
 {
-    jd_conv *c = preview(app);
-    DrawRectangleRec((Rectangle){r.x, r.y, r.width, 44}, JD_NORD0);
-    DrawRectangle((int)r.x, (int)r.y + 43, (int)r.width, 1, JD_NORD1);
+    static jd_popup more;
+    static int more_ids[TB_COUNT], nmore;
+    /* drawn once a frame: the calls count frames */
+    static unsigned calls, opened_at;
+    calls++;
     int64_t last = c->reading[c->n - 1].row.id;
     struct {
         const char *icon, *tip;
         int gap;
-    } buttons[] = {{"reply", "Reply (r)", 0}, {"reply-all", "Reply all (R)", 0}, {"forward", "Forward (F)", 0},
-                   {"archive", "Archive (e)", 1}, {"trash-2", "Delete (dd)", 0}, {"folder-input", "Move (m)", 0},
-                   {"mail", "Mark unread (u)", 0}, {"star", "Flag (s)", 0},
-                   {c->plain ? "file-image" : "file-text", c->plain ? "Show HTML (Shift+P)" : "Show plain text (Shift+P)", 1},
-                   {"external-link", "Open in a tab (Shift+Enter)", 0}, {"download", "Save as .eml (Ctrl+S)", 0}, {"printer", "Print (Ctrl+P)", 0}};
-    float x = r.x + 16;
+    } all[TB_COUNT] = {
+        [TB_REPLY] = {"reply", "Reply (r)", 0}, [TB_REPLY_ALL] = {"reply-all", "Reply all (R)", 0},
+        [TB_FORWARD] = {"forward", "Forward (F)", 0}, [TB_ARCHIVE] = {"archive", "Archive (e)", 1},
+        [TB_DELETE] = {"trash-2", "Delete (dd)", 0}, [TB_MOVE] = {"folder-input", "Move (m)", 0},
+        [TB_UNREAD] = {"mail", "Mark unread (u)", 0}, [TB_FLAG] = {"star", "Flag (s)", 0},
+        [TB_PLAIN] = {c->plain ? "file-image" : "file-text", c->plain ? "Show HTML (Shift+P)" : "Show plain text (Shift+P)", 1},
+        [TB_PAGE] = {mail_page_dark(app) ? "sun" : "moon", mail_page_dark(app) ? "Light mail page (Shift+L)" : "Dark mail page (Shift+L)", 0},
+        [TB_TAB] = {"external-link", "Open in a tab (Shift+Enter)", 0}, [TB_SAVE] = {"download", "Save as .eml (Ctrl+S)", 0},
+        [TB_PRINT] = {"printer", "Print (Ctrl+P)", 0},
+    };
+    static const int desk[] = {TB_REPLY, TB_REPLY_ALL, TB_FORWARD, TB_ARCHIVE, TB_DELETE, TB_MOVE, TB_UNREAD,
+                               TB_FLAG, TB_PLAIN, TB_PAGE, TB_TAB, TB_SAVE, TB_PRINT};
+    static const int tab[] = {TB_REPLY, TB_REPLY_ALL, TB_FORWARD, TB_ARCHIVE, TB_DELETE, TB_MOVE, TB_UNREAD,
+                              TB_FLAG, TB_PLAIN, TB_PAGE, TB_SAVE, TB_PRINT};
+    static const int phone[] = {TB_ARCHIVE, TB_DELETE, TB_UNREAD, TB_FLAG, TB_REPLY, TB_MOVE, TB_REPLY_ALL,
+                                TB_FORWARD, TB_PLAIN, TB_PAGE, TB_SAVE, TB_PRINT};
+    const int *order = !in_tab ? desk : plat_touch() ? phone : tab;
+    int n = !in_tab ? (int)(sizeof desk / sizeof *desk)
+                    : plat_touch() ? (int)(sizeof phone / sizeof *phone) : (int)(sizeof tab / sizeof *tab);
+    float need = 0;
+    for (int k = 0; k < n; k++) need += 36 + (all[order[k]].gap && k ? 12 : 0);
+    int shown = n;
+    if (need > r.width - 8) {
+        float w = 36;
+        for (shown = 0; shown < n && w + 36 + (all[order[shown]].gap && shown ? 12 : 0) <= r.width - 8; shown++)
+            w += 36 + (all[order[shown]].gap && shown ? 12 : 0);
+    }
+    /* 48 dp: Material's minimum touch target */
+    int spread = in_tab && plat_touch();
+    if (spread) {
+        int slots = (int)(r.width / 48);
+        shown = n <= slots ? n : slots - 1;
+    }
+    float step = spread ? r.width / (float)(shown + (shown < n)) : 36;
+    float x = r.x;
     const char *tip = NULL;
     float tip_x = 0;
-    for (int i = 0; i < (int)(sizeof buttons / sizeof *buttons); i++) {
-        /* buttons that would not fit the pane are left out; their keys still work */
-        if (x + (buttons[i].gap ? 12 : 0) + 32 > r.x + r.width - 8) break;
-        if (buttons[i].gap) {
+    int chosen = -1, free_mouse = !app->dialog.kind && !app->menu.open && !more.open;
+    for (int k = 0; k < shown; k++) {
+        int id = order[k];
+        if (spread) x = r.x + step * (float)k + (step - 32) / 2;
+        else if (all[id].gap && k) {
             DrawRectangle((int)x + 4, (int)r.y + 12, 1, 20, JD_NORD2);
             x += 12;
         }
         Rectangle b = {x, r.y + 6, 32, 32};
-        int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind && !app->menu.open;
+        int hover = CheckCollisionPointRec(GetMousePosition(), b) && free_mouse;
         if (hover) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
-        jd_icon(buttons[i].icon, x + 7, r.y + 13, 18, hover ? JD_NORD8 : JD_NORD4);
-        if (hover) tip = buttons[i].tip, tip_x = x;
-        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            switch (i) {
-            case 0: compose_open(app, COMPOSE_REPLY, last); break;
-            case 1: compose_open(app, COMPOSE_REPLY_ALL, last); break;
-            case 2: compose_open(app, COMPOSE_FORWARD, last); break;
-            case 3: act_archive(app); break;
-            case 4: act_delete(app); break;
-            case 5: dialog_open(app, DLG_PICK_FOLDER, ACT_MOVE, "Move to", NULL); break;
-            case 6: act_toggle_read(app); break;
-            case 7: act_toggle_flag(app); break;
-            case 8: c->plain = !c->plain; break;
-            case 9: reader_open(app, 1); break;
-            case 10: conv_save_message(app, c); break;
-            case 11: app->print_tab = 1; break;
-            }
-            return;
-        }
+        jd_icon(all[id].icon, x + 7, r.y + 13, 18, hover ? JD_NORD8 : JD_NORD4);
+        if (hover && !app->ui.touch) tip = all[id].tip, tip_x = x;
+        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) chosen = id;
         x += 36;
     }
+    if (shown < n) {
+        if (spread) x = r.x + step * (float)shown + (step - 32) / 2;
+        Rectangle b = {x, r.y + 6, 32, 32};
+        int hover = CheckCollisionPointRec(GetMousePosition(), b) && free_mouse;
+        if (hover || more.open) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
+        jd_icon("ellipsis-vertical", x + 7, r.y + 13, 18, hover ? JD_NORD8 : JD_NORD4);
+        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            jd_popup_open(&more);
+            nmore = 0;
+            for (int k = shown; k < n; k++) more_ids[nmore++] = order[k];
+            /* jd_popup_draw's height is 8 plus 30 a row */
+            float h = 8 + 30 * (float)nmore;
+            more.at = (Vector2){x + 32 - 240, spread ? r.y - h - 4 : r.y + 40};
+            opened_at = calls;
+        }
+    }
+    /* drawn from the next frame: the press that opened it is outside it, and would close it at once */
+    if (more.open && calls > opened_at) {
+        jd_popup_item items[TB_COUNT];
+        for (int k = 0; k < nmore; k++) {
+            const char *t = all[more_ids[k]].tip;
+            items[k] = (jd_popup_item){.label = t, .icon = all[more_ids[k]].icon};
+        }
+        char labels[TB_COUNT][48];
+        for (int k = 0; k < nmore; k++) {
+            snprintf(labels[k], sizeof labels[k], "%s", items[k].label);
+            char *paren = strstr(labels[k], " (");
+            if (paren) *paren = 0;
+            items[k].label = labels[k];
+        }
+        int k = jd_popup_draw(&app->ui, &more, items, nmore);
+        if (k >= 0) chosen = more_ids[k];
+    }
     if (tip) jd_tooltip(tip, tip_x, r.y + 42);
+    /* a tab's message may not be the list's selection: the actions on the list's messages are pointed at it */
+    int on_list = chosen == TB_ARCHIVE || chosen == TB_DELETE || chosen == TB_MOVE || chosen == TB_UNREAD || chosen == TB_FLAG;
+    if (in_tab && on_list && !list_select_conv(app, c)) return 0;
+    switch (chosen) {
+    case TB_REPLY: compose_open(app, COMPOSE_REPLY, last); break;
+    case TB_REPLY_ALL: compose_open(app, COMPOSE_REPLY_ALL, last); break;
+    case TB_FORWARD: compose_open(app, COMPOSE_FORWARD, last); break;
+    case TB_ARCHIVE: act_archive(app); return in_tab;
+    case TB_DELETE: act_delete(app); return in_tab;
+    case TB_MOVE: dialog_open(app, DLG_PICK_FOLDER, ACT_MOVE, "Move to", NULL); break;
+    case TB_UNREAD: act_toggle_read(app); break;
+    case TB_FLAG: act_toggle_flag(app); break;
+    case TB_PLAIN: c->plain = !c->plain; break;
+    case TB_PAGE: app->page_flip = !app->page_flip; break;
+    case TB_TAB: reader_open(app, 1); break;
+    case TB_SAVE: conv_save_message(app, c); break;
+    case TB_PRINT: app->print_tab = in_tab ? app->tab + 1 : 1; break;
+    }
+    return 0;
+}
+
+static void toolbar(jd_app *app, Rectangle r)
+{
+    DrawRectangleRec((Rectangle){r.x, r.y, r.width, 44}, JD_NORD0);
+    DrawRectangle((int)r.x, (int)r.y + 43, (int)r.width, 1, JD_NORD1);
+    toolbar_buttons(app, preview(app), (Rectangle){r.x + 16, r.y, r.width - 16, 44}, 0);
 }
 
 /* the reader first, then its toolbar above it, so the toolbar's tooltip lands on top */
@@ -260,24 +360,28 @@ static void mail_draw(jd_app *app, Rectangle r)
     float w = r.width, h = r.height;
     if (!app->list_w) app->list_w = w > 1300 ? 500 : w * 0.44f;
     if (!app->list_h) app->list_h = h * 0.45f;
+    /* fitted to this window without changing the saved sizes */
+    float lh = fmaxf(160, fminf(app->list_h, h - 140)), lw = fmaxf(300, fminf(app->list_w, w - 300));
     switch (app->prefs.reader_pos) {
     case 1:
-        app->list_h = splitter(app, 2, (Rectangle){r.x, r.y + app->list_h, w, SPLIT}, 0, r.y, app->list_h, 160, h - 140);
-        list_draw(app, (Rectangle){r.x, r.y, w, app->list_h});
-        preview_draw(app, (Rectangle){r.x, r.y + app->list_h + SPLIT, w, h - app->list_h - SPLIT});
-        focus_line(app, PANE_LIST, (Rectangle){r.x, r.y, w, app->list_h});
-        focus_line(app, PANE_READER, (Rectangle){r.x, r.y + app->list_h + SPLIT, w, h - app->list_h - SPLIT});
+        splitter(app, 2, (Rectangle){r.x, r.y + lh, w, SPLIT}, 0, r.y, &app->list_h, 160, h - 140);
+        lh = fmaxf(160, fminf(app->list_h, h - 140));
+        list_draw(app, (Rectangle){r.x, r.y, w, lh});
+        preview_draw(app, (Rectangle){r.x, r.y + lh + SPLIT, w, h - lh - SPLIT});
+        focus_line(app, PANE_LIST, (Rectangle){r.x, r.y, w, lh});
+        focus_line(app, PANE_READER, (Rectangle){r.x, r.y + lh + SPLIT, w, h - lh - SPLIT});
         break;
     case 2:
         list_draw(app, r);
         focus_line(app, PANE_LIST, r);
         break;
     default:
-        app->list_w = splitter(app, 2, (Rectangle){r.x + app->list_w, r.y, SPLIT, h}, 1, r.x, app->list_w, 300, w - 300);
-        list_draw(app, (Rectangle){r.x, r.y, app->list_w, h});
-        preview_draw(app, (Rectangle){r.x + app->list_w + SPLIT, r.y, w - app->list_w - SPLIT, h});
-        focus_line(app, PANE_LIST, (Rectangle){r.x, r.y, app->list_w, h});
-        focus_line(app, PANE_READER, (Rectangle){r.x + app->list_w + SPLIT, r.y, w - app->list_w - SPLIT, h});
+        splitter(app, 2, (Rectangle){r.x + lw, r.y, SPLIT, h}, 1, r.x, &app->list_w, 300, w - 300);
+        lw = fmaxf(300, fminf(app->list_w, w - 300));
+        list_draw(app, (Rectangle){r.x, r.y, lw, h});
+        preview_draw(app, (Rectangle){r.x + lw + SPLIT, r.y, w - lw - SPLIT, h});
+        focus_line(app, PANE_LIST, (Rectangle){r.x, r.y, lw, h});
+        focus_line(app, PANE_READER, (Rectangle){r.x + lw + SPLIT, r.y, w - lw - SPLIT, h});
         break;
     }
 }
@@ -403,7 +507,7 @@ void mail_frame(jd_app *app)
     /* the tab bar shows only when there is more than the mail view, and not when tabs live in the sidebar */
     float top = (!app->prefs.tabs_side && app->ntabs > 1) ? TAB_H : 0;
     if (top) tabs_draw(app, (Rectangle){0, 0, sw, TAB_H});
-    float side = app->prefs.sidebar_rail ? 60 : (app->side_w ? app->side_w : 230);
+    float side = app->prefs.sidebar_rail ? 60 : fmaxf(170, fminf(app->side_w ? app->side_w : 230, sw * 0.4f));
     float body_h = sh - top - BAR_H;
     SetMouseCursor(MOUSE_CURSOR_DEFAULT);
     /* On a phone the full sidebar is a drawer over the page, which is too narrow to share: the page is not drawn
@@ -430,29 +534,119 @@ void mail_frame(jd_app *app)
     focus_line(app, PANE_FOLDERS, (Rectangle){0, top, side, body_h});
     float bx = side;
     if (!app->prefs.sidebar_rail && !bare) {
-        app->side_w = splitter(app, 1, (Rectangle){side, top, SPLIT, body_h}, 1, 0, side, 170, sw * 0.4f);
+        if (!app->side_w) app->side_w = side;
+        splitter(app, 1, (Rectangle){side, top, SPLIT, body_h}, 1, 0, &app->side_w, 170, sw * 0.4f);
         bx = side + SPLIT;
     }
     Rectangle page = {bx, top, sw - bx, body_h};
     jd_tab *t = &app->tabs[app->tab];
     /* a phone has no Esc to close what is open: a back bar does it, to the folder it came from */
+    Rectangle actions = {0};
     if (plat_touch() && (t->kind == TAB_CONV || t->kind == TAB_COMPOSE || t->kind == TAB_FILTERS)) {
+        const char *to = app->nfolders ? folder_label(&app->folders[app->folder]) : "Back";
         Rectangle back = {page.x, page.y, page.width, 44};
         int hover = CheckCollisionPointRec(GetMousePosition(), back) && !app->dialog.kind && !app->menu.open;
         DrawRectangleRec(back, hover ? JD_NORD2 : JD_NORD1);
         jd_icon("chevron-left", back.x + 14, back.y + 14, 16, JD_NORD8);
-        const char *to = app->nfolders ? folder_label(&app->folders[app->folder]) : "Back";
-        jd_text(&app->ui, to, back.x + 38, back.y + 14, 15, JD_NORD8, 1);
+        jd_text_fit(&app->ui, to, back.x + 38, back.y + 14, page.width - 52, 15, JD_NORD8, 1);
         page.y += 44, page.height -= 44;
+        if (t->kind == TAB_CONV && t->conv.n) {
+            page.height -= 48;
+            actions = (Rectangle){page.x, page.y + page.height, page.width, 48};
+            DrawRectangleRec(actions, JD_NORD1);
+            DrawRectangle((int)actions.x, (int)actions.y, (int)actions.width, 1, JD_NORD2);
+            actions.y += 2;
+        }
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             /* the page under the bar is not drawn this frame: the tap would land on it (the search box) too */
             tab_close(app, app->tab);
             footer(app, sw, sh);
             return;
         }
+    } else if (t->kind == TAB_CONV && t->conv.n) {
+        DrawRectangleRec((Rectangle){page.x, page.y, page.width, 44}, JD_NORD0);
+        DrawRectangle((int)page.x, (int)page.y + 43, (int)page.width, 1, JD_NORD1);
+        actions = (Rectangle){page.x + 16, page.y, page.width - 16, 44};
+        page.y += 44, page.height -= 44;
     }
     if (t->kind == TAB_MAIL) mail_draw(app, page);
-    else if (t->kind == TAB_CONV) conv_draw(app, &t->conv, page, 1);
+    else if (t->kind == TAB_CONV) {
+        /* a swipe pages through the list; the finger to the left is the next message */
+        static struct {
+            int tab, owned;      /* owned: the gesture began on the page */
+            double at;           /* settling start; < 0 none, 0 starts with the next frame */
+            float from, last;    /* settling start offset; last frame's drag */
+            int leaving;         /* `out` holds the message sliding away, `dir` the side it goes to */
+            float dir;
+            jd_conv out;
+        } pg = {.at = -1};
+        const double SLIDE_S = 0.3;
+        if (pg.tab != app->tab) {
+            if (pg.leaving) conv_close(&pg.out);
+            pg = (typeof(pg)){.tab = app->tab, .at = -1};
+        }
+        int free_page = !app->dialog.kind && !app->menu.open && !app->help;
+        float drag = plat_drag_x();
+        int swipe = plat_swipe(); /* -1 or 1 pages, 2 springs back */
+        if (drag && !pg.last && !swipe) {
+            /* the pointer stays at the finger's first point while it drags */
+            pg.owned = free_page && CheckCollisionPointRec(GetMousePosition(), page);
+            if (pg.owned && pg.leaving) conv_close(&pg.out), pg.leaving = 0;
+            if (pg.owned) pg.at = -1;
+        }
+        if (!pg.owned) drag = 0;
+        if (swipe && pg.owned) {
+            int stepped = (swipe == 1 || swipe == -1) && free_page && reader_step(app, &t->conv, -swipe, &pg.out);
+            pg.from = stepped ? drag - (float)swipe * page.width : drag;
+            pg.leaving = stepped, pg.dir = (float)swipe;
+            /* the clock starts once the new message is drawn: its layout takes a frame or two */
+            pg.at = 0;
+            drag = 0;
+        }
+        if (swipe) pg.owned = 0;
+        pg.last = drag;
+        float shift = drag;
+        if (!drag && pg.at >= 0) {
+            float k = pg.at == 0 ? 0 : (float)((GetTime() - pg.at) / SLIDE_S);
+            if (k < 1) shift = pg.from * (1 - k) * (1 - k) * (1 - k) * (1 - k);
+            else {
+                pg.at = -1;
+                if (pg.leaving) conv_close(&pg.out), pg.leaving = 0;
+            }
+        }
+        jd_scissor(page.x, page.y, page.width, page.height);
+        if (pg.leaving && pg.at >= 0)
+            conv_draw(app, &pg.out, (Rectangle){page.x + shift + pg.dir * page.width, page.y, page.width, page.height}, 0);
+        conv_draw(app, &t->conv, (Rectangle){page.x + shift, page.y, page.width, page.height}, 1);
+        if (pg.at == 0 && !drag) pg.at = GetTime();
+        /* the next message is named from the list: opening it early would mark it read */
+        if (drag && (shift > 1 || shift < -1)) {
+            int dir = shift < 0 ? 1 : -1, at = -1;
+            for (int k = 0; k < app->nrows && at < 0; k++)
+                if (app->grouped ? app->rows[k].thread == t->conv.thread : app->rows[k].latest == t->conv.message) at = k;
+            Rectangle gap = shift < 0 ? (Rectangle){page.x + page.width + shift, page.y, -shift, page.height}
+                                      : (Rectangle){page.x, page.y, shift, page.height};
+            DrawRectangleRec(gap, JD_NORD0);
+            int to = at + dir;
+            float tx = shift < 0 ? gap.x + 20 : gap.x + gap.width - page.width + 20, tw = page.width - 40;
+            if (at >= 0 && to >= 0 && to < app->nrows) {
+                const jd_thread_row *n = &app->rows[to];
+                jd_icon(dir > 0 ? "chevron-right" : "chevron-left", shift < 0 ? gap.x + 8 : gap.x + gap.width - 24,
+                        page.y + 60, 16, JD_NORD8);
+                jd_text_fit(&app->ui, n->senders, tx + 12, page.y + 40, tw - 24, 14, JD_NORD4, 0);
+                jd_text_fit(&app->ui, n->subject, tx + 12, page.y + 62, tw - 24, 17, JD_NORD6, 1);
+            } else {
+                jd_text_fit(&app->ui, dir > 0 ? "No newer message" : "No earlier message", tx + 12, page.y + 50,
+                            tw - 24, 14, JD_MUTED, 0);
+            }
+        }
+        jd_scissor_end();
+        if (actions.width > 0 && t->conv.n && toolbar_buttons(app, &t->conv, actions, 1)) {
+            tab_close(app, app->tab);
+            footer(app, sw, sh);
+            return;
+        }
+    }
     else if (t->kind == TAB_FILTERS) filters_draw(app, page);
     else if (t->kind == TAB_SETTINGS) settings_draw(app, page);
     else compose_draw(app, t->compose, page);

@@ -11,16 +11,31 @@ void plat_frame(int typing);
 float plat_density(void);
 /* a touch screen without a keyboard to rely on: no vim modes, typing always where text is edited */
 int plat_touch(void);
+/* a sideways swipe that ended this frame: -1 or 1 pages (finger went left or right), 2 springs back, 0 none */
+int plat_swipe(void);
+/* while a sideways swipe is in progress, how far the finger has gone (logical pixels, right positive); else 0 */
+float plat_drag_x(void);
+/* a finger is on the screen, scrolling vertically */
+int plat_finger_scrolling(void);
+/* this frame's finger (or fling) scroll in logical pixels, down and right positive; 0 leaves it to the wheel */
+int plat_scroll(float *dx, float *dy);
 
 /* The system keystore. Without one (no libsecret at build time) passwords last until jackdaw quits. */
 int plat_secret_available(void);
 char *plat_secret_load(const char *account);
 int plat_secret_save(const char *account, const char *password);
+/* forgets the account's password: 0 when it is gone (or was never stored) */
+int plat_secret_delete(const char *account);
+
+/* a file or folder to the desktop's trash (freedesktop.org Trash spec); deleted where there is no trash (Android) */
+int plat_trash(const char *path);
 
 /* Desktop notifications. The tag of a clicked notification comes back from plat_notify_poll, 0 when none. */
 /* -1 when there is no notification service to send to */
 int plat_notify(const char *summary, const char *body, int64_t tag);
 int64_t plat_notify_poll(void);
+/* Android: a foreground service keeps IMAP IDLE open while the app is closed; nothing on a desktop */
+void plat_push(int on);
 void plat_notify_shutdown(void);
 
 /* The system's file chooser, opened without blocking; the chosen paths arrive later through plat_picked_files

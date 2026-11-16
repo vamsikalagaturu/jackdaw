@@ -9,6 +9,13 @@ import android.database.Cursor;
 import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.CancellationSignal;
+import android.os.ParcelFileDescriptor;
+import android.print.PageRange;
+import android.print.PrintAttributes;
+import android.print.PrintDocumentAdapter;
+import android.print.PrintDocumentInfo;
+import android.print.PrintManager;
 import android.provider.OpenableColumns;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
@@ -24,6 +31,7 @@ import android.view.inputmethod.InputMethodManager;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -46,16 +54,51 @@ public class JackdawActivity extends NativeActivity {
     private static native void nativePicked(String paths);
 
     private TextSink sink;
+    /* the activity exists, on screen or not: its own sync runs and the background ones stand down */
+    static volatile boolean running;
+    private static final int REQUEST_NOTIFY = 2;
 
     @Override
     protected void onCreate(Bundle state) {
+        running = true;
         super.onCreate(state);
+        Notifier.channel(this);
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission("android.permission.POST_NOTIFICATIONS") != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[] {"android.permission.POST_NOTIFICATIONS"}, REQUEST_NOTIFY);
+        MailJobService.schedule(this);
         /* the window reaches into the camera cutout; the native side keeps clear of it through systemInsets() */
         WindowManager.LayoutParams lp = getWindow().getAttributes();
         lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         getWindow().setAttributes(lp);
+        getWindow().setStatusBarColor(0xFF2E3440);
+        getWindow().setNavigationBarColor(0xFF2E3440);
         sink = new TextSink();
         addContentView(sink, new ViewGroup.LayoutParams(1, 1));
+    }
+
+    @Override
+    protected void onDestroy() {
+        running = false;
+        super.onDestroy();
+    }
+
+    @Override
+    protected void onStart() {
+        PushService.appVisible = true;
+        super.onStart();
+    }
+
+    @Override
+    protected void onStop() {
+        PushService.appVisible = false;
+        super.onStop();
+    }
+
+    /* plat_push; on is "1" or "0" */
+    public String setPush(String on) {
+        PushService.set(this, "1".equals(on));
+        return "1";
     }
 
     /* NativeActivity drops intents delivered to a running instance (launchMode singleTask) */
@@ -63,6 +106,31 @@ public class JackdawActivity extends NativeActivity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+    }
+
+    /* ---- notifications ---- */
+
+    /* on_new_mail, on the sync thread; whenVisible "0": not while the app is on screen */
+    public String postNewMail(String title, String text, String message, String whenVisible) {
+        if (PushService.appVisible && "0".equals(whenVisible)) return null;
+        return postNotification(title, text, message);
+    }
+
+    public String postNotification(String title, String text, String message) {
+        try {
+            return Notifier.post(this, title, text, Long.parseLong(message)) ? "1" : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /* plat_notify_poll: a tapped notification's message id, once */
+    public String takeOpened() {
+        Intent i = getIntent();
+        long id = i == null ? 0 : i.getLongExtra(Notifier.EXTRA_MESSAGE, 0);
+        if (id == 0) return null;
+        i.removeExtra(Notifier.EXTRA_MESSAGE);
+        return Long.toString(id);
     }
 
     private String onUi(Callable<String> job) {
@@ -112,6 +180,48 @@ public class JackdawActivity extends NativeActivity {
             } catch (ActivityNotFoundException e) {
                 return null;
             }
+        });
+    }
+
+    public String refreshRate() {
+        return Float.toString(getWindowManager().getDefaultDisplay().getRefreshRate());
+    }
+
+    /* ---- printing ---- */
+
+    /* path is an already laid-out PDF: the adapter passes it through as it is */
+    public String print(String path, String title) {
+        PrintManager pm = (PrintManager) getSystemService(PRINT_SERVICE);
+        if (pm == null) return null;
+        PrintDocumentAdapter adapter = new PrintDocumentAdapter() {
+            @Override
+            public void onLayout(PrintAttributes old, PrintAttributes now, CancellationSignal cancel,
+                                 LayoutResultCallback cb, Bundle extras) {
+                if (cancel.isCanceled()) {
+                    cb.onLayoutCancelled();
+                    return;
+                }
+                cb.onLayoutFinished(new PrintDocumentInfo.Builder(new File(path).getName())
+                                        .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+                                        .build(), true);
+            }
+
+            @Override
+            public void onWrite(PageRange[] pages, ParcelFileDescriptor dest, CancellationSignal cancel,
+                                WriteResultCallback cb) {
+                try (InputStream in = new FileInputStream(path);
+                     OutputStream out = new FileOutputStream(dest.getFileDescriptor())) {
+                    byte[] buf = new byte[65536];
+                    for (int n; (n = in.read(buf)) > 0;) out.write(buf, 0, n);
+                    cb.onWriteFinished(new PageRange[] {PageRange.ALL_PAGES});
+                } catch (Exception e) {
+                    cb.onWriteFailed(e.getMessage());
+                }
+            }
+        };
+        return onUi(() -> {
+            pm.print(title == null || title.isEmpty() ? "jackdaw" : title, adapter, null);
+            return "1";
         });
     }
 
@@ -180,7 +290,16 @@ public class JackdawActivity extends NativeActivity {
 
     private File secretsFile() { return new File(getFilesDir(), "accounts.sealed"); }
 
-    private SecretKey secretKey() throws Exception {
+    /* static: the background check (MailJobService) has no activity */
+    static synchronized String passwordFor(File files, String account) {
+        try {
+            return readSecrets(new File(files, "accounts.sealed")).getProperty(account);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static SecretKey secretKey() throws Exception {
         KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
         ks.load(null);
         if (ks.containsAlias(SECRET_KEY)) return (SecretKey) ks.getKey(SECRET_KEY, null);
@@ -194,9 +313,10 @@ public class JackdawActivity extends NativeActivity {
     }
 
     /* the file is the 12-byte IV, then the ciphertext of the Properties text */
-    private Properties readSecrets() throws Exception {
+    private Properties readSecrets() throws Exception { return readSecrets(secretsFile()); }
+
+    private static Properties readSecrets(File f) throws Exception {
         Properties p = new Properties();
-        File f = secretsFile();
         if (!f.exists()) return p;
         byte[] all = java.nio.file.Files.readAllBytes(f.toPath());
         if (all.length < 12) return p;
@@ -233,6 +353,17 @@ public class JackdawActivity extends NativeActivity {
         try {
             Properties p = readSecrets();
             p.setProperty(key, value);
+            writeSecrets(p);
+            return "1";
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public synchronized String secretDelete(String key) {
+        try {
+            Properties p = readSecrets();
+            p.remove(key);
             writeSecrets(p);
             return "1";
         } catch (Exception e) {

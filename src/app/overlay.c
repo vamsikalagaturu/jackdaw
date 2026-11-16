@@ -150,7 +150,7 @@ static const char *help_lines[][2] = {
     {"e  dd  m  c", "archive, delete (d in visual mode, or Delete), move, copy"}, {"z", "undo the last move or delete"},
     {"Shift+M", "make a rule from the search"}, {"Ctrl+Shift+L  Ctrl+Shift+F", "rules, server filters"},
     {"Reader", NULL},
-    {"Space  j  k", "scroll"}, {"o  Shift+P", "expand all, plain text or HTML"},
+    {"Space  j  k", "scroll"}, {"o  Shift+P", "expand all, plain text or HTML"}, {"Shift+L", "light or dark mail page"},
     {"v", "a caret: h j k l w b 0 $ gg G move (k above the text: From, To, Cc, In); v again selects, y copies, Esc leaves"},
     {"Drag  Ctrl+C", "select text (body, subject, sender, To, Cc) and copy it; right click for a menu"}, {"Shift+A", "save all attachments"},
     {"Click  ↓", "an attachment opens it; its download icon saves it"},
@@ -264,7 +264,7 @@ void help_draw(jd_app *app)
     /* taller than the window: the list scrolls under the search field */
     static float scroll;
     Rectangle list = {box.x, box.y + 100, w, h - 112};
-    if (CheckCollisionPointRec(GetMousePosition(), list)) scroll -= GetMouseWheelMove() * 60;
+    if (CheckCollisionPointRec(GetMousePosition(), list)) scroll -= jd_wheel_y(60);
     if (scroll > content - list.height) scroll = content - list.height;
     if (scroll < 0) scroll = 0;
     jd_scissor(list.x, list.y, list.width, list.height);

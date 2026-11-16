@@ -4,13 +4,21 @@
 
     <!-- IMAP, SMTP and ManageSieve, and remote images when asked for -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- notifications (Android 13+), and MailJobService's persisted job surviving a reboot -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- the check waits for a network (JobInfo.setRequiredNetworkType) -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- push: a foreground service keeping IMAP IDLE open (specialUse, as no other type fits a mail connection) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <application
         android:label="jackdaw"
         android:icon="@mipmap/ic_launcher"
         android:hasCode="true"
         android:allowBackup="false"
         android:resizeableActivity="false"
-        android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+        android:theme="@android:style/Theme.NoTitleBar">
         <activity
             android:name=".JackdawActivity"
             android:exported="true"
@@ -24,6 +32,26 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service
+            android:name=".MailJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+        <service
+            android:name=".PushService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps an IMAP IDLE connection open so new mail is noticed as it arrives" />
+        </service>
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
         <provider
             android:name=".OpenProvider"
             android:authorities="io.github.vamsikalagaturu.jackdaw.files"
