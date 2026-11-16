@@ -36,6 +36,8 @@ int plat_notify(const char *summary, const char *body, int64_t tag);
 int64_t plat_notify_poll(void);
 /* Android: a foreground service keeps IMAP IDLE open while the app is closed; nothing on a desktop */
 void plat_push(int on);
+/* Android: hands a downloaded APK to the system's installer (the user confirms); -1 elsewhere */
+int plat_install_package(const char *path);
 void plat_notify_shutdown(void);
 
 /* The system's file chooser, opened without blocking; the chosen paths arrive later through plat_picked_files

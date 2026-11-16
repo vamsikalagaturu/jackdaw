@@ -62,6 +62,7 @@ void plat_frame(int typing) { (void)typing; }
 float plat_density(void) { return 1; }
 int plat_touch(void) { return 0; }
 int plat_swipe(void) { return 0; }
+int plat_install_package(const char *path) { (void)path; return -1; }
 void plat_push(int on) { (void)on; }
 float plat_drag_x(void) { return 0; }
 int plat_finger_scrolling(void) { return 0; }

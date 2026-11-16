@@ -158,6 +158,7 @@ int main(int argc, char **argv)
     while (!WindowShouldClose()) {
         plat_frame(current_mode(&app) == MODE_INSERT);
         handle_events(&app);
+        if (!app.show_form) update_tick(&app);
         char *url;
         int ok;
         while (app.fetcher && jd_fetch_poll(app.fetcher, &url, &ok)) {

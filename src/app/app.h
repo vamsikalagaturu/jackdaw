@@ -279,6 +279,13 @@ int reader_step(jd_app *app, jd_conv *c, int dir, jd_conv *keep);
 /* the list's selection becomes c's conversation, for the act_* functions; 0 (and a notice) when the list lacks it */
 int list_select_conv(jd_app *app, const jd_conv *c);
 void list_refresh(jd_app *app);
+
+/* updates (update.c): update_tick every frame; update_bar draws the offer in the list, returning its height */
+void update_tick(jd_app *app);
+void update_check(jd_app *app, int manual);
+float update_bar(jd_app *app, float x, float y, float w);
+const char *update_status(void);
+int update_busy(void);
 void conv_close(jd_conv *c);
 void conv_refresh(jd_app *app, jd_conv *c);
 void conv_body_ready(jd_app *app, jd_conv *c, int64_t id);

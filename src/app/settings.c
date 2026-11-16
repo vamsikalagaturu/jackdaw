@@ -7,7 +7,7 @@
 #include "platform.h"
 #include "ui/icons.h"
 
-enum { S_ACCOUNT, S_APPEARANCE, S_FONTS, S_LAYOUT, S_READING, S_COMPOSE, S_NOTIFY, S_SYNC, S_RULES, S_FILTERS, S_KEYS, S_COUNT };
+enum { S_ACCOUNT, S_APPEARANCE, S_FONTS, S_LAYOUT, S_READING, S_COMPOSE, S_NOTIFY, S_SYNC, S_RULES, S_FILTERS, S_KEYS, S_ABOUT, S_COUNT };
 enum { FOCUS_NONE = -1, FOCUS_SIG_NEW = 100, FOCUS_SIG_REPLY, FOCUS_RULE_MATCH, FOCUS_FONT, FOCUS_KEYS };
 
 /* what the Keyboard section is narrowed to */
@@ -31,7 +31,7 @@ static const struct {
 } sections[S_COUNT] = {
     {"Account", "user"}, {"Appearance", "paintbrush"}, {"Fonts", "type"}, {"Layout", "panel-right"}, {"Reading", "mail-open"},
     {"Compose", "pencil"}, {"Notifications", "bell"}, {"Sync", "refresh-cw"}, {"Rules", "list"},
-    {"Server filters", "flag"}, {"Keyboard", "keyboard"},
+    {"Server filters", "flag"}, {"Keyboard", "keyboard"}, {"About", "circle-help"},
 };
 
 /* the font picker: which role's list is open (-1 none) and what is typed to narrow it */
@@ -512,6 +512,25 @@ static void notifications(jd_app *app, float x, float y, float w)
     }
 }
 
+static void about(jd_app *app, float x, float y, float w)
+{
+    jd_prefs *p = &app->prefs;
+    y = heading(app, x, y, "About", JD_APP_NAME " " JD_VERSION ", built " JD_BUILD_DATE);
+    if (!strcmp(JD_APP_NAME, "jackdaw")) {
+        float cx = label(app, x, &y, "Check for updates automatically", "Once a day, from the latest GitHub release");
+        if (jd_switch(&app->ui, cx, y + 10, p->update_check)) p->update_check = !p->update_check, changed(app);
+        y = divider(x, y + row_h, w);
+        if (jd_button(&app->ui, update_busy() ? "Checking..." : "Check for updates", (Rectangle){x, y, 200, 34}, 0) &&
+            !update_busy())
+            update_check(app, 1);
+        y += 46;
+        if (update_status()[0]) y = para(app, update_status(), x, y, w, 14, JD_NORD4);
+    } else {
+        y = para(app, "A development build: it does not update itself.", x, y, w, 14, JD_MUTED);
+    }
+    reach(y + 20);
+}
+
 static void sync(jd_app *app, float x, float y, float w)
 {
     jd_prefs *p = &app->prefs;
@@ -717,6 +736,7 @@ void settings_draw(jd_app *app, Rectangle r)
     case S_SYNC: sync(app, x, top, w); break;
     case S_RULES: rules(app, x, top, w); break;
     case S_FILTERS: server_filters(app, x, top, w); break;
+    case S_ABOUT: about(app, x, top, w); break;
     case S_KEYS:
         heading(app, x, top, "Keyboard", "Also on ? anywhere.");
         keys_filter.placeholder = "Type to find a key or an action";

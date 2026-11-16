@@ -12,6 +12,8 @@
     <!-- push: a foreground service keeping IMAP IDLE open (specialUse, as no other type fits a mail connection) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- updates: the downloaded release's APK goes to Android's installer -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <application
         android:label="jackdaw"
         android:icon="@mipmap/ic_launcher"

@@ -1325,6 +1325,7 @@ void list_draw(jd_app *app, Rectangle r)
     }
     y += 34;
 
+    y += update_bar(app, x, y, w);
     if (app->npicked && !plat_touch()) {
         char line[80];
         snprintf(line, sizeof line, "%d selected", app->npicked);

@@ -15,6 +15,7 @@ the trash (deletes it on Android); the other settings and the rules stay.
 | `[reading]` | format, mark_read, `remote_images` = ask/always, `images_from` = trusted senders |
 | `[notifications]` | enabled, when_focused |
 | `[compose]` | `markdown`: the body also goes out as HTML rendered from Markdown; `attachment_list`: a `[1] name` list of attachments in the body |
+| `[updates]` | `check`: look for a new release once a day and offer it (default true); Settings → About checks by hand |
 | `[sync]` | `prefetch_days` (days of Inbox bodies fetched for offline reading), `check_minutes` (5) |
 | `[signature]` | `new`, `reply` |
 | `[[rule]]` | `match` in search syntax, `action` = `read`, `flag`, `delete`, `move:<folder>`, `copy:<folder>` |
