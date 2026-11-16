@@ -51,6 +51,9 @@ typedef struct {
     float body_y;         /* where its text started on screen last frame, -1 when it was not drawn */
     int body_lines;       /* plain text: the wrapped lines shown (folded quotes left out) */
     float card_h;         /* the height of its card, as drawn last frame */
+    float open;           /* 0 collapsed to 1 expanded, eased toward expanded: the card opens and closes smoothly */
+    float full_h;         /* the open card's whole height, as last measured */
+    int addresses;        /* From, To, Cc and In shown in full; else one line naming them */
 } jd_reading;
 
 /* A conversation (or one message when message != 0) as the preview pane or a tab shows it */

@@ -70,7 +70,8 @@ void fonts_release(jd_app *app)
 
 void apply_prefs(jd_app *app)
 {
-    jd_theme_set(app->prefs.light);
+    app->prefs.light = app->prefs.scheme == 2 ? jd_theme_desktop_light() == 1 : app->prefs.scheme == 1;
+    jd_theme_set(app->prefs.light, app->prefs.theme_roles);
     jd_scale = plat_density() * (float)(app->prefs.scale ? app->prefs.scale : 100) / 100.0f;
     /* a phone has no room for a reading pane beside or under the list */
     /* and keeps its tabs in a bar on top, the sidebar being hidden behind what is open */
