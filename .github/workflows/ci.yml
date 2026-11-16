@@ -1,5 +1,7 @@
 # Every PR into main, and main itself (the release workflow waits for this one): the Linux build with
 # AddressSanitizer and the key test under a virtual display, and the Android APK.
+# Caches: third-party builds (keyed by their pinned versions), the Android SDK packages, and ccache for every
+# compile (saved under the run's id, restored from the newest), so a run rebuilds only what changed.
 name: CI
 
 on:
@@ -15,6 +17,12 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  CCACHE_DIR: /home/runner/.cache/ccache
+  CCACHE_MAXSIZE: 1G
+  CMAKE_C_COMPILER_LAUNCHER: ccache
+  CMAKE_CXX_COMPILER_LAUNCHER: ccache
+
 jobs:
   linux:
     runs-on: ubuntu-24.04
@@ -23,7 +31,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake ninja-build pkg-config autoconf automake libtool make \
+          sudo apt-get install -y --no-install-recommends cmake ninja-build pkg-config autoconf automake libtool make ccache \
             libssl-dev libcurl4-openssl-dev zlib1g-dev libsystemd-dev libsecret-1-dev libfontconfig1-dev \
             libwayland-dev libxkbcommon-dev wayland-protocols libx11-dev libxrandr-dev libxinerama-dev \
             libxcursor-dev libxi-dev libgl1-mesa-dev libgl1-mesa-dri xvfb xauth
@@ -35,10 +43,18 @@ jobs:
             !~/.cache/jackdaw/linux/build
             !~/.cache/jackdaw/linux/build-debug
           key: linux-${{ hashFiles('platform/versions.sh', 'platform/linux/deps.sh') }}
+      - name: Cache compiler output
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-linux-debug-${{ github.run_id }}
+          restore-keys: ccache-linux-debug-
       - name: Build
         run: platform/linux/build.sh debug
       - name: Tests
         run: xvfb-run -a -s "-screen 0 1280x1024x24" ctest --test-dir ~/.cache/jackdaw/linux/build-debug --output-on-failure
+      - name: Compiler cache use
+        run: ccache --show-stats --verbose | head -20
 
   android:
     runs-on: ubuntu-24.04
@@ -48,11 +64,22 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - name: Cache Android SDK packages
+        id: sdk
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/28.2.13676358
+            /usr/local/lib/android/sdk/build-tools/36.1.0
+            /usr/local/lib/android/sdk/platforms/android-36.1
+          key: android-sdk-ndk28.2.13676358-bt36.1.0-p36.1
       - name: SDK packages
+        if: steps.sdk.outputs.cache-hit != 'true'
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" "build-tools;36.1.0" "platforms;android-36.1" >/dev/null
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build autoconf automake libtool
+      - name: Packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build autoconf automake libtool ccache
       - name: Cache third-party builds
         uses: actions/cache@v4
         with:
@@ -63,8 +90,16 @@ jobs:
             !~/.cache/jackdaw/android/apk
             !~/.cache/jackdaw/android/build-*
           key: android-${{ hashFiles('platform/versions.sh', 'platform/android/deps.sh') }}
+      - name: Cache compiler output
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-android-${{ github.run_id }}
+          restore-keys: ccache-android-
       - name: Build
         run: platform/android/build.sh
+      - name: Compiler cache use
+        run: ccache --show-stats --verbose | head -20
       - uses: actions/upload-artifact@v4
         with:
           name: jackdaw-apk

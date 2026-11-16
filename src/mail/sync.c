@@ -225,8 +225,11 @@ static void notify_fresh(jd_sync *s, int64_t inbox, const int64_t *ids, int n)
     int nrows;
     jd_thread_row *rows = jd_store_list(s->store, &q, &nrows);
     if (nrows) emit(s, JD_EV_NEW_MAIL, rows[0].senders, rows[0].subject, rows[0].latest, nrows);
+    if (nrows && jd_sync_new_mail_hook) jd_sync_new_mail_hook(rows[0].senders, rows[0].subject, rows[0].latest, nrows);
     jd_thread_rows_free(rows, nrows);
 }
+
+void (*jd_sync_new_mail_hook)(const char *from, const char *subject, int64_t id, int count);
 
 /* [[rule]]s in order; a message moved or deleted by one is out of reach of the next */
 static void apply_rules(jd_sync *s, int64_t inbox, const int64_t *fresh, int nfresh)

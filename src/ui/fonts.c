@@ -1,6 +1,7 @@
 #ifndef __ANDROID__
 #include <fontconfig/fontconfig.h>
 #endif
+#include <math.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,10 +14,6 @@
 extern const unsigned char jd_font_regular[], jd_font_semibold[];
 extern const int jd_font_regular_size, jd_font_semibold_size;
 
-/* rasterised at three times the usual drawing size, so text stays sharp up to about 48 px on screen (40 px text at
-   120%); beyond that glyphs are scaled up from the atlas and soften */
-#define ATLAS_SIZE 48
-
 /* Latin, Greek, Cyrillic and common punctuation and symbols */
 static const int ranges[][2] = {
     {0x20, 0x7e}, {0xa0, 0x24f}, {0x370, 0x3ff}, {0x400, 0x4ff}, {0x2010, 0x2027}, {0x2030, 0x203a}, {0x20ac, 0x20ac},
@@ -25,28 +22,85 @@ static const int ranges[][2] = {
 
 static int *codepoints(int *n)
 {
-    *n = 0;
-    for (size_t i = 0; i < sizeof ranges / sizeof *ranges; i++) *n += ranges[i][1] - ranges[i][0] + 1;
-    int *cps = malloc(sizeof *cps * (size_t)*n), k = 0;
-    for (size_t i = 0; i < sizeof ranges / sizeof *ranges; i++)
-        for (int c = ranges[i][0]; c <= ranges[i][1]; c++) cps[k++] = c;
+    static int *cps, count;
+    if (!cps) {
+        for (size_t i = 0; i < sizeof ranges / sizeof *ranges; i++) count += ranges[i][1] - ranges[i][0] + 1;
+        cps = malloc(sizeof *cps * (size_t)count);
+        int k = 0;
+        for (size_t i = 0; i < sizeof ranges / sizeof *ranges; i++)
+            for (int c = ranges[i][0]; c <= ranges[i][1]; c++) cps[k++] = c;
+    }
+    *n = count;
     return cps;
 }
 
-static Font finish(Font font)
+/* rasterised per pixel size: glyphs scaled from one large atlas came out thin and soft at reading sizes */
+struct jd_face {
+    unsigned char *data; /* the font file; NULL for the built-in Inter, whose bytes are embedded */
+    const unsigned char *bytes;
+    int len;
+    char ext[8];
+    struct {
+        int px;
+        Font font;
+    } *sizes;
+    int nsizes;
+};
+
+static float text_zoom = 1;
+
+void jd_text_zoom(float zoom) { text_zoom = zoom > 0 ? zoom : 1; }
+
+float jd_text_density(void)
 {
+#ifdef __ANDROID__
+    return jd_scale * text_zoom; /* the screen density is part of jd_scale there */
+#else
+    return jd_scale * text_zoom * GetWindowScaleDPI().x;
+#endif
+}
+
+float jd_text_size(float size)
+{
+    float d = jd_text_density();
+    float px = floorf(size * d + 0.5f);
+    return (px < 4 ? 4 : px) / d;
+}
+
+Font jd_font_at(jd_face *f, float size)
+{
+    int px = (int)(size * jd_text_density() + 0.5f);
+    if (px < 4) px = 4;
+    if (px > 200) px = 200;
+    for (int i = 0; i < f->nsizes; i++)
+        if (f->sizes[i].px == px) return f->sizes[i].font;
+    int n;
+    int *cps = codepoints(&n);
+    Font font = LoadFontFromMemory(f->ext, f->bytes, f->len, px, cps, n);
+    if (!font.texture.id || !font.glyphCount) return GetFontDefault();
     SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
+    f->sizes = realloc(f->sizes, sizeof *f->sizes * (size_t)(f->nsizes + 1));
+    f->sizes[f->nsizes].px = px;
+    f->sizes[f->nsizes++].font = font;
     return font;
 }
 
-static Font embedded(int bold)
+void jd_face_free(jd_face *f)
 {
-    int n;
-    int *cps = codepoints(&n);
-    Font f = bold ? LoadFontFromMemory(".ttf", jd_font_semibold, jd_font_semibold_size, ATLAS_SIZE, cps, n)
-                  : LoadFontFromMemory(".ttf", jd_font_regular, jd_font_regular_size, ATLAS_SIZE, cps, n);
-    free(cps);
-    return finish(f);
+    if (!f) return;
+    for (int i = 0; i < f->nsizes; i++) UnloadFont(f->sizes[i].font);
+    free(f->sizes);
+    if (f->data) UnloadFileData(f->data);
+    free(f);
+}
+
+static jd_face *embedded(int bold)
+{
+    jd_face *f = calloc(1, sizeof *f);
+    f->bytes = bold ? jd_font_semibold : jd_font_regular;
+    f->len = bold ? jd_font_semibold_size : jd_font_regular_size;
+    strcpy(f->ext, ".ttf");
+    return f;
 }
 
 #ifdef __ANDROID__
@@ -98,17 +152,118 @@ static char *lookup(const char *family, int weight, int mono)
 }
 #endif
 
-static Font from_family(const char *family, int bold, int mono)
+/* the font file at path, NULL when raylib cannot read it */
+static jd_face *from_file(const char *path)
+{
+    int len = 0;
+    unsigned char *data = LoadFileData(path, &len);
+    if (!data) return NULL;
+    const char *ext = strrchr(path, '.');
+    jd_face *f = calloc(1, sizeof *f);
+    f->data = data, f->bytes = data, f->len = len;
+    snprintf(f->ext, sizeof f->ext, "%s", ext ? ext : ".ttf");
+    Font probe = LoadFontFromMemory(f->ext, data, len, 16, NULL, 95);
+    int good = probe.texture.id && probe.glyphCount;
+    if (probe.texture.id) UnloadFont(probe);
+    if (!good) jd_face_free(f), f = NULL;
+    return f;
+}
+
+static jd_face *from_family(const char *family, int bold, int mono)
 {
     if (!family || !family[0]) return embedded(bold);
     char *path = lookup(family, bold ? FC_WEIGHT_DEMIBOLD : FC_WEIGHT_REGULAR, mono);
-    if (!path) return embedded(bold);
-    int n;
-    int *cps = codepoints(&n);
-    Font f = LoadFontEx(path, ATLAS_SIZE, cps, n);
-    free(cps), free(path);
-    if (!f.texture.id || f.glyphCount == 0) return embedded(bold);
-    return finish(f);
+    jd_face *f = path ? from_file(path) : NULL;
+    free(path);
+    return f ? f : embedded(bold);
+}
+
+#ifdef __ANDROID__
+/* Android's serif is Noto Serif, its files named by style */
+static char *lookup_css(const char *family, int bold, int italic, int generic)
+{
+    if (!generic || strcasecmp(family, "serif")) return NULL;
+    static const char *const names[] = {"Regular", "Italic", "Bold", "BoldItalic"};
+    char path[256];
+    snprintf(path, sizeof path, SYSTEM_FONTS "/NotoSerif-%s.ttf", names[bold * 2 + italic]);
+    return access(path, R_OK) == 0 ? strdup(path) : NULL;
+}
+#else
+/* a named family only when installed under that name; an italic only when the match is one */
+static char *lookup_css(const char *family, int bold, int italic, int generic)
+{
+    if (!FcInit()) return NULL;
+    FcPattern *pat = FcPatternCreate();
+    FcPatternAddString(pat, FC_FAMILY, (const FcChar8 *)family);
+    FcPatternAddInteger(pat, FC_WEIGHT, bold ? FC_WEIGHT_BOLD : FC_WEIGHT_REGULAR);
+    FcPatternAddInteger(pat, FC_SLANT, italic ? FC_SLANT_ITALIC : FC_SLANT_ROMAN);
+    FcConfigSubstitute(NULL, pat, FcMatchPattern);
+    FcDefaultSubstitute(pat);
+    FcResult res;
+    FcPattern *match = FcFontMatch(NULL, pat, &res);
+    char *path = NULL;
+    FcChar8 *file = NULL, *got = NULL;
+    int slant = FC_SLANT_ROMAN;
+    if (match && FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch &&
+        FcPatternGetString(match, FC_FAMILY, 0, &got) == FcResultMatch &&
+        (generic || strcasecmp((const char *)got, family) == 0)) {
+        FcPatternGetInteger(match, FC_SLANT, 0, &slant);
+        const char *ext = strrchr((const char *)file, '.');
+        if ((!italic || slant != FC_SLANT_ROMAN) && ext && (!strcasecmp(ext, ".ttf") || !strcasecmp(ext, ".otf")))
+            path = strdup((const char *)file);
+    }
+    if (match) FcPatternDestroy(match);
+    FcPatternDestroy(pat);
+    return path;
+}
+#endif
+
+/* faces asked for by mail CSS, kept while the program runs: mail uses the same few families */
+static struct {
+    char *key;
+    jd_face *face;
+} *css_faces;
+static int ncss_faces;
+
+jd_face *jd_face_css(const char *families, int bold, int italic)
+{
+    char key[512];
+    snprintf(key, sizeof key, "%d%d%s", bold, italic, families ? families : "");
+    for (int i = 0; i < ncss_faces; i++)
+        if (!strcmp(css_faces[i].key, key)) return css_faces[i].face;
+    jd_face *face = NULL;
+    int done = 0;
+    for (const char *p = families ? families : ""; *p && !face && !done;) {
+        while (*p == ' ' || *p == ',' || *p == '"' || *p == '\'') p++;
+        const char *end = p;
+        while (*end && *end != ',') end++;
+        const char *last = end;
+        while (last > p && (last[-1] == ' ' || last[-1] == '"' || last[-1] == '\'')) last--;
+        char name[128];
+        snprintf(name, sizeof name, "%.*s", (int)(last - p), p);
+        p = end;
+        if (!name[0]) continue;
+        /* the reader's own face stands for the sans families: a mail's Arial or Helvetica reads as the rest */
+        if (!strcasecmp(name, "sans-serif") || !strcasecmp(name, "system-ui") || !strcasecmp(name, "-apple-system") ||
+            !strcasecmp(name, "inter")) {
+            done = 1;
+            break;
+        }
+        int generic = !strcasecmp(name, "serif") || !strcasecmp(name, "monospace");
+        char *path = lookup_css(name, bold, italic, generic);
+        if (path) face = from_file(path);
+        free(path);
+        if (generic) done = 1;
+    }
+    if (!face && italic) {
+        char *path = lookup_css("sans-serif", bold, 1, 1);
+        if (path) face = from_file(path);
+        free(path);
+    }
+    css_faces = realloc(css_faces, sizeof *css_faces * (size_t)(ncss_faces + 1));
+    css_faces[ncss_faces].key = strdup(key);
+    css_faces[ncss_faces++].face = face;
+    return face;
 }
 
 void jd_fonts_load(jd_fonts *f)
@@ -122,7 +277,7 @@ void jd_fonts_load_family(jd_fonts *f, const char *family)
     f->semibold = from_family(family, 1, 0);
 }
 
-Font jd_font_mono(const char *family)
+jd_face *jd_font_mono(const char *family)
 {
 #ifdef __ANDROID__
     return from_family(family && family[0] ? family : "DroidSansMono", 0, 1);
@@ -133,8 +288,9 @@ Font jd_font_mono(const char *family)
 
 void jd_fonts_unload(jd_fonts *f)
 {
-    UnloadFont(f->regular);
-    UnloadFont(f->semibold);
+    jd_face_free(f->regular);
+    if (f->semibold != f->regular) jd_face_free(f->semibold);
+    f->regular = f->semibold = NULL;
 }
 
 #ifdef __ANDROID__

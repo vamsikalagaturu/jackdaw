@@ -1,11 +1,11 @@
 #pragma once
 #include <stddef.h>
 
-#include "theme.h"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#include "theme.h"
 
 /* An HTML mail body laid out by litehtml and drawn with raylib on a light page. Remote content (images, style
    sheets) is never fetched. */
@@ -23,6 +23,9 @@ int jd_html_has_image(jd_html *h, const char *src);
 float jd_html_layout(jd_html *h, float width);
 /* draws with its top left at (x, y); only the part between clip_top and clip_bottom (screen y) */
 void jd_html_draw(jd_html *h, float x, float y, float clip_top, float clip_bottom);
+/* the mail's colours lightness-inverted for the dark page; images unchanged */
+void jd_html_set_dark(jd_html *h, int dark);
+Color jd_html_page(int dark);
 /* Selecting text: from (ax, ay) to (bx, by), relative to the top left; laying out again drops the selection */
 void jd_html_select(jd_html *h, float ax, float ay, float bx, float by);
 void jd_html_select_all(jd_html *h);

@@ -405,7 +405,7 @@ static void save_attachment(jd_app *app, jd_reading *r, int index)
 static void open_attachment(jd_app *app, jd_reading *r, int index)
 {
     const char *run = getenv("XDG_RUNTIME_DIR");
-    char *dir = run && run[0] ? jd_printf("%s/jackdaw/open", run) : jd_printf("%s/open", app->dir);
+    char *dir = run && run[0] ? jd_printf("%s/" JD_APP_NAME "/open", run) : jd_printf("%s/open", app->dir);
     char *path = write_attachment(app, r, index, dir);
     if (path && plat_open_file(path) != 0) app->error = jd_printf("No application to open %s", r->files[index].name);
     else if (path) notify_user(app, "Opening %s", r->files[index].name);
@@ -738,6 +738,7 @@ int conv_keys(jd_app *app, jd_conv *c)
     else if (IsKeyPressed(KEY_O))
         for (int i = 0; i < c->n; i++) c->reading[i].expanded = 1;
     else if (IsKeyPressed(KEY_P) && shift && !ctrl_down) clear_selections(c), c->plain = !c->plain;
+    else if (IsKeyPressed(KEY_L) && shift && !ctrl_down) app->page_flip = !app->page_flip;
     else if (IsKeyPressed(KEY_S) && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL))) conv_save_message(app, c);
     else if (IsKeyPressed(KEY_P) && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)))
         app->print_tab = (int)(c == preview(app) ? 0 : app->tab) + 1;
@@ -1379,14 +1380,14 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         jd_text(ui, app->nrows ? "Enter opens the selected conversation." : "", r.x + 28, r.y + 24, 14, JD_MUTED, 0);
         return;
     }
-    float x = r.x + 28, w = r.width - 56;
+    const int narrow = r.width < 560;
+    float margin = narrow ? 6 : 16, x = r.x + margin, w = r.width - 2 * margin;
     if (CheckCollisionPointRec(GetMousePosition(), r) && !app->dialog.kind && !app->menu.open)
-        c->scroll -= GetMouseWheelMove() * LINE_H * 3;
+        c->scroll -= jd_wheel_y(LINE_H * 3);
     /* clamped before drawing, by the height the last frame measured: clamping afterwards drew a frame past the
        end and snapped back on the next one */
     if (c->content > 0 && c->scroll > c->content - r.height) c->scroll = c->content - r.height;
     if (c->scroll < 0) c->scroll = 0;
-    c->scroll = (float)(int)c->scroll;
 
     jd_scissor(r.x, r.y, r.width, r.height);
     float y = r.y + 20 - c->scroll;
@@ -1413,7 +1414,7 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
     /* each message is a card: a collapsed one shows its sender, date and first line; a click opens or closes it */
     for (int i = 0; i < c->n; i++) {
         jd_reading *m = &c->reading[i];
-        const float pad = 16, ar = 16 * K;
+        const float pad = narrow ? 8 : 16, ar = 16 * K;
         float card_y = y, ix = x + pad, iw = w - 2 * pad;
         float head_h = 2 * ar;
         /* a collapsed card is one target as a whole; an open one closes from its header */
@@ -1484,20 +1485,23 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         y = draw_files(app, m, x, y, w, r);
         if (m->html && !c->plain) y = remote_images(app, m, x, y, w, r);
         if (m->html && !c->plain) {
-            if (m->html_w != w) {
-                m->html_h = jd_html_layout(m->html, w - 2 * pad);
-                m->html_w = w;
+            /* edge to edge: the mail's body margin (8 px, as in a browser) is its only inset, as in Thunderbird */
+            if (m->html_w != w0) {
+                m->html_h = jd_html_layout(m->html, w0);
+                m->html_w = w0;
             }
-            Rectangle paper = {x, y, w, m->html_h + 2 * pad};
+            Rectangle paper = {x0, y, w0, m->html_h};
             if (paper.y < r.y + r.height && paper.y + paper.height > r.y) {
-                DrawRectangleRounded(paper, 0.01f, 6, JD_PAPER);
+                int dark = mail_page_dark(app);
+                DrawRectangleRec(paper, jd_html_page(dark));
                 /* mail laid out wider than the page (fixed-width tables) is cut at the page's edge */
                 jd_scissor(paper.x, paper.y, paper.width, paper.height);
-                jd_html_draw(m->html, x + pad, y + pad, r.y, r.y + r.height);
+                jd_html_set_dark(m->html, dark);
+                jd_html_draw(m->html, x0, y, r.y, r.y + r.height);
                 jd_scissor_end();
             }
-            text_mouse(app, c, i, paper, r, x + pad, y + pad, 1, 0);
-            m->body_y = y + pad;
+            text_mouse(app, c, i, paper, r, x0, y, 1, 0);
+            m->body_y = y;
             y += paper.height;
         } else if (!m->text) {
             jd_text(ui, m->row.body_cached ? "This message has no readable text." : "Downloading...", x, y, TEXT_SIZE, JD_NORD4, 0);
@@ -1559,9 +1563,29 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
     jd_scissor_end();
     c->content = y + c->scroll - r.y + 40;
     if (!app->dialog.kind && !app->menu.open) jd_scrollbar(r, c->content, &c->scroll);
-    c->scroll = (float)(int)c->scroll;
     reader_menu_draw(app, c);
     chip_menu_draw(app, c);
+}
+
+int reader_step(jd_app *app, jd_conv *c, int dir, jd_conv *keep)
+{
+    int at = -1;
+    for (int k = 0; k < app->nrows && at < 0; k++)
+        if (app->grouped ? app->rows[k].thread == c->thread : app->rows[k].latest == c->message) at = k;
+    int to = at + dir;
+    if (at < 0 || to < 0 || to >= app->nrows) {
+        notify_user(app, dir > 0 ? "This is the last message in the list." : "This is the first message in the list.");
+        return 0;
+    }
+    app->row = to;
+    if (keep) {
+        conv_close(keep);
+        *keep = *c;
+        *c = (jd_conv){.plain = keep->plain};
+    }
+    conv_open(app, c, app->rows[to].thread, app->grouped ? 0 : app->rows[to].latest);
+    c->scroll = 0;
+    return 1;
 }
 
 void reader_open(jd_app *app, int in_tab)

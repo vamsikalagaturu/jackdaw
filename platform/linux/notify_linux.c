@@ -72,7 +72,7 @@ int plat_notify(const char *summary, const char *body, int64_t tag)
     sd_bus_message *m = NULL;
     int r = sd_bus_message_new_method_call(bus, &m, DEST, PATH, DEST, "Notify");
     if (r >= 0)
-        r = sd_bus_message_append(m, "susssasa{sv}i", "jackdaw", 0u, "mail-unread", summary, text, 2, "default", "Open",
+        r = sd_bus_message_append(m, "susssasa{sv}i", JD_APP_NAME, 0u, "mail-unread", summary, text, 2, "default", "Open",
                                   1, "category", "s", "email.arrived", -1);
     if (r >= 0) r = sd_bus_call_async(bus, NULL, m, on_reply, (void *)(intptr_t)tag, 0);
     sd_bus_message_unref(m);

@@ -153,9 +153,9 @@ static const char *xdg_dir(char **cache, const char *var, const char *fallback)
     if (*cache) return *cache;
     const char *base = getenv(var);
     if (base && base[0] == '/')
-        *cache = jd_printf("%s/jackdaw", base);
+        *cache = jd_printf("%s/" JD_APP_NAME, base);
     else
-        *cache = jd_printf("%s/%s/jackdaw", getenv("HOME") ? getenv("HOME") : "/tmp", fallback);
+        *cache = jd_printf("%s/%s/" JD_APP_NAME, getenv("HOME") ? getenv("HOME") : "/tmp", fallback);
     return *cache;
 }
 

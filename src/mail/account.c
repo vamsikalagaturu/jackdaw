@@ -73,7 +73,7 @@ static void put(jd_buf *b, const char *key, const char *value)
 
 void jd_prefs_load(jd_prefs *p)
 {
-    *p = (jd_prefs){.conversations = 1, .scale = 100, .snippets = 1, .mark_read = 1, .notify = 1, .notify_focused = 1,
+    *p = (jd_prefs){.conversations = 1, .scale = 100, .snippets = 1, .mark_read = 1, .notify = 1, .notify_focused = 1, .push = 1,
                     .prefetch_days = 30, .check_minutes = 5, .list_text = 15, .reader_text = 15,
                     .attachment_list = 1, .markdown = 1};
     jd_toml *t = jd_toml_load(jd_settings_path(), NULL, 0);
@@ -97,6 +97,7 @@ void jd_prefs_load(jd_prefs *p)
     p->mark_read = jd_toml_bool(t, "reading", "mark_read", 1);
     p->notify = jd_toml_bool(t, "notifications", "enabled", 1);
     p->notify_focused = jd_toml_bool(t, "notifications", "when_focused", 1);
+    p->push = jd_toml_bool(t, "notifications", "push", 1);
     p->remote_images = jd_streq(jd_toml_str(t, "reading", "remote_images"), "always");
     p->image_senders = jd_strdup(jd_toml_str(t, "reading", "images_from"));
     long long v;
@@ -189,8 +190,8 @@ int jd_settings_save(const jd_account *a, const jd_prefs *p)
     jd_buf_addf(&b, "\n[reading]\nformat = \"%s\"\nmark_read = %s\nremote_images = \"%s\"\n", p->prefer_plain ? "plain" : "html",
                 p->mark_read ? "true" : "false", p->remote_images ? "always" : "ask");
     put(&b, "images_from", p->image_senders ? p->image_senders : "");
-    jd_buf_addf(&b, "\n[notifications]\nenabled = %s\nwhen_focused = %s\n", p->notify ? "true" : "false",
-                p->notify_focused ? "true" : "false");
+    jd_buf_addf(&b, "\n[notifications]\nenabled = %s\nwhen_focused = %s\npush = %s\n", p->notify ? "true" : "false",
+                p->notify_focused ? "true" : "false", p->push ? "true" : "false");
     jd_buf_adds(&b, "\n# Font families as fontconfig knows them (fc-list : family); empty is the built-in Inter.\n[fonts]\n");
     put(&b, "ui", p->font_ui ? p->font_ui : "");
     put(&b, "list", p->font_list ? p->font_list : "");

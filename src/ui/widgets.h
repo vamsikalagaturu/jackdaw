@@ -31,6 +31,8 @@ void jd_field_set(jd_field *f, const char *s);
 void jd_field_input(jd_field *f);
 /* returns 1 when clicked */
 int jd_field_draw(jd_ui *ui, jd_field *f, Rectangle r, int focused);
+/* the fields' right-click menu; call last in the frame, so it lands over dialogs too */
+void jd_field_menu_draw(jd_ui *ui);
 
 int jd_button(jd_ui *ui, const char *label, Rectangle r, int primary);
 
@@ -60,6 +62,17 @@ int jd_icon_button(jd_ui *ui, const char *icon, const char *label, Rectangle r, 
 /* A vertical scrollbar along the right edge of view (shown when content is taller than view): the thumb drags,
    a click on the track pages. *scroll is kept within 0..content - view. */
 void jd_scrollbar(Rectangle view, float content, float *scroll);
+/* a touch screen: scrollbars show no hover (the pointer is where the last finger was) */
+void jd_set_touch(int touch);
+/* this frame's scroll in logical pixels, to subtract from the offset: a finger's exact movement, else wheel
+   notches times notch */
+float jd_wheel_y(float notch);
+float jd_wheel_x(float notch);
+/* the view between jd_follow_begin and jd_follow_end scrolls the focused field into sight when it just took the
+   focus or the view got shorter (a phone's keyboard opening) */
+void jd_follow_field(const void *field, Rectangle r);
+void jd_follow_begin(void);
+void jd_follow_end(float *scroll, Rectangle view);
 
 /* an on/off switch at (x, y); returns 1 when clicked */
 int jd_switch(jd_ui *ui, float x, float y, int on);

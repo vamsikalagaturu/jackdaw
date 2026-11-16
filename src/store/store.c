@@ -603,32 +603,97 @@ static char *like_of(const char *s)
     return b.s;
 }
 
+/* q's conditions ANDed, its parameters named :<field><p>; an OR group's alternatives get p plus their place */
+static void where_of(jd_buf *w, const jd_list_query *q, const char *p)
+{
+    jd_buf_adds(w, "1");
+    if (q->folder) jd_buf_addf(w, " AND m.folder_id = :folder%s", p);
+    if (q->unread) jd_buf_adds(w, " AND m.flags & 1 = 0");
+    if (q->read) jd_buf_adds(w, " AND m.flags & 1 != 0");
+    if (q->flagged) jd_buf_adds(w, " AND m.flags & 4 != 0");
+    if (q->attachment) jd_buf_adds(w, " AND m.has_attachment");
+    if (q->after) jd_buf_addf(w, " AND m.date >= :after%s", p);
+    if (q->before) jd_buf_addf(w, " AND m.date < :before%s", p);
+    if (q->subject) jd_buf_addf(w, " AND m.subject LIKE :subject%s ESCAPE '\\'", p);
+    if (q->from)
+        jd_buf_addf(w, " AND m.id IN (SELECT message_id FROM addresses WHERE role = 0"
+                       " AND (addr LIKE :from%s ESCAPE '\\' OR name LIKE :from%s ESCAPE '\\'))", p, p);
+    if (q->to)
+        jd_buf_addf(w, " AND m.id IN (SELECT message_id FROM addresses WHERE role IN (1, 2)"
+                       " AND (addr LIKE :to%s ESCAPE '\\' OR name LIKE :to%s ESCAPE '\\'))", p, p);
+    if (q->only) jd_buf_addf(w, " AND m.id IN (SELECT value FROM json_each(:only%s))", p);
+    int words = q->text && q->text[strspn(q->text, " ")];
+    if (words || q->nextra) {
+        jd_buf_adds(w, " AND (0");
+        if (words) jd_buf_addf(w, " OR m.id IN (SELECT rowid FROM search WHERE search MATCH :fts%s)", p);
+        if (q->nextra) jd_buf_addf(w, " OR m.id IN (SELECT value FROM json_each(:extra%s))", p);
+        jd_buf_adds(w, ")");
+    }
+    for (int g = 0; g < q->nany; g++) {
+        jd_buf_adds(w, " AND (0");
+        for (int a = 0; a < q->any[g].n; a++) {
+            char *sub = jd_printf("%s_%d_%d", p, g, a);
+            jd_buf_adds(w, " OR (");
+            where_of(w, &q->any[g].alt[a], sub);
+            jd_buf_adds(w, ")");
+            free(sub);
+        }
+        jd_buf_adds(w, ")");
+    }
+}
+
+static void bind_named(sqlite3_stmt *st, const char *field, const char *p, const char *text)
+{
+    char *name = jd_printf(":%s%s", field, p);
+    bind_text(st, sqlite3_bind_parameter_index(st, name), text);
+    free(name);
+}
+
+static void bind_named_int(sqlite3_stmt *st, const char *field, const char *p, int64_t v)
+{
+    char *name = jd_printf(":%s%s", field, p);
+    int i = sqlite3_bind_parameter_index(st, name);
+    if (i) sqlite3_bind_int64(st, i, v);
+    free(name);
+}
+
+static void bind_ids(sqlite3_stmt *st, const char *field, const char *p, const int64_t *ids, int n)
+{
+    jd_buf b = {0};
+    jd_buf_adds(&b, "[");
+    for (int i = 0; ids && i < n; i++) jd_buf_addf(&b, "%s%lld", i ? "," : "", (long long)ids[i]);
+    jd_buf_adds(&b, "]");
+    bind_named(st, field, p, b.s);
+    jd_buf_free(&b);
+}
+
+static void bind_query(sqlite3_stmt *st, const jd_list_query *q, const char *p)
+{
+    bind_named_int(st, "folder", p, q->folder);
+    bind_named_int(st, "after", p, q->after);
+    bind_named_int(st, "before", p, q->before);
+    char *like;
+    if (q->subject) bind_named(st, "subject", p, like = like_of(q->subject)), free(like);
+    if (q->from) bind_named(st, "from", p, like = like_of(q->from)), free(like);
+    if (q->to) bind_named(st, "to", p, like = like_of(q->to)), free(like);
+    char *fts = q->text ? fts_query(q->text) : NULL;
+    bind_named(st, "fts", p, fts);
+    free(fts);
+    if (q->nextra) bind_ids(st, "extra", p, q->extra, q->nextra);
+    if (q->only) bind_ids(st, "only", p, q->only, q->nonly);
+    for (int g = 0; g < q->nany; g++)
+        for (int a = 0; a < q->any[g].n; a++) {
+            char *sub = jd_printf("%s_%d_%d", p, g, a);
+            bind_query(st, &q->any[g].alt[a], sub);
+            free(sub);
+        }
+}
+
 jd_thread_row *jd_store_list(jd_store *s, const jd_list_query *q, int *n)
 {
     jd_buf w = {0};
-    jd_buf_adds(&w, "m.thread_id IS NOT NULL");
-    if (q->folder) jd_buf_adds(&w, " AND m.folder_id = :folder");
-    if (q->unread) jd_buf_adds(&w, " AND m.flags & 1 = 0");
-    if (q->read) jd_buf_adds(&w, " AND m.flags & 1 != 0");
-    if (q->flagged) jd_buf_adds(&w, " AND m.flags & 4 != 0");
-    if (q->attachment) jd_buf_adds(&w, " AND m.has_attachment");
-    if (q->after) jd_buf_adds(&w, " AND m.date >= :after");
-    if (q->before) jd_buf_adds(&w, " AND m.date < :before");
-    if (q->subject) jd_buf_adds(&w, " AND m.subject LIKE :subject ESCAPE '\\'");
-    if (q->from)
-        jd_buf_adds(&w, " AND m.id IN (SELECT message_id FROM addresses WHERE role = 0"
-                        " AND (addr LIKE :from ESCAPE '\\' OR name LIKE :from ESCAPE '\\'))");
-    if (q->to)
-        jd_buf_adds(&w, " AND m.id IN (SELECT message_id FROM addresses WHERE role IN (1, 2)"
-                        " AND (addr LIKE :to ESCAPE '\\' OR name LIKE :to ESCAPE '\\'))");
-    if (q->only) jd_buf_adds(&w, " AND m.id IN (SELECT value FROM json_each(:only))");
-    char *fts = q->text ? fts_query(q->text) : NULL;
-    if (fts || q->nextra) {
-        jd_buf_adds(&w, " AND (0");
-        if (fts) jd_buf_adds(&w, " OR m.id IN (SELECT rowid FROM search WHERE search MATCH :fts)");
-        if (q->nextra) jd_buf_adds(&w, " OR m.id IN (SELECT value FROM json_each(:extra))");
-        jd_buf_adds(&w, ")");
-    }
+    jd_buf_adds(&w, "m.thread_id IS NOT NULL AND ");
+    where_of(&w, q, "");
     char *sql = q->grouped
         ? jd_printf("WITH hit AS (SELECT m.*, f.name AS fname FROM messages m JOIN folders f ON f.id = m.folder_id"
                     " WHERE %s)"
@@ -641,27 +706,7 @@ jd_thread_row *jd_store_list(jd_store *s, const jd_list_query *q, int *n)
     sqlite3_stmt *st = prep(s, sql);
     free(sql);
     jd_buf_free(&w);
-    char *like_from = q->from ? like_of(q->from) : NULL, *like_to = q->to ? like_of(q->to) : NULL;
-    char *like_subject = q->subject ? like_of(q->subject) : NULL;
-    jd_buf extra = {0}, only = {0};
-    for (int i = 0; i < q->nextra; i++) jd_buf_addf(&extra, "%s%lld", i ? "," : "[", (long long)q->extra[i]);
-    if (q->nextra) jd_buf_adds(&extra, "]");
-    jd_buf_adds(&only, "[");
-    for (int i = 0; q->only && i < q->nonly; i++) jd_buf_addf(&only, "%s%lld", i ? "," : "", (long long)q->only[i]);
-    jd_buf_adds(&only, "]");
-    if (st) {
-        sqlite3_bind_int64(st, sqlite3_bind_parameter_index(st, ":folder"), q->folder);
-        sqlite3_bind_int64(st, sqlite3_bind_parameter_index(st, ":after"), q->after);
-        sqlite3_bind_int64(st, sqlite3_bind_parameter_index(st, ":before"), q->before);
-        bind_text(st, sqlite3_bind_parameter_index(st, ":subject"), like_subject);
-        bind_text(st, sqlite3_bind_parameter_index(st, ":from"), like_from);
-        bind_text(st, sqlite3_bind_parameter_index(st, ":to"), like_to);
-        bind_text(st, sqlite3_bind_parameter_index(st, ":fts"), fts);
-        bind_text(st, sqlite3_bind_parameter_index(st, ":extra"), extra.s);
-        bind_text(st, sqlite3_bind_parameter_index(st, ":only"), only.s);
-    }
-    free(like_from), free(like_to), free(like_subject), free(fts);
-    jd_buf_free(&extra), jd_buf_free(&only);
+    if (st) bind_query(st, q, "");
 
     jd_thread_row *rows = NULL;
     int cap = 0;

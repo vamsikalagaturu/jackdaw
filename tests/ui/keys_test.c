@@ -71,6 +71,27 @@ static void seed(jd_store *s)
     jd_store_commit(s);
 }
 
+/* n messages from uid first in folder, an hour apart: older than the seeded ones (dir -1) or newer (1) */
+static void add_mail(jd_store *s, int64_t folder, int first, int n, int dir)
+{
+    jd_store_begin(s);
+    for (int i = 0; i < n; i++) {
+        jd_addr from = {.name = "Grace Hopper", .addr = "grace@example.org"};
+        char subject[64], msgid[64];
+        snprintf(subject, sizeof subject, "Extra %d", first + i);
+        snprintf(msgid, sizeof msgid, "x%d@example.org", first + i);
+        int64_t date = dir < 0 ? 1790000000 - (10 + i) * 3600 : 1790000000 + (1 + i) * 600;
+        jd_header h = {.uid = (uint32_t)(first + i), .date = date, .internaldate = date, .subject = subject,
+                       .msgid = msgid, .size = 100};
+        h.addrs[JD_ROLE_FROM] = &from;
+        h.naddrs[JD_ROLE_FROM] = 1;
+        int is_new;
+        jd_message_put(s, folder, &h, &is_new);
+    }
+    jd_threads_refresh(s, folder);
+    jd_store_commit(s);
+}
+
 static void frame(jd_app *app)
 {
     BeginTextureMode(target);
@@ -197,6 +218,32 @@ int main(void)
     check(!app.dialog.kind, "one d deletes nothing");
     tap(&app, KEY_D);
     check(app.dialog.kind == DLG_CONFIRM && app.dialog.act == ACT_DESTROY, "d d deletes (asks: %s)", app.dialog.title);
+    app.dialog.kind = 0;
+
+    go(&app, PANE_LIST, KEY_I, "INBOX");
+    int64_t inbox = app.folders[app.folder].id;
+    add_mail(app.view, inbox, 100, 30, -1);
+    mail_reload(&app);
+    for (int i = 0; i < 3; i++) frame(&app);
+    app.row = 12, app.followed_row = 12;
+    app.list_scroll = 500;
+    for (int i = 0; i < 3; i++) frame(&app);
+    int64_t picked = app.rows[app.row].thread;
+    float before = app.list_scroll;
+    add_mail(app.view, inbox, 200, 3, 1);
+    mail_reload(&app);
+    for (int i = 0; i < 3; i++) frame(&app);
+    check(app.rows[app.row].thread == picked && app.row == 15, "new mail keeps the selection (row %d)", app.row);
+    check(app.list_scroll > before + 3 * 40 && app.list_scroll < before + 3 * 140,
+          "new mail above keeps the view still (scroll %.0f -> %.0f)", before, app.list_scroll);
+
+    int64_t wanted = app.rows[4].latest, wanted_thread = app.rows[4].thread;
+    go(&app, PANE_LIST, KEY_S, "Sent");
+    mail_open_message(&app, wanted);
+    frame(&app);
+    jd_conv *shown = app.prefs.reader_pos == 2 ? &app.tabs[app.tab].conv : preview(&app);
+    check(!strcmp(folder_now(&app), "INBOX") && shown->thread == wanted_thread,
+          "a notification opens its message (folder %s, thread %lld)", folder_now(&app), (long long)shown->thread);
 
     UnloadRenderTexture(target);
     CloseWindow();

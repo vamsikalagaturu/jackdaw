@@ -80,7 +80,13 @@ jd_folder_row *jd_store_folders(jd_store *s, int *n);
 void jd_folder_rows_free(jd_folder_row *rows, int n);
 
 /* What the message list shows: a folder (or every folder), narrowed by filters and search terms. */
+typedef struct jd_list_query jd_list_query;
+/* terms of which at least one must match, each a query of its own (search's `a OR b`) */
 typedef struct {
+    jd_list_query *alt;
+    int n;
+} jd_query_any;
+struct jd_list_query {
     int64_t folder; /* 0: every folder */
     int grouped;    /* one row per conversation, else one per message */
     int unread, read, flagged, attachment;
@@ -91,7 +97,9 @@ typedef struct {
     int nextra;
     const int64_t *only;       /* when set, nothing outside these messages */
     int nonly;
-} jd_list_query;
+    jd_query_any *any;         /* every group must match too */
+    int nany;
+};
 
 /* A row of the list: a conversation (count >= 1) or a single message, counts over the matching messages */
 typedef struct {

@@ -232,6 +232,17 @@ static void account(jd_app *app, float x, float y, float w)
             notify_user(app, "Account saved; reconnecting.");
         }
     }
+    if (!app->have_account) return;
+    y += 38 + 28;
+    y = divider(x, y, w);
+    y = heading(app, x, y, "Log out", plat_touch() ? "Forgets the password and the server settings, and deletes the mail kept on this device."
+                                                   : "Forgets the password and the server settings, and moves the mail kept on this computer to the trash.");
+    reach(y + 50);
+    if (jd_button(&app->ui, "Log out", (Rectangle){x, y, 120, 38}, 0)) {
+        char *title = jd_printf("Log out of %s?", app->account.address);
+        dialog_open(app, DLG_CONFIRM, ACT_LOGOUT, title, NULL);
+        free(title);
+    }
 }
 
 static void appearance(jd_app *app, float x, float y, float w)
@@ -487,8 +498,16 @@ static void notifications(jd_app *app, float x, float y, float w)
     cx = label(app, x, &y, "Also while jackdaw is in front", "Off: only when another window has the focus");
     if (jd_switch(&app->ui, cx, y + 10, p->notify_focused)) p->notify_focused = !p->notify_focused, changed(app);
     y = divider(x, y + row_h, w);
+    if (plat_touch()) {
+        cx = label(app, x, &y, "Instant (push)",
+                    "Keeps listening while jackdaw is closed, as Thunderbird does. Android shows a \"Listening for new "
+                    "mail\" notification; turn its \"Push\" channel off in Android's settings to hide it. Off: a check "
+                    "about every 15 minutes");
+        if (jd_switch(&app->ui, cx, y + 10, p->push)) p->push = !p->push, changed(app);
+        y = divider(x, y + row_h, w);
+    }
     if (jd_button(&app->ui, "Send a test notification", (Rectangle){x, y, 230, 34}, 0)) {
-        if (plat_notify("jackdaw", "Notifications work.", 0) == 0) notify_user(app, "Sent to the notification service.");
+        if (plat_notify(JD_APP_NAME, "Notifications work.", 0) == 0) notify_user(app, "Sent to the notification service.");
         else notify_user(app, "No notification service on the session bus.");
     }
 }
@@ -676,10 +695,9 @@ void settings_draw(jd_app *app, Rectangle r)
     }
     /* clamped before drawing, by last frame's height, so no frame is drawn past the end */
     static float last_height;
-    if (CheckCollisionPointRec(GetMousePosition(), content)) app->settings_scroll -= GetMouseWheelMove() * 40;
+    if (CheckCollisionPointRec(GetMousePosition(), content)) app->settings_scroll -= jd_wheel_y(40);
     if (last_height > 0 && app->settings_scroll > last_height - content.height) app->settings_scroll = last_height - content.height;
     if (app->settings_scroll < 0) app->settings_scroll = 0;
-    app->settings_scroll = (float)(int)app->settings_scroll;
     float pad = narrow ? 16 : 48;
     float w = content.width - 2 * pad;
     if (w > 820) w = 820;
@@ -687,6 +705,7 @@ void settings_draw(jd_app *app, Rectangle r)
     float x = content.x + pad, top = content.y + (narrow ? 16 : 32) - app->settings_scroll;
     bottom = 0;
     jd_scissor(content.x, content.y, content.width, content.height);
+    jd_follow_begin();
     switch (app->settings_section) {
     case S_ACCOUNT: account(app, x, top, w); break;
     case S_APPEARANCE: appearance(app, x, top, w); break;
@@ -708,5 +727,6 @@ void settings_draw(jd_app *app, Rectangle r)
     }
     jd_scissor_end();
     last_height = bottom + app->settings_scroll - content.y + 20;
+    jd_follow_end(&app->settings_scroll, content);
     jd_scrollbar(content, last_height, &app->settings_scroll);
 }

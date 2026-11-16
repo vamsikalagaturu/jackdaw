@@ -18,6 +18,10 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
+      CCACHE_DIR: /home/runner/.cache/ccache
+      CCACHE_MAXSIZE: 1G
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,7 +36,7 @@ jobs:
         if: steps.version.outputs.new == '1'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake ninja-build pkg-config autoconf automake libtool make \
+          sudo apt-get install -y --no-install-recommends cmake ninja-build pkg-config autoconf automake libtool make ccache \
             libssl-dev libcurl4-openssl-dev zlib1g-dev libsystemd-dev libsecret-1-dev libfontconfig1-dev \
             libwayland-dev libxkbcommon-dev wayland-protocols libx11-dev libxrandr-dev libxinerama-dev \
             libxcursor-dev libxi-dev libgl1-mesa-dev
@@ -41,8 +45,48 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - name: SDK packages
+      # the caches CI saved on main (same keys), so a release rebuilds only jackdaw itself
+      - name: Cache Android SDK packages
+        id: sdk
         if: steps.version.outputs.new == '1'
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/local/lib/android/sdk/ndk/28.2.13676358
+            /usr/local/lib/android/sdk/build-tools/36.1.0
+            /usr/local/lib/android/sdk/platforms/android-36.1
+          key: android-sdk-ndk28.2.13676358-bt36.1.0-p36.1
+      - name: Cache Linux third-party builds
+        if: steps.version.outputs.new == '1'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/jackdaw/linux
+            !~/.cache/jackdaw/linux/build
+            !~/.cache/jackdaw/linux/build-debug
+          key: linux-${{ hashFiles('platform/versions.sh', 'platform/linux/deps.sh') }}
+      - name: Cache Android third-party builds
+        if: steps.version.outputs.new == '1'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/jackdaw/android
+            !~/.cache/jackdaw/android/debug.keystore
+            !~/.cache/jackdaw/android/out
+            !~/.cache/jackdaw/android/apk
+            !~/.cache/jackdaw/android/build-*
+          key: android-${{ hashFiles('platform/versions.sh', 'platform/android/deps.sh') }}
+      - name: Cache compiler output
+        if: steps.version.outputs.new == '1'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-release-${{ github.run_id }}
+          restore-keys: |
+            ccache-release-
+            ccache-android-
+      - name: SDK packages
+        if: steps.version.outputs.new == '1' && steps.sdk.outputs.cache-hit != 'true'
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" "build-tools;36.1.0" "platforms;android-36.1" >/dev/null

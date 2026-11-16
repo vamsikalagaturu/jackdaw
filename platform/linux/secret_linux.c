@@ -7,7 +7,7 @@
 #include <libsecret/secret.h>
 
 static const SecretSchema schema = {
-    .name = "io.github.vamsikalagaturu.jackdaw.Password",
+    .name = JD_APP_ID ".Password",
     .flags = SECRET_SCHEMA_NONE,
     .attributes = {{"account", SECRET_SCHEMA_ATTRIBUTE_STRING}, {NULL, 0}},
 };
@@ -27,7 +27,7 @@ char *plat_secret_load(const char *account)
 int plat_secret_save(const char *account, const char *password)
 {
     GError *err = NULL;
-    char *label = jd_printf("jackdaw: %s", account);
+    char *label = jd_printf(JD_APP_NAME ": %s", account);
     gboolean ok = secret_password_store_sync(&schema, SECRET_COLLECTION_DEFAULT, label, password, NULL, &err,
                                              "account", account, NULL);
     free(label);
@@ -35,10 +35,20 @@ int plat_secret_save(const char *account, const char *password)
     return ok ? 0 : -1;
 }
 
+int plat_secret_delete(const char *account)
+{
+    GError *err = NULL;
+    secret_password_clear_sync(&schema, NULL, &err, "account", account, NULL);
+    int r = err ? -1 : 0;
+    if (err) g_error_free(err);
+    return r;
+}
+
 #else
 
 int plat_secret_available(void) { return 0; }
 char *plat_secret_load(const char *account) { return NULL; }
 int plat_secret_save(const char *account, const char *password) { return -1; }
+int plat_secret_delete(const char *account) { return 0; }
 
 #endif

@@ -50,7 +50,7 @@ int tabs_keys(jd_app *app)
     if (!ctrl) return 0;
     if (IsKeyPressed(KEY_TAB)) app->tab = (app->tab + (shift ? app->ntabs - 1 : 1)) % app->ntabs;
     else if (IsKeyPressed(KEY_W)) tab_close(app, app->tab);
-    else if (IsKeyPressed(KEY_R) && !shift && app->sync) jd_sync_now(app->sync);
+    else if (IsKeyPressed(KEY_R) && !shift) list_refresh(app);
     else {
         for (int k = KEY_ONE; k <= KEY_NINE; k++)
             if (IsKeyPressed(k) && k - KEY_ONE < app->ntabs) {
@@ -82,7 +82,8 @@ void tabs_draw(jd_app *app, Rectangle r)
         total += tab_width(app, i) + 4;
     }
     total += 4;
-    if (CheckCollisionPointRec(GetMousePosition(), r)) scroll -= GetMouseWheelMove() * 40;
+    /* either axis: a wheel turns, a finger swipes across */
+    if (CheckCollisionPointRec(GetMousePosition(), r)) scroll -= jd_wheel_x(40);
     if (app->tab != shown_tab) {
         if (active_x < scroll) scroll = active_x - 8;
         if (active_x + active_w > scroll + r.width) scroll = active_x + active_w - r.width + 8;

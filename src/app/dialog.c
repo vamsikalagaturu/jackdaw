@@ -45,11 +45,17 @@ static void confirm(jd_app *app)
 {
     jd_dialog *d = &app->dialog;
     const jd_folder_row *current = app->nfolders ? &app->folders[app->folder] : NULL;
+    if (d->act == ACT_LOGOUT) {
+        close_dialog(app);
+        app_logout(app);
+        return;
+    }
     if (!app->sync) {
         close_dialog(app);
         return;
     }
     switch (d->act) {
+    case ACT_LOGOUT: break;
     case ACT_CREATE_FOLDER:
         if (d->field.len) jd_sync_create_folder(app->sync, d->field.text);
         break;
@@ -165,7 +171,7 @@ void dialog_draw(jd_app *app)
     jd_text_fit(ui, d->title, x, y, w - 40, 16, JD_NORD6, 1);
     y += 34;
     if (d->kind == DLG_CONFIRM) {
-        if (jd_button(ui, "Delete", (Rectangle){x, y + 10, 110, 34}, 1)) confirm(app);
+        if (jd_button(ui, d->act == ACT_LOGOUT ? "Log out" : "Delete", (Rectangle){x, y + 10, 110, 34}, 1)) confirm(app);
         else if (jd_button(ui, "Cancel", (Rectangle){x + 122, y + 10, 110, 34}, 0)) close_dialog(app);
         return;
     }

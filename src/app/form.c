@@ -1,10 +1,31 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "app.h"
 #include "core/util.h"
 #include "platform.h"
+
+void app_logout(jd_app *app)
+{
+    char *address = jd_strdup(app->account.address), *dir = jd_strdup(app->dir);
+    app_disconnect(app);
+    if (address) plat_secret_delete(address);
+    if (app->password) memset(app->password, 0, strlen(app->password));
+    free(app->password), free(app->dir);
+    app->password = app->dir = NULL;
+    jd_account_free(&app->account);
+    app->account = (jd_account){0};
+    app->have_account = 0;
+    save_prefs(app);
+    char *why = NULL;
+    if (dir && access(dir, F_OK) == 0 && plat_trash(dir) != 0)
+        why = jd_printf("Logged out, but the local mail in %s could not be removed.", dir);
+    free(address), free(dir);
+    form_open(app, why);
+    free(why);
+}
 
 static const char *labels[F_COUNT] = {"Name", "Address", "Username", "IMAP server", "Port", "SMTP server", "Port", "Password"};
 
@@ -148,10 +169,11 @@ void form_frame(jd_app *app)
     /* narrower on a phone; scrolled (finger or wheel) when the keyboard leaves too little room */
     static float scroll, content;
     float view = jd_screen_h();
-    scroll -= GetMouseWheelMove() * 40;
+    scroll -= jd_wheel_y(40);
     if (scroll > content - view + 24) scroll = content - view + 24;
     if (scroll < 0) scroll = 0;
     float w = jd_screen_w() - 32 < 460 ? jd_screen_w() - 32 : 460, x = (jd_screen_w() - w) / 2, y = 48 - scroll;
+    jd_follow_begin();
     jd_text(ui, app->have_account ? "Account" : "Add your mail account", x, y, 24, JD_NORD6, 1);
     y += 36;
     jd_text(ui, plat_secret_available() ? "The password goes to the system keystore."
@@ -163,4 +185,5 @@ void form_frame(jd_app *app)
     if (app->have_account && app->sync && jd_button(ui, "Cancel", (Rectangle){x + 192, y, 110, 38}, 0))
         app->show_form = 0;
     content = y + 38 + scroll;
+    jd_follow_end(&scroll, (Rectangle){0, 0, jd_screen_w(), view});
 }

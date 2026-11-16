@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(jackdaw VERSION 0.1.0 DESCRIPTION "Mail client for Linux and Android" LANGUAGES C CXX)
+project(jackdaw VERSION 0.2.0 DESCRIPTION "Mail client for Linux and Android" LANGUAGES C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 # litehtml (HTML mail) is C++17; everything else is C
@@ -39,21 +39,32 @@ file(WRITE ${JD_GEN}/icon_table.c.tmp "#include \"ui/icons.h\"\n${JD_ICON_DECLS}
 configure_file(${JD_GEN}/icon_table.c.tmp ${JD_GEN}/icon_table.c COPYONLY)
 list(APPEND JD_ASSET_SOURCES ${JD_GEN}/icon_table.c)
 
-# JD_RELEASE=1 in the environment is the plain version, anything else X.Y.Z-dev+hash[.dirty], fixed at configure time
-set(JD_VERSION_STRING "${PROJECT_VERSION}")
+# Two separate things, fixed at configure time. JD_RELEASE=1 in the environment builds the app "jackdaw"; without
+# it, "jackdaw-dev", with its own settings, mail, keyring entries and runtime files, so it never touches an installed
+# release. The version is plain X.Y.Z only for a checkout that is exactly tag vX.Y.Z with no changes (what
+# platform/release.sh builds); any other build is X.Y.Z-dev+hash[.dirty], even an installed "jackdaw".
+set(JD_APP_NAME jackdaw)
+set(JD_APP_ID io.github.vamsikalagaturu.jackdaw)
 if(NOT "$ENV{JD_RELEASE}" STREQUAL "1")
-  set(JD_VERSION_STRING "${PROJECT_VERSION}-dev")
-  find_package(Git QUIET)
-  if(GIT_FOUND)
-    execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD WORKING_DIRECTORY "${JD_REPO}"
-                    OUTPUT_VARIABLE JD_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE JD_GIT_FAILED)
-    execute_process(COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
-                    WORKING_DIRECTORY "${JD_REPO}" OUTPUT_VARIABLE JD_GIT_CHANGES ERROR_QUIET)
-    if(NOT JD_GIT_FAILED AND JD_GIT_COMMIT)
-      set(JD_VERSION_STRING "${JD_VERSION_STRING}+${JD_GIT_COMMIT}")
-      if(JD_GIT_CHANGES)
-        set(JD_VERSION_STRING "${JD_VERSION_STRING}.dirty")
-      endif()
+  set(JD_APP_NAME jackdaw-dev)
+  set(JD_APP_ID io.github.vamsikalagaturu.jackdaw.dev)
+endif()
+set(JD_VERSION_STRING "${PROJECT_VERSION}-dev")
+find_package(Git QUIET)
+if(GIT_FOUND)
+  execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD WORKING_DIRECTORY "${JD_REPO}"
+                  OUTPUT_VARIABLE JD_GIT_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE JD_GIT_FAILED)
+  execute_process(COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
+                  WORKING_DIRECTORY "${JD_REPO}" OUTPUT_VARIABLE JD_GIT_CHANGES ERROR_QUIET)
+  execute_process(COMMAND "${GIT_EXECUTABLE}" tag --points-at HEAD WORKING_DIRECTORY "${JD_REPO}"
+                  OUTPUT_VARIABLE JD_GIT_TAGS ERROR_QUIET)
+  string(REGEX MATCH "(^|\n)v${PROJECT_VERSION}(\n|$)" JD_AT_TAG "${JD_GIT_TAGS}")
+  if(JD_AT_TAG AND NOT JD_GIT_CHANGES)
+    set(JD_VERSION_STRING "${PROJECT_VERSION}")
+  elseif(NOT JD_GIT_FAILED AND JD_GIT_COMMIT)
+    set(JD_VERSION_STRING "${JD_VERSION_STRING}+${JD_GIT_COMMIT}")
+    if(JD_GIT_CHANGES)
+      set(JD_VERSION_STRING "${JD_VERSION_STRING}.dirty")
     endif()
   endif()
 endif()
@@ -113,6 +124,7 @@ add_library(jdcore STATIC ${JD_CORE_SOURCES})
 target_include_directories(jdcore PUBLIC src)
 target_compile_options(jdcore PRIVATE ${JD_WARNINGS})
 target_link_libraries(jdcore PUBLIC jd_etpan jd_sqlite ${JD_CURL_LIB})
+target_compile_definitions(jdcore PUBLIC JD_APP_NAME="${JD_APP_NAME}" JD_APP_ID="${JD_APP_ID}")
 
 set(LITEHTML_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 add_subdirectory(${JD_REPO}/thirdparty/litehtml-0.10 ${CMAKE_CURRENT_BINARY_DIR}/litehtml EXCLUDE_FROM_ALL)

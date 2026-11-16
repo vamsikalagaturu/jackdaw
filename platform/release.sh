@@ -14,6 +14,8 @@ TAG=v$VERSION
 gh release view "$TAG" -R vamsikalagaturu/jackdaw >/dev/null 2>&1 && { echo "$TAG exists; raise project() VERSION" >&2; exit 1; }
 
 export JD_RELEASE=1
+# the build reads its plain version from this tag on HEAD (CMakeLists.txt); gh pushes it with the release
+git -C "$REPO" tag -f "$TAG" HEAD
 "$HERE/linux/build.sh" release
 JD_TEST_CA= "$HERE/android/build.sh"
 

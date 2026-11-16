@@ -36,6 +36,9 @@ jd_sync *jd_sync_start(const jd_account *a, const char *password, const char *ac
 void jd_sync_stop(jd_sync *s);
 void jd_sync_now(jd_sync *s);
 int jd_sync_poll(jd_sync *s, jd_event *ev);
+/* called on the worker's thread, besides JD_EV_NEW_MAIL, for a platform whose event loop stops in the
+   background; NULL by default */
+extern void (*jd_sync_new_mail_hook)(const char *from, const char *subject, int64_t id, int count);
 void jd_event_free(jd_event *ev);
 
 void jd_sync_fetch_body(jd_sync *s, int64_t message_id);
