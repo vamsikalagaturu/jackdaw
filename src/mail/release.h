@@ -17,7 +17,8 @@ int jd_release_latest(jd_release *out, char *err, int errlen);
 int jd_release_parse(const char *json, jd_release *out);
 void jd_release_free(jd_release *r);
 
-/* "v1.2.3" or "1.2.3-dev+abc" against another, by major, minor and patch: <0, 0, >0 */
+/* "v1.2.3" or "1.2.3-dev+abc" against another, by major, minor and patch, a pre-release before its release:
+   <0, 0, >0 */
 int jd_version_cmp(const char *a, const char *b);
 
 /* url to path, refused unless its SHA-256 is sha256 (when given); *progress goes 0 to 1 while it runs. Blocking;

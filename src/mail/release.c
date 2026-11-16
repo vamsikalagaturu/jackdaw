@@ -90,7 +90,9 @@ int jd_version_cmp(const char *a, const char *b)
     version_parts(a, x), version_parts(b, y);
     for (int i = 0; i < 3; i++)
         if (x[i] != y[i]) return x[i] < y[i] ? -1 : 1;
-    return 0;
+    /* SemVer 2.0 section 11: a pre-release ("0.2.2-dev+...") comes before its release ("0.2.2") */
+    int pa = strchr(a, '-') != NULL, pb = strchr(b, '-') != NULL;
+    return pa == pb ? 0 : pa ? -1 : 1;
 }
 
 static CURL *easy(const char *url, long timeout)
