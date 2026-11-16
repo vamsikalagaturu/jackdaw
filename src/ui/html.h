@@ -31,6 +31,8 @@ void jd_html_select(jd_html *h, float ax, float ay, float bx, float by);
 void jd_html_select_all(jd_html *h);
 /* the word under (x, y), without the punctuation around it; 0 when no text is there */
 int jd_html_select_word(jd_html *h, float x, float y);
+/* the line of text under (x, y), as laid out; 0 when no text is there */
+int jd_html_select_line(jd_html *h, float x, float y);
 /* where the selection starts and ends: the x and the top of each end's line, and the end line's height */
 int jd_html_selection_ends(jd_html *h, float *ax, float *ay, float *bx, float *by, float *line_h);
 void jd_html_select_none(jd_html *h);

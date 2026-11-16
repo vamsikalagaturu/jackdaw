@@ -133,7 +133,7 @@ int qfield_keys(jd_app *app, jd_qfield *q)
         absorb(q, 1);
         return 1;
     }
-    if (IsKeyPressed(KEY_BACKSPACE) && q->text.cursor == 0 && q->npills) {
+    if (IsKeyPressed(KEY_BACKSPACE) && q->text.cursor == 0 && !q->text.selecting && q->npills) {
         char *last = q->pills[--q->npills];
         char *back = jd_printf("%s%s%s", last, q->text.len ? " " : "", q->text.text);
         jd_field_set(&q->text, back);

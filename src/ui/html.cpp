@@ -474,6 +474,52 @@ extern "C" int jd_html_select_word(jd_html *h, float x, float y)
     return 0;
 }
 
+namespace {
+
+bool same_line(const container::run &a, const container::run &b);
+
+/* nothing but spaces (and no-break spaces, as spacer cells hold) */
+bool blank(const std::string &s)
+{
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == ' ' || s[i] == '\t') continue;
+        if ((unsigned char)s[i] == 0xc2 && i + 1 < s.size() && (unsigned char)s[i + 1] == 0xa0) {
+            i++;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+/* The line of text under (x, y): the run there and its neighbours in reading order on the same line, blank ones
+   at either end left out. A wider search (every run at that height) would take in a table's other cells. */
+extern "C" int jd_html_select_line(jd_html *h, float x, float y)
+{
+    const auto &runs = h->box.runs;
+    float z = h->zoom;
+    x /= z, y /= z;
+    int at = -1;
+    for (int i = 0; i < (int)runs.size() && at < 0; i++) {
+        const auto &r = runs[(size_t)i];
+        if (y >= r.y && y < r.y + r.h && x >= r.x && x < r.x + r.w && !blank(r.text)) at = i;
+    }
+    if (at < 0) return 0;
+    int a = at, b = at;
+    while (a > 0 && same_line(runs[(size_t)a - 1], runs[(size_t)at]) && runs[(size_t)a - 1].x < runs[(size_t)a].x) a--;
+    while (b + 1 < (int)runs.size() && same_line(runs[(size_t)b + 1], runs[(size_t)at]) &&
+           runs[(size_t)b + 1].x > runs[(size_t)b].x)
+        b++;
+    while (a < at && blank(runs[(size_t)a].text)) a++;
+    while (b > at && blank(runs[(size_t)b].text)) b--;
+    h->sel_a = {a, 0}, h->sel_b = {b, (int)runs[(size_t)b].text.size()};
+    h->selected = true;
+    h->caret_on = false;
+    return 1;
+}
+
 extern "C" int jd_html_selection_ends(jd_html *h, float *ax, float *ay, float *bx, float *by, float *line_h)
 {
     if (!h->selected) return 0;
@@ -783,10 +829,11 @@ extern "C" void jd_html_draw(jd_html *h, float x, float y, float clip_top, float
     rlPushMatrix();
     rlTranslatef(x, y, 0);
     rlScalef(z, z, 1);
-    draw_selection(h, 0, 0);
     /* litehtml culls against drawn positions, here the document's own */
     litehtml::position clip(0, (clip_top - y) / z, h->box.width, (clip_bottom - clip_top) / z);
     h->doc->draw(0, 0, 0, &clip);
+    /* over the mail, translucent: drawn under it, the backgrounds a mail paints (tables, cells) hid it */
+    draw_selection(h, 0, 0);
     rlDrawRenderBatchActive();
     rlPopMatrix();
 }

@@ -21,10 +21,14 @@ void jd_text_fit(jd_ui *ui, const char *s, float x, float y, float width, float 
 typedef struct {
     char text[512];
     int len, cursor;
+    int selecting, anchor; /* a selection from anchor to cursor, while selecting */
     int secret;
     int bare; /* no box of its own: it sits inside one the caller draws */
     const char *placeholder;
 } jd_field;
+
+/* For a left press: 1, or 2 and 3 for a second and third press within 0.4 s and a few pixels (a word, a line) */
+int jd_click_count(void);
 
 void jd_field_set(jd_field *f, const char *s);
 /* typing, editing keys and paste, for the focused field */
