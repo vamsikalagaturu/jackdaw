@@ -788,6 +788,37 @@ static float label_x(jd_ui *ui, const char *text, int at, float size, int bold)
 
 static void clear_selections(jd_conv *c);
 
+/* For a left press: 1, or 2 and 3 for a second and third press within 0.4 s and a few pixels (a word, a line) */
+static int click_count(void)
+{
+    static double last_t;
+    static Vector2 last_at;
+    static int clicks;
+    double now = GetTime();
+    Vector2 mp = GetMousePosition();
+    int near = fabsf(mp.x - last_at.x) + fabsf(mp.y - last_at.y) < 6;
+    clicks = now - last_t < 0.4 && near ? clicks % 3 + 1 : 1;
+    last_t = now, last_at = mp;
+    return clicks;
+}
+
+/* a header text's selection after a press at byte at: the word there on a double click, the whole text on a
+   triple one, else none yet (a drag makes it) */
+static void label_press(const char *text, int at)
+{
+    int clicks = click_count(), a = at, b = at;
+    if (clicks == 2) {
+        while (a > 0 && word_char(text[a - 1])) a--;
+        while (text[b] && word_char(text[b])) b++;
+    } else if (clicks == 3) {
+        a = 0, b = (int)strlen(text);
+    }
+    hl.anchor = hl.from = a, hl.to = b;
+    hl.dragging = clicks == 1;
+    free(hl.text);
+    hl.text = b > a ? jd_strndup(text + a, (size_t)(b - a)) : NULL;
+}
+
 /* text drawn at (x, y) in at most w, made selectable as id */
 static void sel_label(jd_app *app, jd_conv *c, int id, const char *text, float x, float y, float w, float size, int bold,
                       Rectangle clip)
@@ -801,8 +832,8 @@ static void sel_label(jd_app *app, jd_conv *c, int id, const char *text, float x
     if (over) SetMouseCursor(MOUSE_CURSOR_IBEAM);
     if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         clear_selections(c);
-        hl.conv = c, hl.id = id, hl.dragging = 1;
-        hl.anchor = hl.from = hl.to = label_hit(ui, text, mp.x - x, size, bold);
+        hl.conv = c, hl.id = id;
+        label_press(text, label_hit(ui, text, mp.x - x, size, bold));
     }
     if (hl.conv != c || hl.id != id) return;
     if (hl.dragging) {
@@ -939,7 +970,8 @@ static float address_line(jd_app *app, jd_conv *c, int id, const char *label, co
     }
     if (at >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         clear_selections(c);
-        hl.conv = c, hl.id = id, hl.dragging = 1, hl.anchor = hl.from = hl.to = at;
+        hl.conv = c, hl.id = id;
+        label_press(text, at);
     }
     if (hl.conv == c && hl.id == id && hl.dragging) {
         if (at >= 0) {
@@ -1574,14 +1606,7 @@ static void text_mouse(jd_app *app, jd_conv *c, int i, Rectangle area, Rectangle
     if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         visual_end(c);
         clear_selections(c);
-        /* a second press within 0.4 s and a few pixels selects the word, a third the line */
-        static double last_t;
-        static Vector2 last_at;
-        static int clicks;
-        double now = GetTime();
-        int near = fabsf(at.x - last_at.x) + fabsf(at.y - last_at.y) < 6;
-        clicks = now - last_t < 0.4 && near ? clicks % 3 + 1 : 1;
-        last_t = now, last_at = at;
+        int clicks = click_count();
         if (clicks == 2 && select_word(app, m, html, shown, at)) return;
         if (clicks == 3 && select_line(app, m, html, shown, at)) return;
         drag.active = 1, drag.moved = 0, drag.msg = i, drag.conv = c, drag.start = at;

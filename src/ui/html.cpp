@@ -783,10 +783,11 @@ extern "C" void jd_html_draw(jd_html *h, float x, float y, float clip_top, float
     rlPushMatrix();
     rlTranslatef(x, y, 0);
     rlScalef(z, z, 1);
-    draw_selection(h, 0, 0);
     /* litehtml culls against drawn positions, here the document's own */
     litehtml::position clip(0, (clip_top - y) / z, h->box.width, (clip_bottom - clip_top) / z);
     h->doc->draw(0, 0, 0, &clip);
+    /* over the mail, translucent: drawn under it, the backgrounds a mail paints (tables, cells) hid it */
+    draw_selection(h, 0, 0);
     rlDrawRenderBatchActive();
     rlPopMatrix();
 }
