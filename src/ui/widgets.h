@@ -21,6 +21,7 @@ void jd_text_fit(jd_ui *ui, const char *s, float x, float y, float width, float 
 typedef struct {
     char text[512];
     int len, cursor;
+    int selecting, anchor; /* a selection from anchor to cursor, while selecting */
     int secret;
     int bare; /* no box of its own: it sits inside one the caller draws */
     const char *placeholder;

@@ -89,10 +89,43 @@ void jd_field_set(jd_field *f, const char *s)
     memcpy(f->text, s ? s : "", n);
     f->text[n] = 0;
     f->len = f->cursor = (int)n;
+    f->selecting = 0;
+}
+
+static float span_width(jd_ui *ui, const char *s, int from, int to, float size);
+
+static int field_selection(const jd_field *f, int *from, int *to)
+{
+    if (!f->selecting || f->anchor == f->cursor) return 0;
+    *from = f->anchor < f->cursor ? f->anchor : f->cursor;
+    *to = f->anchor < f->cursor ? f->cursor : f->anchor;
+    return 1;
+}
+
+/* removes the selection; 1 when there was one */
+static int delete_selection(jd_field *f)
+{
+    int from = 0, to = 0;
+    int had = field_selection(f, &from, &to);
+    f->selecting = 0;
+    if (!had) return 0;
+    memmove(f->text + from, f->text + to, (size_t)(f->len - to + 1));
+    f->len -= to - from;
+    f->cursor = from;
+    return 1;
+}
+
+/* the cursor moved to pos; with shift the selection follows it, else it ends */
+static void field_move(jd_field *f, int pos, int shift)
+{
+    if (shift && !f->selecting) f->selecting = 1, f->anchor = f->cursor;
+    else if (!shift) f->selecting = 0;
+    f->cursor = pos;
 }
 
 static void insert(jd_field *f, const char *s, int n)
 {
+    delete_selection(f);
     if (f->len + n >= (int)sizeof f->text) return;
     memmove(f->text + f->cursor + n, f->text + f->cursor, (size_t)(f->len - f->cursor + 1));
     memcpy(f->text + f->cursor, s, (size_t)n);
@@ -108,31 +141,48 @@ static int pressed(int key)
 void jd_field_input(jd_field *f)
 {
     int ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+    int shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     for (int c; (c = GetCharPressed());) {
         int n;
         const char *u = CodepointToUTF8(c, &n);
         if (c >= 0x20 && !ctrl) insert(f, u, n);
     }
+    int from = 0, to = 0, sel = field_selection(f, &from, &to);
+    if (ctrl && IsKeyPressed(KEY_A)) {
+        f->selecting = 1, f->anchor = 0, f->cursor = f->len;
+        return;
+    }
+    if (ctrl && (IsKeyPressed(KEY_C) || IsKeyPressed(KEY_X)) && sel && !f->secret) {
+        char copy[sizeof f->text];
+        memcpy(copy, f->text + from, (size_t)(to - from));
+        copy[to - from] = 0;
+        SetClipboardText(copy);
+        if (IsKeyPressed(KEY_X)) delete_selection(f);
+        return;
+    }
     if (ctrl && IsKeyPressed(KEY_V)) {
         const char *clip = GetClipboardText();
+        delete_selection(f);
         for (const char *p = clip; p && *p; p++)
             if ((unsigned char)*p >= 0x20) insert(f, p, 1);
     }
+    if ((pressed(KEY_BACKSPACE) || pressed(KEY_DELETE)) && delete_selection(f)) return;
     if (pressed(KEY_BACKSPACE) && f->cursor > 0) {
-        int from = ctrl ? 0 : utf8_prev(f->text, f->cursor);
-        memmove(f->text + from, f->text + f->cursor, (size_t)(f->len - f->cursor + 1));
-        f->len -= f->cursor - from;
-        f->cursor = from;
+        int start = ctrl ? 0 : utf8_prev(f->text, f->cursor);
+        memmove(f->text + start, f->text + f->cursor, (size_t)(f->len - f->cursor + 1));
+        f->len -= f->cursor - start;
+        f->cursor = start;
     }
     if (pressed(KEY_DELETE) && f->cursor < f->len) {
-        int to = utf8_next(f->text, f->len, f->cursor);
-        memmove(f->text + f->cursor, f->text + to, (size_t)(f->len - to + 1));
-        f->len -= to - f->cursor;
+        int end = utf8_next(f->text, f->len, f->cursor);
+        memmove(f->text + f->cursor, f->text + end, (size_t)(f->len - end + 1));
+        f->len -= end - f->cursor;
     }
-    if (pressed(KEY_LEFT)) f->cursor = utf8_prev(f->text, f->cursor);
-    if (pressed(KEY_RIGHT)) f->cursor = utf8_next(f->text, f->len, f->cursor);
-    if (IsKeyPressed(KEY_HOME)) f->cursor = 0;
-    if (IsKeyPressed(KEY_END)) f->cursor = f->len;
+    /* without shift, Left and Right end a selection at its own edge */
+    if (pressed(KEY_LEFT)) field_move(f, sel && !shift ? from : utf8_prev(f->text, f->cursor), shift);
+    if (pressed(KEY_RIGHT)) field_move(f, sel && !shift ? to : utf8_next(f->text, f->len, f->cursor), shift);
+    if (IsKeyPressed(KEY_HOME)) field_move(f, 0, shift);
+    if (IsKeyPressed(KEY_END)) field_move(f, f->len, shift);
 }
 
 /* the one text field menu: its field must be drawn every frame it stays open, or it closes */
@@ -200,6 +250,16 @@ int jd_field_draw(jd_ui *ui, jd_field *f, Rectangle r, int focused)
     before[cut] = 0;
     float cx = jd_text_width(ui, before, size, 0);
     float shift = cx > r.width - 2 * pad ? cx - (r.width - 2 * pad) : 0;
+    int sf, st;
+    if (focused && field_selection(f, &sf, &st)) {
+        int a = sf, b = st; /* in shown's bytes: one '*' per character of a secret */
+        if (f->secret) {
+            a = b = 0;
+            for (int i = 0; i < st; i = utf8_next(f->text, f->len, i)) a += i < sf, b++;
+        }
+        float xa = span_width(ui, text, 0, a, size), xb = span_width(ui, text, 0, b, size);
+        DrawRectangleRec((Rectangle){r.x + pad - shift + xa, ty - 2, xb - xa, size + 4}, ColorAlpha(JD_NORD10, 0.55f));
+    }
     jd_text(ui, text, r.x + pad - shift, ty, size, JD_NORD6, 0);
     if (focused && (int)(GetTime() * 2) % 2 == 0)
         DrawRectangle((int)(r.x + pad + cx - shift), (int)ty, 1, (int)size + 2, JD_NORD8);
@@ -213,7 +273,11 @@ int jd_field_draw(jd_ui *ui, jd_field *f, Rectangle r, int focused)
         jd_popup_open(&field_menu.pop);
         return 1;
     }
-    return over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        f->selecting = 0;
+        return 1;
+    }
+    return 0;
 }
 
 void jd_field_menu_draw(jd_ui *ui)
@@ -235,8 +299,20 @@ void jd_field_menu_draw(jd_ui *ui)
     if (k == 0)
         for (const char *p = clip; p && *p; p++)
             if ((unsigned char)*p >= 0x20) insert(f, p, 1);
-    if (k == 1 || k == 2) SetClipboardText(f->text);
-    if (k == 2 || k == 3) jd_field_set(f, "");
+    /* Copy and Cut take the selection when there is one, else the whole text */
+    int from, to;
+    if (!field_selection(f, &from, &to)) from = 0, to = f->len;
+    if (k == 1 || k == 2) {
+        char copy[sizeof f->text];
+        memcpy(copy, f->text + from, (size_t)(to - from));
+        copy[to - from] = 0;
+        SetClipboardText(copy);
+    }
+    if (k == 2) {
+        f->selecting = 1, f->anchor = from, f->cursor = to;
+        delete_selection(f);
+    }
+    if (k == 3) jd_field_set(f, "");
     if (!field_menu.pop.open) field_menu.f = NULL;
 }
 

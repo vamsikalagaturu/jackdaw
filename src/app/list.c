@@ -734,7 +734,7 @@ static int search_keys(jd_app *app)
         app->searching = 0;
         return 1;
     }
-    if (IsKeyPressed(KEY_BACKSPACE) && app->search.cursor == 0) {
+    if (IsKeyPressed(KEY_BACKSPACE) && app->search.cursor == 0 && !app->search.selecting) {
         pill p[32];
         int n = pills_shown(app, p, 32);
         if (n) pill_remove(app, &p[n - 1], 1);

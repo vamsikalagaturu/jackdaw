@@ -1402,13 +1402,29 @@ static void touch_select_between(jd_app *app, jd_reading *m, int html, int shown
     m->sel_to = a < b ? b : a;
 }
 
-static int touch_select_word(jd_app *app, jd_reading *m, int html, int shown, Vector2 at)
+static int select_word(jd_app *app, jd_reading *m, int html, int shown, Vector2 at)
 {
     if (html) return jd_html_select_word(m->html, at.x, at.y);
     if (at.y < 0 || at.y >= (float)shown * LINE_H) return 0;
     int k = plain_hit(&app->ui, m, at.x, at.y, shown), a = k, b = k;
     while (a > 0 && word_char(m->text[a - 1])) a--;
     while (m->text[b] && word_char(m->text[b])) b++;
+    if (a == b) return 0;
+    m->sel_from = a, m->sel_to = b;
+    return 1;
+}
+
+/* the line under at: HTML's line as laid out, plain text's up to its line breaks */
+static int select_line(jd_app *app, jd_reading *m, int html, int shown, Vector2 at)
+{
+    if (html) {
+        jd_html_select(m->html, -1e6f, at.y, 1e6f, at.y);
+        return jd_html_has_selection(m->html);
+    }
+    if (at.y < 0 || at.y >= (float)shown * LINE_H) return 0;
+    int k = plain_hit(&app->ui, m, at.x, at.y, shown), a = k, b = k;
+    while (a > 0 && m->text[a - 1] != '\n') a--;
+    while (m->text[b] && m->text[b] != '\n' && m->text[b] != '\r') b++;
     if (a == b) return 0;
     m->sel_from = a, m->sel_to = b;
     return 1;
@@ -1542,7 +1558,7 @@ static void text_mouse(jd_app *app, jd_conv *c, int i, Rectangle area, Rectangle
             if (!on_link) {
                 visual_end(c);
                 clear_selections(c);
-                if (touch_select_word(app, m, html, shown, at)) {
+                if (select_word(app, m, html, shown, at)) {
                     plat_finger_claim();
                     ts = (typeof(ts)){.active = 1, .msg = i, .html = html, .drag = 2, .was_down = 1, .conv = c,
                                       .ox = ox, .oy = oy, .press = mp};
@@ -1558,6 +1574,16 @@ static void text_mouse(jd_app *app, jd_conv *c, int i, Rectangle area, Rectangle
     if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         visual_end(c);
         clear_selections(c);
+        /* a second press within 0.4 s and a few pixels selects the word, a third the line */
+        static double last_t;
+        static Vector2 last_at;
+        static int clicks;
+        double now = GetTime();
+        int near = fabsf(at.x - last_at.x) + fabsf(at.y - last_at.y) < 6;
+        clicks = now - last_t < 0.4 && near ? clicks % 3 + 1 : 1;
+        last_t = now, last_at = at;
+        if (clicks == 2 && select_word(app, m, html, shown, at)) return;
+        if (clicks == 3 && select_line(app, m, html, shown, at)) return;
         drag.active = 1, drag.moved = 0, drag.msg = i, drag.conv = c, drag.start = at;
     }
     if (over && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
