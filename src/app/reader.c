@@ -248,7 +248,10 @@ void conv_open(jd_app *app, jd_conv *c, int64_t thread, int64_t only)
         if (!(r->row.flags & JD_SEEN)) unread[nunread++] = r->row.id;
     }
     free(rows);
-    for (int i = 0; i < c->n; i++) c->reading[i].expanded = !(c->reading[i].row.flags & JD_SEEN) || i == c->n - 1;
+    for (int i = 0; i < c->n; i++) {
+        c->reading[i].expanded = !(c->reading[i].row.flags & JD_SEEN) || i == c->n - 1;
+        c->reading[i].open = (float)c->reading[i].expanded;
+    }
     if (nunread && app->sync && app->prefs.mark_read) jd_sync_set_flag(app->sync, unread, nunread, JD_SEEN, 1);
     c->plain = app->prefs.prefer_plain;
     free(unread);
@@ -1044,6 +1047,54 @@ static int clicked(Rectangle box, Rectangle clip, jd_app *app)
            CheckCollisionPointRec(GetMousePosition(), clip) && !app->dialog.kind;
 }
 
+static char *sender_address(const jd_reading *m);
+
+/* the addresses of a list as typed ("a <x>, \"b, c\" <y>"): how many, and the first one's name (else address) */
+static int count_addresses(const char *list, char *first, size_t first_cap)
+{
+    int n = 0, quoted = 0, angle = 0;
+    const char *start = list;
+    first[0] = 0;
+    for (const char *p = list; list; p++) {
+        if (*p == '"') quoted = !quoted;
+        else if (*p == '<') angle = 1;
+        else if (*p == '>') angle = 0;
+        if (*p && (*p != ',' || quoted || angle)) continue;
+        char name[256], addr[256];
+        split_address(start, (int)(p - start), name, sizeof name, addr, sizeof addr);
+        if (addr[0]) {
+            if (!n++) snprintf(first, first_cap, "%s", name[0] ? name : addr);
+        }
+        if (!*p) break;
+        start = p + 1;
+    }
+    return n;
+}
+
+/* One line in place of From, To, Cc and In: the sender's address, the first recipient and how many more, the
+   folder. A click shows them all. */
+static float address_summary(jd_app *app, jd_reading *m, float x, float y, float w, Rectangle clip)
+{
+    jd_ui *ui = &app->ui;
+    float ts = 13 * K, lh = 20 * K;
+    char first[256], first_cc[256], line[1024];
+    int nto = count_addresses(m->row.to, first, sizeof first), ncc = count_addresses(m->row.cc, first_cc, sizeof first_cc);
+    char *from = sender_address(m);
+    int more = nto + ncc - 1;
+    char others[32] = "";
+    if (more > 0) snprintf(others, sizeof others, ", +%d", more);
+    snprintf(line, sizeof line, "%s  to  %s%s  ·  %s", from, nto ? first : first_cc[0] ? first_cc : "nobody", others,
+             m->row.folder_name ? m->row.folder_name : "");
+    free(from);
+    Rectangle row = {x, y - 2, w, lh};
+    int hover = CheckCollisionPointRec(GetMousePosition(), row) && CheckCollisionPointRec(GetMousePosition(), clip);
+    if (hover) SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
+    jd_icon("chevron-right", x - 2, y, ts, hover ? JD_NORD8 : JD_MUTED);
+    jd_text_fit(ui, line, x + 18 * K, y, w - 18 * K, ts, hover ? JD_NORD4 : JD_MUTED, 0);
+    if (clicked(row, clip, app)) m->addresses = 1;
+    return y + lh;
+}
+
 static void size_text(size_t bytes, char *out, int len)
 {
     if (bytes < 1024) snprintf(out, (size_t)len, "%zu B", bytes);
@@ -1740,21 +1791,34 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         const float pad = narrow ? 8 : 16, ar = 16 * K;
         float card_y = y, ix = x + pad, iw = w - 2 * pad;
         float head_h = 2 * ar;
+        /* opening and closing ease over OPEN_S: the open card is drawn throughout, cut to a height between the
+           closed one's and its whole height (smoothstep), and what follows moves with it */
+        const float OPEN_S = 0.18f;
+        float step = GetFrameTime() / OPEN_S;
+        m->open = m->expanded ? fminf(1, m->open + step) : fmaxf(0, m->open - step);
+        int shown = m->expanded || m->open > 0;
+        int moving = m->open > 0 && m->open < 1;
+        float closed_h = head_h + 2 * pad, ease = m->open * m->open * (3 - 2 * m->open);
+        float moving_h = closed_h + (fmaxf(m->full_h, closed_h) - closed_h) * ease;
+        if (moving) {
+            m->card_h = moving_h;
+            jd_scissor(x, card_y, w, moving_h);
+        }
         /* a collapsed card is one target as a whole; an open one closes from its header */
-        Rectangle head = m->expanded ? (Rectangle){x, card_y, w, pad + head_h + 6}
-                                     : (Rectangle){x, card_y, w, head_h + 2 * pad};
+        Rectangle head = shown ? (Rectangle){x, card_y, w, pad + head_h + 6}
+                               : (Rectangle){x, card_y, w, head_h + 2 * pad};
         int on_head = CheckCollisionPointRec(GetMousePosition(), head) && CheckCollisionPointRec(GetMousePosition(), r) &&
                       !app->dialog.kind && !app->menu.open && !card_menu.open;
         if (on_head) SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
         if (m->card_h > 0 && card_y < r.y + r.height && card_y + m->card_h > r.y)
             DrawRectangleRounded((Rectangle){x, card_y, w, m->card_h}, 16.0f / fminf(w, m->card_h), 8,
-                                 on_head && !m->expanded ? JD_NORD2 : JD_NORD1);
+                                 on_head && !shown ? JD_NORD2 : JD_NORD1);
         y += pad;
         char date[32];
         format_date(m->row.date, date, sizeof date);
         float dw = jd_text_width(ui, date, 13 * K, 0);
         float tx = ix + 2 * ar + 12, tw = iw - (tx - ix);
-        float name_y = m->expanded ? y + ar - 15 * K * 0.6f : y + 1;
+        float name_y = shown ? y + ar - 15 * K * 0.6f : y + 1;
         /* the name alone: the address is in the From chip of an open card */
         char from_name[256], from_addr[256];
         split_address(m->row.from ? m->row.from : "", m->row.from ? (int)strlen(m->row.from) : 0, from_name,
@@ -1762,12 +1826,12 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         const char *from = from_name[0] ? from_name : from_addr[0] ? from_addr : "Unknown sender";
         /* in an open card the sender and date are text to select; a click elsewhere on the header closes it */
         float icons_right = tx + tw - dw - 26 * K, icons_cy = y + ar;
-        float icons_w = m->expanded ? card_icons(app, c, i, icons_right, icons_cy, r, narrow, 0) : 0;
+        float icons_w = shown ? card_icons(app, c, i, icons_right, icons_cy, r, narrow, 0) : 0;
         float nw = jd_text_width(ui, from, 15 * K, 1), nmax = tw - dw - 40 * K - icons_w;
         Rectangle name_box = {tx, name_y - 2, nw < nmax ? nw : nmax, 15 * K + 4};
         Rectangle date_box = {tx + tw - dw, name_y, dw, 13 * K + 4};
         Rectangle icons_box = {icons_right - icons_w, icons_cy - 14, icons_w, 28};
-        int on_text = m->expanded && (CheckCollisionPointRec(GetMousePosition(), name_box) ||
+        int on_text = shown && (CheckCollisionPointRec(GetMousePosition(), name_box) ||
                                       CheckCollisionPointRec(GetMousePosition(), date_box) ||
                                       CheckCollisionPointRec(GetMousePosition(), icons_box));
         if (!on_text && clicked(head, r, app)) m->expanded = !m->expanded;
@@ -1775,24 +1839,33 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         sender_avatar(app, m->row.from && m->row.from[0] ? m->row.from : "?", addr, ix + ar, y + ar, ar);
         free(addr);
         jd_text_fit(ui, from, tx, name_y, nmax, 15 * K, JD_NORD6, 1);
-        if (m->expanded) {
+        if (shown) {
             sel_label(app, c, i * 16 + 1, from, tx, name_y, nmax, 15 * K, 1, r);
             sel_label(app, c, i * 16 + 2, date, tx + tw - dw, name_y + 2 * K, dw, 13 * K, 0, r);
         }
-        if ((m->row.flags & JD_FLAGGED) && !m->expanded) jd_icon("star", tx + tw - dw - 22 * K, name_y + 1, 14 * K, JD_NORD13);
+        if ((m->row.flags & JD_FLAGGED) && !shown) jd_icon("star", tx + tw - dw - 22 * K, name_y + 1, 14 * K, JD_NORD13);
         jd_text(ui, date, tx + tw - dw, name_y + 2 * K, 13 * K, JD_NORD4, 0);
-        if (m->expanded) card_icons(app, c, i, icons_right, icons_cy, r, narrow, 1);
-        if (!m->expanded) {
-            /* the first line of what was written, quotes left out */
+        if (shown) card_icons(app, c, i, icons_right, icons_cy, r, narrow, 1);
+        if (!shown) {
+            /* the first line of what was written, quotes left out; markup some mail puts in its text part (a
+               newsletter's <a ...> tags) is left out too, and a line of nothing else skipped */
             char line[200] = "";
-            for (const char *p = m->text; p && *p;) {
+            for (const char *p = m->text; p && *p && !line[0];) {
                 const char *nl = strchr(p, '\n');
                 int len = nl ? (int)(nl - p) : (int)strlen(p);
                 while (len && (*p == ' ' || *p == '\t')) p++, len--;
-                while (len && (p[len - 1] == '\r' || p[len - 1] == ' ')) len--;
                 if (len && *p != '>') {
-                    snprintf(line, sizeof line, "%.*s", len < 199 ? len : 199, p);
-                    break;
+                    int n = 0, in_tag = 0;
+                    for (int i = 0; i < len && n < (int)sizeof line - 1; i++) {
+                        if (p[i] == '<' && i + 1 < len && (isalpha((unsigned char)p[i + 1]) || p[i + 1] == '/')) in_tag = 1;
+                        else if (in_tag && p[i] == '>') in_tag = 0;
+                        else if (!in_tag && p[i] != '\r') line[n++] = p[i];
+                    }
+                    while (n && line[n - 1] == ' ') n--;
+                    line[n] = 0;
+                    int start = 0;
+                    while (line[start] == ' ') start++;
+                    memmove(line, line + start, (size_t)(n - start + 1));
                 }
                 p = nl ? nl + 1 : p + len;
             }
@@ -1804,10 +1877,19 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
             continue;
         }
         y += head_h + 10;
-        y = address_line(app, c, i * 16 + 6, "From", m->row.from, ix, y, iw, r);
-        y = address_line(app, c, i * 16 + 3, "To", m->row.to, ix, y, iw, r);
-        y = address_line(app, c, i * 16 + 4, "Cc", m->row.cc, ix, y, iw, r);
-        y = header_line(app, c, i * 16 + 5, "In", m->row.folder_name, ix, y, iw, r);
+        if (!m->addresses) y = address_summary(app, m, ix, y, iw, r);
+        else {
+            /* the chevron at the right folds them back into one line */
+            Rectangle fold = {ix + iw - 22 * K, y - 2, 22 * K, 20 * K};
+            int on_fold = CheckCollisionPointRec(GetMousePosition(), fold) && CheckCollisionPointRec(GetMousePosition(), r);
+            jd_icon("chevron-down", fold.x + 4 * K, y, 13 * K, on_fold ? JD_NORD8 : JD_MUTED);
+            if (clicked(fold, r, app)) m->addresses = 0;
+            float aw = iw - 26 * K;
+            y = address_line(app, c, i * 16 + 6, "From", m->row.from, ix, y, aw, r);
+            y = address_line(app, c, i * 16 + 3, "To", m->row.to, ix, y, aw, r);
+            y = address_line(app, c, i * 16 + 4, "Cc", m->row.cc, ix, y, aw, r);
+            y = header_line(app, c, i * 16 + 5, "In", m->row.folder_name, ix, y, aw, r);
+        }
         y += 10;
         float x0 = x, w0 = w;
         x = ix, w = iw;
@@ -1886,6 +1968,11 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         }
         x = x0, w = w0;
         y += pad;
+        m->full_h = y - card_y;
+        if (moving) {
+            jd_scissor_end();
+            y = card_y + moving_h;
+        }
         m->card_h = y - card_y;
         y += 8;
     }
