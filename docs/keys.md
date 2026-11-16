@@ -1,7 +1,9 @@
 # Keys
 
 `?` in the app shows these keys; start typing to find one. On Android a tap works like a click and a long press
-opens the menu; the vim-style modes are left out.
+opens the menu; the vim-style modes are left out. In a message a long press on text selects the word: drag its
+handles to change the selection, and the bar above it copies, selects all, shares or (⋮) hands it to apps such as
+Translate.
 
 | Where | Keys |
 |---|---|

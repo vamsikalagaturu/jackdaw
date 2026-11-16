@@ -67,3 +67,8 @@ void plat_push(int on) { (void)on; }
 float plat_drag_x(void) { return 0; }
 int plat_finger_scrolling(void) { return 0; }
 int plat_scroll(float *dx, float *dy) { (void)dx, (void)dy; return 0; }
+int plat_finger(float *x, float *y) { (void)x, (void)y; return 0; }
+void plat_finger_claim(void) {}
+int plat_share_text(const char *text) { (void)text; return -1; }
+char *plat_text_actions(void) { return NULL; }
+int plat_text_action(int i, const char *text) { (void)i, (void)text; return -1; }

@@ -468,9 +468,12 @@ static struct {
     int stopped_fling; /* the touch stopped a moving list: no tap, axis still open */
     int moved;         /* past the slop: no tap or long press, even with the axis undecided */
     int sideways; /* the swipe went more across than down when it started: it scrolls sideways */
+    int down;
     double t;
     float x, y, cx, cy;
+    float fx, fy; /* where the finger is now */
 } touch;
+static float inset_top_px;
 static float fling_v; /* release velocity, px/s; 0 when nothing flings */
 
 /* Distance and duration as android.widget.OverScroller (getSplineFlingDistance/Duration) with ViewConfiguration's
@@ -549,6 +552,23 @@ static void point_at(float x, float y)
    right-clicks at the long press time (plat_frame). */
 int plat_finger_scrolling(void) { return touch.scrolling && !touch.sideways; }
 
+int plat_finger(float *x, float *y)
+{
+    if (!touch.down) return 0;
+    *x = touch.fx / jd_scale, *y = (touch.fy - inset_top_px) / jd_scale;
+    return 1;
+}
+
+void plat_finger_claim(void)
+{
+    if (!touch.down) return;
+    touch.held = 1, touch.pending = touch.scrolling = touch.sideways = 0;
+    drag_dx = 0;
+    px_acc = px_acc_x = wheel_acc = wheel_acc_x = 0;
+    frame_px = frame_px_x = 0;
+    frame_wheel = frame_wheel_x = 0;
+}
+
 int plat_scroll(float *dx, float *dy)
 {
     if (!frame_px && !frame_px_x) return 0;
@@ -559,8 +579,10 @@ int plat_scroll(float *dx, float *dy)
 static void on_touch(const AInputEvent *e, int action)
 {
     float x = AMotionEvent_getX(e, 0), y = AMotionEvent_getY(e, 0);
+    touch.fx = x, touch.fy = y;
     switch (action) {
     case AMOTION_EVENT_ACTION_DOWN:
+        touch.down = 1;
         touch.pending = 1, touch.scrolling = touch.held = 0;
         touch.t = now(), touch.x = touch.cx = x, touch.y = touch.cy = y, touch.sideways = touch.moved = 0;
         nsamples = 0;
@@ -611,7 +633,7 @@ static void on_touch(const AInputEvent *e, int action)
         } else if (sideways) {
             swipe_pending = 2;
         }
-        touch.pending = touch.scrolling = touch.held = touch.stopped_fling = touch.moved = 0;
+        touch.pending = touch.scrolling = touch.held = touch.stopped_fling = touch.moved = touch.down = 0;
         drag_dx = 0;
         break;
     }
@@ -798,7 +820,7 @@ void plat_frame(int typing)
         insets_at = t;
         char *in = java("systemInsets", 0);
         float l, top, r, bottom;
-        if (in && sscanf(in, "%f %f %f %f", &l, &top, &r, &bottom) == 4) jd_set_insets(top, bottom);
+        if (in && sscanf(in, "%f %f %f %f", &l, &top, &r, &bottom) == 4) jd_set_insets(top, bottom), inset_top_px = top;
         free(in);
     }
 }
@@ -918,6 +940,29 @@ char **plat_picked_files(int *n)
 int plat_open_uri(const char *uri)
 {
     char *r = java("openUri", 1, uri);
+    int ok = r != NULL;
+    free(r);
+    return ok ? 0 : -1;
+}
+
+int plat_share_text(const char *text)
+{
+    char *r = java("shareText", 1, text);
+    int ok = r != NULL;
+    free(r);
+    return ok ? 0 : -1;
+}
+
+char *plat_text_actions(void)
+{
+    return java("textActions", 0);
+}
+
+int plat_text_action(int i, const char *text)
+{
+    char idx[16];
+    snprintf(idx, sizeof idx, "%d", i);
+    char *r = java("textAction", 2, idx, text);
     int ok = r != NULL;
     free(r);
     return ok ? 0 : -1;

@@ -1284,6 +1284,190 @@ static int copy_selection(jd_app *app, jd_conv *c)
     return 1;
 }
 
+/* Selecting by touch, as Android does: a long press selects the word under it and puts a handle at each end; a
+   finger put on a handle drags that end while the other stays; a bar by the selection copies, selects all or
+   shares. Positions are relative to the body's text, its top left at (ox, oy) on the screen. */
+#define HANDLE_R 11.0f
+static struct {
+    int active, msg, html, drag; /* drag: the end the finger moves, 1 start or 2 end; 0 none */
+    int was_down;
+    jd_conv *conv;
+    float ox, oy;
+    Vector2 a, b; /* the ends: x and the top of their line */
+    float lh;
+    Vector2 fixed; /* the end not dragged, mid-line */
+    Vector2 grab;  /* finger minus the dragged end, mid-line */
+    Vector2 press; /* where the long press was: the word stays selected until the finger leaves it */
+    int moved;
+    Rectangle bar;
+} ts;
+
+/* the system's actions on text (Translate, ...), read again for each selection, behind the bar's last button */
+static struct {
+    char *labels;
+    const char *label[16];
+    int n;
+    jd_popup menu;
+} text_actions;
+
+static void text_actions_load(void)
+{
+    free(text_actions.labels);
+    text_actions.labels = plat_text_actions();
+    text_actions.n = 0;
+    for (char *p = text_actions.labels, *nl; p && *p && text_actions.n < 16; p = nl + 1) {
+        nl = strchr(p, '\n');
+        if (!nl) break;
+        *nl = 0;
+        text_actions.label[text_actions.n++] = p;
+    }
+}
+
+static int touch_ends(jd_app *app, jd_reading *m, int html)
+{
+    if (html) return jd_html_selection_ends(m->html, &ts.a.x, &ts.a.y, &ts.b.x, &ts.b.y, &ts.lh);
+    if (m->sel_to <= m->sel_from || !m->line_starts) return 0;
+    ts.lh = TEXT_SIZE * 1.25f;
+    int la = plain_line(m, m->sel_from), lb = plain_line(m, m->sel_to);
+    float top = TEXT_SIZE * 0.5f - ts.lh / 2;
+    ts.a = (Vector2){span(&app->ui, m->text, m->line_starts[la], m->sel_from), (float)la * LINE_H + top};
+    ts.b = (Vector2){span(&app->ui, m->text, m->line_starts[lb], m->sel_to), (float)lb * LINE_H + top};
+    return 1;
+}
+
+static void touch_select_between(jd_app *app, jd_reading *m, int html, int shown, Vector2 p, Vector2 q)
+{
+    if (html) {
+        jd_html_select(m->html, p.x, p.y, q.x, q.y);
+        return;
+    }
+    int a = plain_hit(&app->ui, m, p.x, p.y, shown), b = plain_hit(&app->ui, m, q.x, q.y, shown);
+    m->sel_from = a < b ? a : b;
+    m->sel_to = a < b ? b : a;
+}
+
+static int touch_select_word(jd_app *app, jd_reading *m, int html, int shown, Vector2 at)
+{
+    if (html) return jd_html_select_word(m->html, at.x, at.y);
+    if (at.y < 0 || at.y >= (float)shown * LINE_H) return 0;
+    int k = plain_hit(&app->ui, m, at.x, at.y, shown), a = k, b = k;
+    while (a > 0 && word_char(m->text[a - 1])) a--;
+    while (m->text[b] && word_char(m->text[b])) b++;
+    if (a == b) return 0;
+    m->sel_from = a, m->sel_to = b;
+    return 1;
+}
+
+/* the knob of end e (1 start, 2 end) on the screen: it hangs below the line, outward from the selection */
+static Vector2 touch_knob(int e)
+{
+    Vector2 p = e == 1 ? ts.a : ts.b;
+    return (Vector2){ts.ox + p.x + (e == 1 ? -HANDLE_R : HANDLE_R), ts.oy + p.y + ts.lh + HANDLE_R};
+}
+
+static void touch_mouse(jd_app *app, jd_conv *c, int i, Rectangle clip, float ox, float oy, int html, int shown)
+{
+    jd_reading *m = &c->reading[i];
+    if (!ts.active || ts.conv != c || ts.msg != i) return;
+    ts.ox = ox, ts.oy = oy;
+    if (!touch_ends(app, m, html)) {
+        ts.active = 0;
+        return;
+    }
+    float fx, fy;
+    int down = plat_finger(&fx, &fy);
+    if (down && !ts.was_down && !ts.drag)
+        for (int e = 1; e <= 2; e++) {
+            Vector2 k = touch_knob(e);
+            if (hypotf(fx - k.x, fy - k.y) > HANDLE_R * 2.2f) continue;
+            plat_finger_claim();
+            Vector2 mine = e == 1 ? ts.a : ts.b, other = e == 1 ? ts.b : ts.a;
+            ts.drag = e, ts.moved = 1;
+            ts.fixed = (Vector2){other.x, other.y + ts.lh / 2};
+            ts.grab = (Vector2){fx - ox - mine.x, fy - oy - mine.y - ts.lh / 2};
+            break;
+        }
+    ts.was_down = down;
+    if (!down) {
+        ts.drag = 0;
+        return;
+    }
+    if (!ts.drag) return;
+    if (!ts.moved && hypotf(fx - ts.press.x, fy - ts.press.y) < HANDLE_R) return;
+    ts.moved = 1;
+    touch_select_between(app, m, html, shown, ts.fixed, (Vector2){fx - ts.grab.x - ox, fy - ts.grab.y - oy});
+    if (fy < clip.y + 3 * HANDLE_R) c->scroll -= 6;
+    else if (fy > clip.y + clip.height - 3 * HANDLE_R) c->scroll += 6;
+    touch_ends(app, m, html);
+}
+
+static void touch_handles_draw(jd_app *app, jd_conv *c, Rectangle r)
+{
+    if (!ts.active || ts.conv != c) return;
+    jd_ui *ui = &app->ui;
+    jd_scissor(r.x, r.y, r.width, r.height);
+    for (int e = 1; e <= 2; e++) {
+        Vector2 k = touch_knob(e);
+        DrawCircleV(k, HANDLE_R, JD_NORD8);
+        DrawRectangleV((Vector2){e == 1 ? k.x : k.x - HANDLE_R, k.y - HANDLE_R}, (Vector2){HANDLE_R, HANDLE_R}, JD_NORD8);
+    }
+    jd_scissor_end();
+    ts.bar = (Rectangle){0};
+    if (ts.drag) return;
+    static const char *labels[] = {"Copy", "Select all", "Share", NULL};
+    int nb = text_actions.n ? 4 : 3;
+    float size = 14, pad = 14, h = 40, w = 0, lw[4];
+    for (int k = 0; k < nb; k++) w += lw[k] = labels[k] ? jd_text_width(ui, labels[k], size, 1) + 2 * pad : h;
+    float ay = ts.oy + ts.a.y, by = ts.oy + ts.b.y + ts.lh + 2 * HANDLE_R;
+    float y = ay - h - 10 >= r.y + 4 ? ay - h - 10 : by + 10;
+    if (y + h > r.y + r.height - 4) y = r.y + 4;
+    float x = ts.ox + ts.a.x - w / 2;
+    if (x + w > r.x + r.width - 8) x = r.x + r.width - 8 - w;
+    if (x < r.x + 8) x = r.x + 8;
+    ts.bar = (Rectangle){x, y, w, h};
+    DrawRectangleRounded((Rectangle){x, y + 2, w, h}, 0.3f, 8, ColorAlpha(BLACK, 0.25f));
+    DrawRectangleRounded(ts.bar, 0.3f, 8, JD_NORD2);
+    int choice = -1;
+    for (int k = 0; k < nb; k++) {
+        Rectangle b = {x, y, lw[k], h};
+        int over = !text_actions.menu.open && CheckCollisionPointRec(GetMousePosition(), b);
+        if (over && IsMouseButtonDown(MOUSE_BUTTON_LEFT)) DrawRectangleRounded(b, 0.3f, 8, JD_NORD3);
+        if (labels[k]) jd_text(ui, labels[k], x + pad, y + (h - size) / 2, size, JD_NORD6, 1);
+        else jd_icon("ellipsis-vertical", x + (h - 18) / 2, y + (h - 18) / 2, 18, JD_NORD6);
+        if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) choice = k;
+        x += lw[k];
+    }
+    if (text_actions.menu.open) {
+        jd_popup_item items[16];
+        for (int k = 0; k < text_actions.n; k++) items[k] = (jd_popup_item){text_actions.label[k], NULL, NULL, 0};
+        int pick = jd_popup_draw(ui, &text_actions.menu, items, text_actions.n);
+        if (pick >= 0) {
+            char *s = selected_text(c);
+            if (s && plat_text_action(pick, s) != 0) notify_user(app, "That app did not open.");
+            free(s);
+        }
+    }
+    if (choice < 0) return;
+    if (choice == 3) {
+        jd_popup_open(&text_actions.menu);
+        return;
+    }
+    jd_reading *m = &c->reading[ts.msg];
+    if (choice == 0) {
+        copy_selection(app, c);
+        clear_selections(c);
+        ts.active = 0;
+    } else if (choice == 1) {
+        clear_selections(c);
+        if (ts.html) jd_html_select_all(m->html);
+        else if (m->text) m->sel_from = 0, m->sel_to = (int)strlen(m->text);
+    } else {
+        char *s = selected_text(c);
+        if (s && plat_share_text(s) != 0) notify_user(app, "Nothing here can share text.");
+        free(s);
+    }
+}
+
 /* the mouse over message i's body (area, its text's top left at ox, oy): select, follow links, open the menu */
 static void text_mouse(jd_app *app, jd_conv *c, int i, Rectangle area, Rectangle clip, float ox, float oy, int html,
                        int shown)
@@ -1292,6 +1476,28 @@ static void text_mouse(jd_app *app, jd_conv *c, int i, Rectangle area, Rectangle
     Vector2 mp = GetMousePosition(), at = {mp.x - ox, mp.y - oy};
     int free_mouse = !app->dialog.kind && !app->menu.open && !reader_menu.open;
     int over = free_mouse && CheckCollisionPointRec(mp, area) && CheckCollisionPointRec(mp, clip);
+    if (app->ui.touch) {
+        touch_mouse(app, c, i, clip, ox, oy, html, shown);
+        if (ts.active && (CheckCollisionPointRec(mp, ts.bar) || text_actions.menu.open)) over = 0;
+        if (over && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+            char *link = html ? jd_html_link_at(m->html, at.x, at.y) : NULL;
+            int on_link = link != NULL;
+            free(link);
+            if (!on_link) {
+                visual_end(c);
+                clear_selections(c);
+                if (touch_select_word(app, m, html, shown, at)) {
+                    plat_finger_claim();
+                    ts = (typeof(ts)){.active = 1, .msg = i, .html = html, .drag = 2, .was_down = 1, .conv = c,
+                                      .ox = ox, .oy = oy, .press = mp};
+                    touch_ends(app, m, html);
+                    ts.fixed = (Vector2){ts.a.x, ts.a.y + ts.lh / 2};
+                    text_actions_load();
+                    return;
+                }
+            }
+        }
+    }
     if (over) SetMouseCursor(MOUSE_CURSOR_IBEAM);
     if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         visual_end(c);
@@ -1563,6 +1769,7 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
     jd_scissor_end();
     c->content = y + c->scroll - r.y + 40;
     if (!app->dialog.kind && !app->menu.open) jd_scrollbar(r, c->content, &c->scroll);
+    touch_handles_draw(app, c, r);
     reader_menu_draw(app, c);
     chip_menu_draw(app, c);
 }

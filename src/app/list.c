@@ -1264,26 +1264,25 @@ void list_draw(jd_app *app, Rectangle r)
     y += 44;
 
     const char *title = app->query ? "Search results" : app->nfolders ? folder_label(&app->folders[app->folder]) : "";
-    jd_text_fit(ui, title, x, y, w - 236, 20, JD_NORD6, 1);
+    jd_text_fit(ui, title, x, y, w - 120, 20, JD_NORD6, 1);
     /* view toggles: conversations or messages, and where the reading pane goes */
     static const char *pane_icons[] = {"panel-right", "panel-bottom", "rows-2"};
     static const char *pane_tips[] = {"Reading pane: right (p)", "Reading pane: bottom (p)", "Reading pane: off (p)"};
     struct {
-        const char *icon, *label;
-    } toggles[] = {{app->grouped ? "layout-grid" : "list", app->grouped ? "Conversations" : "Messages"},
-                   {pane_icons[app->prefs.reader_pos % 3], NULL}};
+        const char *icon, *tip;
+    } toggles[] = {{app->grouped ? "layout-grid" : "list", app->grouped ? "Showing conversations (t)" : "Showing messages (t)"},
+                   {pane_icons[app->prefs.reader_pos % 3], pane_tips[app->prefs.reader_pos % 3]}};
     float tx2 = x + w;
     /* a phone has no room for a reading pane: no toggle for it */
     for (int k = plat_touch() ? 0 : 1; k >= 0; k--) {
-        float bw = toggles[k].label ? jd_text_width(ui, toggles[k].label, 13, 1) + 38 : 30;
+        float bw = 30;
         tx2 -= bw;
         Rectangle b = {tx2, y - 2, bw, 26};
         int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind && !app->menu.open && !under_hints;
         if (hover) DrawRectangleRounded(b, 0.4f, 6, JD_NORD2);
         jd_icon(toggles[k].icon, b.x + 8, y + 3, 14, hover ? JD_NORD8 : JD_NORD4);
-        if (toggles[k].label) jd_text(ui, toggles[k].label, b.x + 28, y + 3, 13, JD_NORD4, 1);
-        if (hover && !toggles[k].label) {
-            const char *tip = pane_tips[app->prefs.reader_pos % 3];
+        if (hover && !app->ui.touch) {
+            const char *tip = toggles[k].tip;
             jd_tooltip(tip, b.x + b.width - (jd_text_width(ui, tip, 12, 0) + 16), y + 26);
         }
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {

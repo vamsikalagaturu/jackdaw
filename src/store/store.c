@@ -147,6 +147,18 @@ jd_store *jd_store_open(const char *path, char *err, int errlen)
         }
         exec(s, "COMMIT");
     }
+    if (run(prep(s, "PRAGMA user_version")) == 3) {
+        exec(s, "BEGIN IMMEDIATE");
+        if (run(prep(s, "PRAGMA user_version")) == 3) {
+            exec(s, "ALTER TABLE folders ADD COLUMN headers_stale INTEGER NOT NULL DEFAULT 0");
+#ifdef __ANDROID__
+            /* bionic's iconv decoded no 8-bit charset: subjects, names and snippets stored before are wrong */
+            exec(s, "UPDATE folders SET headers_stale = 1");
+#endif
+            exec(s, "PRAGMA user_version = 4");
+        }
+        exec(s, "COMMIT");
+    }
     return s;
 bad:
     snprintf(err, (size_t)errlen, "%s: %s", path, s->db ? sqlite3_errmsg(s->db) : "cannot open");
@@ -424,6 +436,54 @@ int64_t jd_message_put(jd_store *s, int64_t folder, const jd_header *h, int *is_
     free(sender), free(recipients);
     thread_message(s, id, h);
     return id;
+}
+
+int64_t jd_message_refresh(jd_store *s, int64_t folder, const jd_header *h)
+{
+    int64_t id = jd_message_id(s, folder, h->uid);
+    if (!id) return 0;
+    sqlite3_stmt *st = prep(s, "UPDATE messages SET subject = ? WHERE id = ?");
+    bind_text(st, 1, h->subject);
+    sqlite3_bind_int64(st, 2, id);
+    run(st);
+    st = prep(s, "DELETE FROM addresses WHERE message_id = ?");
+    sqlite3_bind_int64(st, 1, id);
+    run(st);
+    for (int r = 0; r < JD_ROLE_COUNT; r++)
+        for (int i = 0; i < h->naddrs[r]; i++) {
+            st = prep(s, "INSERT INTO addresses(message_id, role, position, name, addr) VALUES(?, ?, ?, ?, ?)");
+            sqlite3_bind_int64(st, 1, id);
+            sqlite3_bind_int(st, 2, r);
+            sqlite3_bind_int(st, 3, i);
+            bind_text(st, 4, h->addrs[r][i].name);
+            bind_text(st, 5, h->addrs[r][i].addr);
+            run(st);
+        }
+    char *sender, *recipients;
+    join_addrs(&sender, h, JD_ROLE_FROM, JD_ROLE_FROM);
+    join_addrs(&recipients, h, JD_ROLE_TO, JD_ROLE_CC);
+    st = prep(s, "UPDATE search SET subject = ?, sender = ?, recipients = ? WHERE rowid = ?");
+    bind_text(st, 1, h->subject);
+    bind_text(st, 2, sender);
+    bind_text(st, 3, recipients);
+    sqlite3_bind_int64(st, 4, id);
+    run(st);
+    free(sender), free(recipients);
+    return id;
+}
+
+int jd_folder_headers_stale(jd_store *s, int64_t folder)
+{
+    sqlite3_stmt *st = prep(s, "SELECT headers_stale FROM folders WHERE id = ?");
+    sqlite3_bind_int64(st, 1, folder);
+    return run(st) != 0;
+}
+
+void jd_folder_headers_done(jd_store *s, int64_t folder)
+{
+    sqlite3_stmt *st = prep(s, "UPDATE folders SET headers_stale = 0 WHERE id = ?");
+    sqlite3_bind_int64(st, 1, folder);
+    run(st);
 }
 
 void jd_message_set_flags(jd_store *s, int64_t folder, uint32_t uid, int flags, const char *keywords, uint64_t modseq)

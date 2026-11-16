@@ -397,6 +397,42 @@ extern "C" void jd_html_select(jd_html *h, float ax, float ay, float bx, float b
     h->selected = h->sel_a < h->sel_b;
 }
 
+extern "C" int jd_html_select_word(jd_html *h, float x, float y)
+{
+    const auto &runs = h->box.runs;
+    float z = h->zoom;
+    x /= z, y /= z;
+    for (int i = 0; i < (int)runs.size(); i++) {
+        const auto &r = runs[(size_t)i];
+        if (y < r.y || y >= r.y + r.h || x < r.x || x >= r.x + r.w) continue;
+        int a = 0, b = (int)r.text.size();
+        while (a < b && strchr(" \t([{\"'<", r.text[(size_t)a])) a++;
+        while (b > a && strchr(" \t.,;:!?)]}\"'>", r.text[(size_t)b - 1])) b--;
+        if (a == b) a = 0, b = (int)r.text.size();
+        h->sel_a = {i, a}, h->sel_b = {i, b};
+        h->selected = a < b;
+        h->caret_on = false;
+        return h->selected;
+    }
+    return 0;
+}
+
+extern "C" int jd_html_selection_ends(jd_html *h, float *ax, float *ay, float *bx, float *by, float *line_h)
+{
+    if (!h->selected) return 0;
+    zoom_scope zs(h->zoom);
+    const auto &runs = h->box.runs;
+    const auto &a = runs[(size_t)h->sel_a.run], &b = runs[(size_t)h->sel_b.run];
+    float z = h->zoom;
+    auto x_at = [](const container::run &r, int at) {
+        return r.x + (at ? MeasureTextEx(r.font(), r.text.substr(0, (size_t)at).c_str(), r.size, 0).x : 0);
+    };
+    *ax = x_at(a, h->sel_a.at) * z, *ay = (a.y + a.size * 0.5f - a.size * 0.625f) * z;
+    *bx = x_at(b, h->sel_b.at) * z, *by = (b.y + b.size * 0.5f - b.size * 0.625f) * z;
+    *line_h = b.size * 1.25f * z;
+    return 1;
+}
+
 extern "C" void jd_html_select_all(jd_html *h)
 {
     if (h->box.runs.empty()) return;
