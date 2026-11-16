@@ -1,13 +1,12 @@
-# Every PR into main, and main itself (the release workflow waits for this one): the Linux build with
-# AddressSanitizer and the key test under a virtual display, and the Android APK.
-# Caches: third-party builds (keyed by their pinned versions), the Android SDK packages, and ccache for every
-# compile (saved under the run's id, restored from the newest), so a run rebuilds only what changed.
+# Every PR into main: the Linux build with AddressSanitizer and the key test under a virtual display, and the
+# Android APK. Not run again on main: the ruleset merges only a PR that is up to date with main and passed, so
+# main holds exactly what was tested (release.yml builds from it).
+# Caches: third-party builds (keyed by their pinned versions), the Android SDK packages, and ccache. A PR restores
+# what release.yml saved on main (a cache saved on one PR branch is not visible to another).
 name: CI
 
 on:
   pull_request:
-    branches: [main]
-  push:
     branches: [main]
 
 concurrency:
@@ -20,6 +19,9 @@ permissions:
 env:
   CCACHE_DIR: /home/runner/.cache/ccache
   CCACHE_MAXSIZE: 1G
+  # a restored NDK has new file times; a fresh checkout's files are all newer than the cache
+  CCACHE_COMPILERCHECK: content
+  CCACHE_SLOPPINESS: include_file_mtime,include_file_ctime
   CMAKE_C_COMPILER_LAUNCHER: ccache
   CMAKE_CXX_COMPILER_LAUNCHER: ccache
 
@@ -48,16 +50,21 @@ jobs:
         with:
           path: ~/.cache/ccache
           key: ccache-linux-debug-${{ github.run_id }}
-          restore-keys: ccache-linux-debug-
+          restore-keys: |
+            ccache-linux-debug-
+            ccache-release-
       - name: Build
         run: platform/linux/build.sh debug
       - name: Tests
         run: xvfb-run -a -s "-screen 0 1280x1024x24" ctest --test-dir ~/.cache/jackdaw/linux/build-debug --output-on-failure
       - name: Compiler cache use
-        run: ccache --show-stats --verbose | head -20
+        run: ccache --show-stats | head -8
 
   android:
     runs-on: ubuntu-24.04
+    env:
+      # the runner points ANDROID_NDK at its own NDK; the build is pinned to this one
+      ANDROID_NDK: /usr/local/lib/android/sdk/ndk/28.2.13676358
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -95,11 +102,13 @@ jobs:
         with:
           path: ~/.cache/ccache
           key: ccache-android-${{ github.run_id }}
-          restore-keys: ccache-android-
+          restore-keys: |
+            ccache-android-
+            ccache-release-
       - name: Build
         run: platform/android/build.sh
       - name: Compiler cache use
-        run: ccache --show-stats --verbose | head -20
+        run: ccache --show-stats | head -8
       - uses: actions/upload-artifact@v4
         with:
           name: jackdaw-apk

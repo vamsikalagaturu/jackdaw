@@ -866,6 +866,14 @@ int64_t plat_notify_poll(void)
 
 void plat_notify_shutdown(void) {}
 
+int plat_install_package(const char *path)
+{
+    char *r = java("installPackage", 1, path);
+    int ok = r != NULL;
+    free(r);
+    return ok ? 0 : -1;
+}
+
 void plat_push(int on)
 {
     static int was = -1;

@@ -187,6 +187,21 @@ public class JackdawActivity extends NativeActivity {
         return Float.toString(getWindowManager().getDefaultDisplay().getRefreshRate());
     }
 
+    /* an update's APK to Android's installer; the first time Android asks to allow installs from jackdaw */
+    public String installPackage(String path) {
+        Intent i = new Intent(Intent.ACTION_VIEW)
+                       .setDataAndType(OpenProvider.uriFor(getPackageName(), path), "application/vnd.android.package-archive")
+                       .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+        return onUi(() -> {
+            try {
+                startActivity(i);
+                return "1";
+            } catch (ActivityNotFoundException e) {
+                return null;
+            }
+        });
+    }
+
     /* ---- printing ---- */
 
     /* path is an already laid-out PDF: the adapter passes it through as it is */

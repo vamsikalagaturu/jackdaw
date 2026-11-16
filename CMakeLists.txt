@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(jackdaw VERSION 0.2.0 DESCRIPTION "Mail client for Linux and Android" LANGUAGES C CXX)
+project(jackdaw VERSION 0.2.1 DESCRIPTION "Mail client for Linux and Android" LANGUAGES C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 # litehtml (HTML mail) is C++17; everything else is C
@@ -71,6 +71,11 @@ endif()
 message(STATUS "jackdaw ${JD_VERSION_STRING}")
 # the day the build was configured, shown with the version in the sidebar
 string(TIMESTAMP JD_BUILD_DATE "%d-%m-%Y")
+# in a source of their own, not compile definitions: those changed every file's flags with each commit and day,
+# so no compiler cache could reuse anything
+file(CONFIGURE OUTPUT ${JD_GEN}/version.c
+     CONTENT "const char jd_version[] = \"${JD_VERSION_STRING}\";\nconst char jd_build_date[] = \"${JD_BUILD_DATE}\";\n")
+set_property(GLOBAL PROPERTY JD_VERSION_STRING "${JD_VERSION_STRING}")
 
 # Options from https://sqlite.org/compile.html#recommended_compile_time_options, plus FTS5 for search
 set(JD_SQLITE_DIR ${JD_REPO}/thirdparty/sqlite-3540100)
@@ -150,10 +155,9 @@ if(JD_TEST_CA)
   jd_embed(${JD_GEN}/test_ca.c jd_test_ca ${JD_TEST_CA})
   list(APPEND JD_PLATFORM_SOURCES ${JD_GEN}/test_ca.c)
 endif()
-add_library(jdapp STATIC ${JD_UI_SOURCES} ${JD_PLATFORM_SOURCES} ${JD_ASSET_SOURCES})
+add_library(jdapp STATIC ${JD_UI_SOURCES} ${JD_PLATFORM_SOURCES} ${JD_ASSET_SOURCES} ${JD_GEN}/version.c)
 target_include_directories(jdapp PUBLIC src)
 target_include_directories(jdapp SYSTEM PRIVATE ${JD_REPO}/thirdparty/nanosvg)
-target_compile_definitions(jdapp PUBLIC JD_VERSION="${JD_VERSION_STRING}" JD_BUILD_DATE="${JD_BUILD_DATE}")
 if(JD_TEST_CA)
   target_compile_definitions(jdapp PRIVATE JD_HAVE_TEST_CA)
 endif()

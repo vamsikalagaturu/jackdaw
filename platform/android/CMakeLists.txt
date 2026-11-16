@@ -19,8 +19,7 @@ target_link_libraries(raylib PUBLIC log android EGL GLESv2 OpenSLES m)
 # the shared sources (jdcore, jdapp with platform/android/android_main.c); no programs or tests
 set(JD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${JD_ROOT} shared EXCLUDE_FROM_ALL)
-get_target_property(JD_DEFS jdapp INTERFACE_COMPILE_DEFINITIONS)
-string(REGEX REPLACE ".*JD_VERSION=\"?([^\";]*)\"?.*" "\\1" JD_VERSION_STRING "${JD_DEFS}")
+get_property(JD_VERSION_STRING GLOBAL PROPERTY JD_VERSION_STRING)
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/version.txt "${JD_VERSION_STRING}\n")
 
 add_library(jackdaw SHARED ${JD_ROOT}/src/app/main.c)
