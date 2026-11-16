@@ -788,25 +788,11 @@ static float label_x(jd_ui *ui, const char *text, int at, float size, int bold)
 
 static void clear_selections(jd_conv *c);
 
-/* For a left press: 1, or 2 and 3 for a second and third press within 0.4 s and a few pixels (a word, a line) */
-static int click_count(void)
-{
-    static double last_t;
-    static Vector2 last_at;
-    static int clicks;
-    double now = GetTime();
-    Vector2 mp = GetMousePosition();
-    int near = fabsf(mp.x - last_at.x) + fabsf(mp.y - last_at.y) < 6;
-    clicks = now - last_t < 0.4 && near ? clicks % 3 + 1 : 1;
-    last_t = now, last_at = mp;
-    return clicks;
-}
-
 /* a header text's selection after a press at byte at: the word there on a double click, the whole text on a
    triple one, else none yet (a drag makes it) */
 static void label_press(const char *text, int at)
 {
-    int clicks = click_count(), a = at, b = at;
+    int clicks = jd_click_count(), a = at, b = at;
     if (clicks == 2) {
         while (a > 0 && word_char(text[a - 1])) a--;
         while (text[b] && word_char(text[b])) b++;
@@ -1449,10 +1435,7 @@ static int select_word(jd_app *app, jd_reading *m, int html, int shown, Vector2 
 /* the line under at: HTML's line as laid out, plain text's up to its line breaks */
 static int select_line(jd_app *app, jd_reading *m, int html, int shown, Vector2 at)
 {
-    if (html) {
-        jd_html_select(m->html, -1e6f, at.y, 1e6f, at.y);
-        return jd_html_has_selection(m->html);
-    }
+    if (html) return jd_html_select_line(m->html, at.x, at.y);
     if (at.y < 0 || at.y >= (float)shown * LINE_H) return 0;
     int k = plain_hit(&app->ui, m, at.x, at.y, shown), a = k, b = k;
     while (a > 0 && m->text[a - 1] != '\n') a--;
@@ -1606,7 +1589,7 @@ static void text_mouse(jd_app *app, jd_conv *c, int i, Rectangle area, Rectangle
     if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         visual_end(c);
         clear_selections(c);
-        int clicks = click_count();
+        int clicks = jd_click_count();
         if (clicks == 2 && select_word(app, m, html, shown, at)) return;
         if (clicks == 3 && select_line(app, m, html, shown, at)) return;
         drag.active = 1, drag.moved = 0, drag.msg = i, drag.conv = c, drag.start = at;

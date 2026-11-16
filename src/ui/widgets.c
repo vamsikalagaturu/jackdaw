@@ -93,6 +93,20 @@ void jd_field_set(jd_field *f, const char *s)
 }
 
 static float span_width(jd_ui *ui, const char *s, int from, int to, float size);
+static int word_char(char c);
+
+int jd_click_count(void)
+{
+    static double last_t;
+    static Vector2 last_at;
+    static int clicks;
+    double now = GetTime();
+    Vector2 mp = GetMousePosition();
+    int near = fabsf(mp.x - last_at.x) + fabsf(mp.y - last_at.y) < 6;
+    clicks = now - last_t < 0.4 && near ? clicks % 3 + 1 : 1;
+    last_t = now, last_at = mp;
+    return clicks;
+}
 
 static int field_selection(const jd_field *f, int *from, int *to)
 {
@@ -273,8 +287,38 @@ int jd_field_draw(jd_ui *ui, jd_field *f, Rectangle r, int focused)
         jd_popup_open(&field_menu.pop);
         return 1;
     }
+    /* the byte of f->text under the mouse: the character whose middle is right of it */
+    static jd_field *dragging;
+    int pos = 0;
+    if (dragging == f || (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))) {
+        float mx = GetMousePosition().x - (r.x + pad - shift), left = 0;
+        for (int i = 0, k = 0; i < f->len; k++) {
+            int next = utf8_next(f->text, f->len, i);
+            int si = f->secret ? k : i, sn = f->secret ? k + 1 : next;
+            float right = left + span_width(ui, text, si, sn, size);
+            if ((left + right) / 2 > mx) break;
+            left = right;
+            i = pos = next;
+        }
+    }
+    /* a press puts the cursor, a drag selects, a double press selects the word, a triple one everything */
+    if (dragging == f) {
+        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) f->cursor = pos;
+        else {
+            dragging = NULL;
+            if (f->anchor == f->cursor) f->selecting = 0;
+        }
+    }
     if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-        f->selecting = 0;
+        int clicks = jd_click_count(), a = pos, b = pos;
+        if (clicks == 2 && !f->secret) {
+            while (a > 0 && word_char(f->text[a - 1])) a--;
+            while (b < f->len && word_char(f->text[b])) b++;
+        } else if (clicks >= 2) {
+            a = 0, b = f->len;
+        }
+        f->selecting = 1, f->anchor = a, f->cursor = b;
+        dragging = clicks == 1 ? f : NULL;
         return 1;
     }
     return 0;
@@ -650,6 +694,22 @@ int jd_editor_draw(jd_ui *ui, jd_editor *e, Rectangle r, int focused)
         if (l >= e->nlines) l = e->nlines - 1;
         int pos = at_x(ui, e, l, m.x - r.x - pad);
         int shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+        int clicks = click && !shift ? jd_click_count() : 1;
+        if (clicks > 1) {
+            /* a double press selects the word, a triple one the line (up to its line breaks) */
+            int a = pos, b = pos;
+            if (clicks == 2) {
+                while (a > 0 && word_char(e->text[a - 1])) a--;
+                while (b < e->len && word_char(e->text[b])) b++;
+            } else {
+                while (a > 0 && e->text[a - 1] != '\n') a--;
+                while (b < e->len && e->text[b] != '\n') b++;
+            }
+            jd_editor_select_from(e, a);
+            e->cursor = b;
+            e->dragging = 0;
+            return click;
+        }
         if (click) {
             if (shift && !e->selecting) jd_editor_select_from(e, e->cursor);
             else if (!shift) jd_editor_select_from(e, pos);

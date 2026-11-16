@@ -27,6 +27,9 @@ typedef struct {
     const char *placeholder;
 } jd_field;
 
+/* For a left press: 1, or 2 and 3 for a second and third press within 0.4 s and a few pixels (a word, a line) */
+int jd_click_count(void);
+
 void jd_field_set(jd_field *f, const char *s);
 /* typing, editing keys and paste, for the focused field */
 void jd_field_input(jd_field *f);
