@@ -8,6 +8,10 @@
 
 #include "core/toml.h"
 
+const char *const jd_theme_roles[JD_THEME_ROLES] = {"accent", "background", "dark_background", "lighter_background",
+                                                    "foreground", "bright_foreground", "red", "yellow", "green",
+                                                    "blue", "magenta", "cyan", "orange"};
+
 const char *jd_settings_path(void)
 {
     static char *path;
@@ -90,7 +94,10 @@ void jd_prefs_load(jd_prefs *p)
     p->font_reader = jd_strdup(jd_toml_str(t, "fonts", "reader"));
     p->font_mono = jd_strdup(jd_toml_str(t, "fonts", "mono"));
     p->mono_plain = jd_toml_bool(t, "fonts", "mono_plain", 0);
-    p->light = jd_streq(jd_toml_str(t, "view", "theme"), "light");
+    const char *scheme = jd_toml_str(t, "theme", "scheme");
+    if (!scheme) scheme = jd_toml_str(t, "view", "theme");
+    p->scheme = jd_streq(scheme, "light") ? 1 : jd_streq(scheme, "system") ? 2 : 0;
+    for (int i = 0; i < 13; i++) p->theme_roles[i] = jd_strdup(jd_toml_str(t, "theme", jd_theme_roles[i]));
     p->compact = jd_streq(jd_toml_str(t, "view", "density"), "compact");
     p->snippets = jd_toml_bool(t, "view", "snippets", 1);
     p->prefer_plain = jd_streq(jd_toml_str(t, "reading", "format"), "plain");
@@ -158,6 +165,7 @@ void jd_prefs_free(jd_prefs *p)
     for (int i = 0; i < p->nrules; i++) free(p->rules[i].match), free(p->rules[i].action);
     free(p->rules), free(p->signature_new), free(p->signature_reply), free(p->image_senders);
     free(p->font_ui), free(p->font_list), free(p->font_reader), free(p->font_mono);
+    for (int i = 0; i < 13; i++) free(p->theme_roles[i]);
     *p = (jd_prefs){0};
 }
 
@@ -179,9 +187,13 @@ int jd_settings_save(const jd_account *a, const jd_prefs *p)
         jd_buf_addf(&b, "sieve_port = %d\n", a->sieve_port ? a->sieve_port : 4190);
     }
     static const char *readers[] = {"right", "bottom", "off"};
-    jd_buf_addf(&b, "\n[view]\ntheme = \"%s\"\nscale = %d\ndensity = \"%s\"\nsnippets = %s\nconversations = %s\n"
+    static const char *schemes[] = {"dark", "light", "system"};
+    jd_buf_addf(&b, "\n[theme]\nscheme = \"%s\"\n", schemes[p->scheme % 3]);
+    for (int i = 0; i < 13; i++)
+        if (p->theme_roles[i] && p->theme_roles[i][0]) put(&b, jd_theme_roles[i], p->theme_roles[i]);
+    jd_buf_addf(&b, "\n[view]\nscale = %d\ndensity = \"%s\"\nsnippets = %s\nconversations = %s\n"
                     "reader = \"%s\"\nsidebar = \"%s\"\ntabs = \"%s\"\nlist_text = %d\nreader_text = %d\n",
-                p->light ? "light" : "dark", p->scale ? p->scale : 100, p->compact ? "compact" : "comfortable",
+                p->scale ? p->scale : 100, p->compact ? "compact" : "comfortable",
                 p->snippets ? "true" : "false", p->conversations ? "true" : "false", readers[p->reader_pos % 3],
                 p->sidebar_rail ? "rail" : "full", p->tabs_side ? "sidebar" : "top", p->list_text ? p->list_text : 15,
                 p->reader_text ? p->reader_text : 15);

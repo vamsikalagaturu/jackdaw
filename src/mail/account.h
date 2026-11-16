@@ -2,6 +2,10 @@
 
 typedef enum { JD_SEC_TLS, JD_SEC_STARTTLS } jd_security;
 
+/* the colour roles of the desktop theme's colors.toml, as [theme] in settings.toml names them (ui/theme.c) */
+#define JD_THEME_ROLES 13
+extern const char *const jd_theme_roles[JD_THEME_ROLES];
+
 typedef struct {
     char *host;
     int port;
@@ -32,7 +36,10 @@ typedef struct {
     int markdown;        /* [compose] markdown: the body is also sent as HTML, rendered from Markdown */
     int mono_plain;      /* [fonts] mono_plain: plain-text mail in the monospace font */
     int sidebar_width, list_width, list_height; /* [view], pixels; 0 = default */
-    int light;           /* [view] theme = "dark" | "light" */
+    int light;           /* the theme in use: scheme, with "system" resolved (apply_prefs) */
+    int scheme;          /* [theme] scheme = "dark" (0) | "light" (1) | "system" (2); older files: [view] theme */
+    /* [theme] overrides of the desktop's colors.toml roles (jd_theme_roles), "#rrggbb"; NULL keeps */
+    char *theme_roles[JD_THEME_ROLES];
     int scale;           /* [view] scale, percent of the normal size, 80-160 */
     int compact;         /* [view] density = "comfortable" | "compact" */
     int snippets;        /* [view] snippets, default true */

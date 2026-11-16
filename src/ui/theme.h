@@ -28,7 +28,12 @@ extern Color jd_palette[JD_PALETTE_SIZE];
 /* the page HTML mail is drawn on */
 #define JD_PAPER (jd_palette[12])
 
-void jd_theme_set(int light);
+/* As ferret and cuttle: Nord dark or light, then on a Linux desktop the colours of
+   ~/.local/state/omarchy/current/theme/colors.toml when it is as light or dark, then overrides ("#rrggbb" per role,
+   NULL keeps; overrides itself may be NULL), in the order of jd_theme_roles (mail/account.h) */
+void jd_theme_set(int light, char *const *overrides);
+/* the desktop theme's background is light (1) or dark (0); -1 without one: [theme] scheme = "system" */
+int jd_theme_desktop_light(void);
 
 /* Interface scale: everything is drawn in logical pixels, scaled when it reaches the screen. */
 extern float jd_scale;

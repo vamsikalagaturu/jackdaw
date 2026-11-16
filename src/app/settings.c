@@ -249,10 +249,11 @@ static void appearance(jd_app *app, float x, float y, float w)
 {
     jd_prefs *p = &app->prefs;
     y = heading(app, x, y, "Appearance", NULL);
-    static const char *const themes[] = {"Dark", "Light"};
-    float cx = label(app, x, &y, "Theme", "Nord Polar Night or Snow Storm");
-    int t = jd_segmented(&app->ui, cx, y + 6, themes, 2, p->light);
-    if (t != p->light) p->light = t, changed(app);
+    /* System follows the desktop theme's colors.toml, which only a Linux desktop has */
+    static const char *const themes[] = {"Dark", "Light", "System"};
+    float cx = label(app, x, &y, "Theme", "Nord, or the desktop theme's colours; [theme] in settings.toml overrides");
+    int t = jd_segmented(&app->ui, cx, y + 6, themes, plat_touch() ? 2 : 3, p->scheme);
+    if (t != p->scheme) p->scheme = t, changed(app);
     y = divider(x, y + row_h, w);
     cx = label(app, x, &y, "Interface size", "Text and controls, 50 to 200 percent");
     if (stepper(app, cx, y + 6, &p->scale, 10, 50, 200, "%")) changed(app);
