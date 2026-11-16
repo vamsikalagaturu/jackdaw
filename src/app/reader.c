@@ -324,11 +324,16 @@ static char *write_attachment(jd_app *app, jd_reading *r, int index, const char 
     return path;
 }
 
+static void save_message(jd_app *app, jd_reading *r);
+
 /* the last message of the conversation as it came from the server (RFC 5322), named after its subject */
 void conv_save_message(jd_app *app, jd_conv *c)
 {
-    if (!c->n) return;
-    jd_reading *r = &c->reading[c->n - 1];
+    if (c->n) save_message(app, &c->reading[c->n - 1]);
+}
+
+static void save_message(jd_app *app, jd_reading *r)
+{
     size_t len;
     char *raw = read_raw(app, &r->row, &len);
     if (!raw) {
@@ -1573,6 +1578,118 @@ static void reader_menu_draw(jd_app *app, jd_conv *c)
     }
 }
 
+/* An open card's actions, on its message alone (the toolbar acts on the conversation): icons on the header, the
+   rest behind its ⋮ */
+enum { CA_REPLY, CA_REPLY_ALL, CA_FORWARD, CA_READ, CA_FLAG, CA_DELETE, CA_ARCHIVE, CA_MOVE, CA_COPY, CA_TAB, CA_SAVE,
+       CA_PRINT, CA_COUNT };
+static jd_popup card_menu;
+static jd_conv *card_conv;
+static int card_msg, card_more[CA_COUNT], ncard_more;
+static unsigned card_frames, card_opened_at;
+/* a click's action, done once the conversation is drawn: it may close it, or open a tab that moves it */
+static int card_pending = -1, card_pending_msg;
+
+static const char *card_icon(const jd_reading *m, int a)
+{
+    static const char *icons[CA_COUNT] = {"reply", "reply-all", "forward", "mail", "star", "trash-2", "archive",
+                                          "folder-input", "copy", "external-link", "download", "printer"};
+    if (a == CA_READ && !(m->row.flags & JD_SEEN)) return "mail-open";
+    return icons[a];
+}
+
+static const char *card_label(const jd_reading *m, int a)
+{
+    static const char *labels[CA_COUNT] = {"Reply", "Reply all", "Forward", "Mark unread", "Flag", "Delete",
+                                           "Archive", "Move to…", "Copy to…", "Open in a tab", "Save as .eml", "Print"};
+    if (a == CA_READ && !(m->row.flags & JD_SEEN)) return "Mark read";
+    if (a == CA_FLAG && (m->row.flags & JD_FLAGGED)) return "Unflag";
+    return labels[a];
+}
+
+static void card_act(jd_app *app, jd_conv *c, int i, int a)
+{
+    jd_reading *m = &c->reading[i];
+    int64_t id = m->row.id, thread = c->thread;
+    switch (a) {
+    case CA_REPLY: compose_open(app, COMPOSE_REPLY, id); break;
+    case CA_REPLY_ALL: compose_open(app, COMPOSE_REPLY_ALL, id); break;
+    case CA_FORWARD: compose_open(app, COMPOSE_FORWARD, id); break;
+    case CA_READ:
+    case CA_FLAG: {
+        int flag = a == CA_READ ? JD_SEEN : JD_FLAGGED, on = !(m->row.flags & flag);
+        if (app->sync) jd_sync_set_flag(app->sync, &id, 1, flag, on);
+        m->row.flags = on ? m->row.flags | flag : m->row.flags & ~flag;
+        break;
+    }
+    case CA_DELETE: message_delete(app, id, m->row.folder); break;
+    case CA_ARCHIVE: message_archive(app, id); break;
+    case CA_MOVE: message_move_ask(app, id, 0); break;
+    case CA_COPY: message_move_ask(app, id, 1); break;
+    case CA_TAB: {
+        /* tab_add may move the tabs, c among them: nothing of c is used after it */
+        jd_tab *t = tab_add(app, TAB_CONV);
+        conv_open(app, &t->conv, thread, id);
+        break;
+    }
+    case CA_SAVE: save_message(app, m); break;
+    case CA_PRINT: app->print_message = id; break;
+    default: break;
+    }
+}
+
+/* the icons right-aligned to right, centred on cy; returns their width. narrow: Reply and ⋮ only. */
+static float card_icons(jd_app *app, jd_conv *c, int i, float right, float cy, Rectangle clip, int narrow, int draw)
+{
+    static const int wide[] = {CA_REPLY, CA_REPLY_ALL, CA_FORWARD, CA_READ, CA_FLAG, CA_DELETE};
+    int nshown = narrow ? 1 : (int)(sizeof wide / sizeof *wide);
+    float bw = 30, w = bw * (float)(nshown + 1);
+    if (!draw) return w;
+    jd_reading *m = &c->reading[i];
+    int free_mouse = !app->dialog.kind && !app->menu.open && !card_menu.open && !reader_menu.open;
+    const char *tip = NULL;
+    float tip_x = 0, x = right - w;
+    for (int k = 0; k <= nshown; k++, x += bw) {
+        int a = k < nshown ? wide[k] : -1;
+        Rectangle b = {x, cy - 14, 28, 28};
+        int hover = free_mouse && CheckCollisionPointRec(GetMousePosition(), b) && CheckCollisionPointRec(GetMousePosition(), clip);
+        if (hover || (a < 0 && card_menu.open && card_conv == c && card_msg == i)) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
+        Color tint = a == CA_FLAG && (m->row.flags & JD_FLAGGED) ? JD_NORD13 : hover ? JD_NORD8 : JD_NORD4;
+        jd_icon(a < 0 ? "ellipsis-vertical" : card_icon(m, a), x + 6, cy - 8, 16, tint);
+        if (hover && !app->ui.touch) tip = a < 0 ? "More" : card_label(m, a), tip_x = x;
+        if (!hover || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) continue;
+        if (a >= 0) {
+            card_pending = a, card_pending_msg = i;
+            continue;
+        }
+        card_conv = c, card_msg = i, ncard_more = 0;
+        for (int e = narrow ? CA_REPLY_ALL : CA_ARCHIVE; e < CA_COUNT; e++) card_more[ncard_more++] = e;
+        jd_popup_open(&card_menu);
+        card_menu.at = (Vector2){x + 28 - 240, cy + 16};
+        card_opened_at = card_frames;
+    }
+    if (tip) jd_tooltip(tip, tip_x, cy + 16);
+    return w;
+}
+
+/* last in conv_draw: the menu, then the action a click chose */
+static void card_menu_draw(jd_app *app, jd_conv *c)
+{
+    card_frames++;
+    if (card_menu.open && card_conv == c && card_msg >= c->n) card_menu.open = 0;
+    /* from the next frame: the press that opened it lies outside it, and would close it at once */
+    if (card_menu.open && card_conv == c && card_frames > card_opened_at + 1) {
+        jd_reading *m = &c->reading[card_msg];
+        jd_popup_item items[CA_COUNT];
+        for (int k = 0; k < ncard_more; k++)
+            items[k] = (jd_popup_item){.label = card_label(m, card_more[k]), .icon = card_icon(m, card_more[k])};
+        int k = jd_popup_draw(&app->ui, &card_menu, items, ncard_more);
+        if (k >= 0) card_pending = card_more[k], card_pending_msg = card_msg;
+    }
+    int a = card_pending;
+    card_pending = -1;
+    if (a >= 0 && card_pending_msg < c->n) card_act(app, c, card_pending_msg, a);
+}
+
 void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
 {
     jd_ui *ui = &app->ui;
@@ -1627,7 +1744,7 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         Rectangle head = m->expanded ? (Rectangle){x, card_y, w, pad + head_h + 6}
                                      : (Rectangle){x, card_y, w, head_h + 2 * pad};
         int on_head = CheckCollisionPointRec(GetMousePosition(), head) && CheckCollisionPointRec(GetMousePosition(), r) &&
-                      !app->dialog.kind && !app->menu.open;
+                      !app->dialog.kind && !app->menu.open && !card_menu.open;
         if (on_head) SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
         if (m->card_h > 0 && card_y < r.y + r.height && card_y + m->card_h > r.y)
             DrawRectangleRounded((Rectangle){x, card_y, w, m->card_h}, 16.0f / fminf(w, m->card_h), 8,
@@ -1644,11 +1761,15 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
                       sizeof from_name, from_addr, sizeof from_addr);
         const char *from = from_name[0] ? from_name : from_addr[0] ? from_addr : "Unknown sender";
         /* in an open card the sender and date are text to select; a click elsewhere on the header closes it */
-        float nw = jd_text_width(ui, from, 15 * K, 1), nmax = tw - dw - 40 * K;
+        float icons_right = tx + tw - dw - 26 * K, icons_cy = y + ar;
+        float icons_w = m->expanded ? card_icons(app, c, i, icons_right, icons_cy, r, narrow, 0) : 0;
+        float nw = jd_text_width(ui, from, 15 * K, 1), nmax = tw - dw - 40 * K - icons_w;
         Rectangle name_box = {tx, name_y - 2, nw < nmax ? nw : nmax, 15 * K + 4};
         Rectangle date_box = {tx + tw - dw, name_y, dw, 13 * K + 4};
+        Rectangle icons_box = {icons_right - icons_w, icons_cy - 14, icons_w, 28};
         int on_text = m->expanded && (CheckCollisionPointRec(GetMousePosition(), name_box) ||
-                                      CheckCollisionPointRec(GetMousePosition(), date_box));
+                                      CheckCollisionPointRec(GetMousePosition(), date_box) ||
+                                      CheckCollisionPointRec(GetMousePosition(), icons_box));
         if (!on_text && clicked(head, r, app)) m->expanded = !m->expanded;
         char *addr = sender_address(m);
         sender_avatar(app, m->row.from && m->row.from[0] ? m->row.from : "?", addr, ix + ar, y + ar, ar);
@@ -1658,8 +1779,9 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
             sel_label(app, c, i * 16 + 1, from, tx, name_y, nmax, 15 * K, 1, r);
             sel_label(app, c, i * 16 + 2, date, tx + tw - dw, name_y + 2 * K, dw, 13 * K, 0, r);
         }
-        if (m->row.flags & JD_FLAGGED) jd_icon("star", tx + tw - dw - 22 * K, name_y + 1, 14 * K, JD_NORD13);
+        if ((m->row.flags & JD_FLAGGED) && !m->expanded) jd_icon("star", tx + tw - dw - 22 * K, name_y + 1, 14 * K, JD_NORD13);
         jd_text(ui, date, tx + tw - dw, name_y + 2 * K, 13 * K, JD_NORD4, 0);
+        if (m->expanded) card_icons(app, c, i, icons_right, icons_cy, r, narrow, 1);
         if (!m->expanded) {
             /* the first line of what was written, quotes left out */
             char line[200] = "";
@@ -1667,6 +1789,7 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
                 const char *nl = strchr(p, '\n');
                 int len = nl ? (int)(nl - p) : (int)strlen(p);
                 while (len && (*p == ' ' || *p == '\t')) p++, len--;
+                while (len && (p[len - 1] == '\r' || p[len - 1] == ' ')) len--;
                 if (len && *p != '>') {
                     snprintf(line, sizeof line, "%.*s", len < 199 ? len : 199, p);
                     break;
@@ -1772,6 +1895,7 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
     touch_handles_draw(app, c, r);
     reader_menu_draw(app, c);
     chip_menu_draw(app, c);
+    card_menu_draw(app, c);
 }
 
 int reader_step(jd_app *app, jd_conv *c, int dir, jd_conv *keep)

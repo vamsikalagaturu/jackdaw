@@ -14,7 +14,8 @@ enum { PANE_FOLDERS, PANE_LIST, PANE_READER };
 
 typedef enum { DLG_NONE, DLG_PROMPT, DLG_CONFIRM, DLG_PICK_FOLDER, DLG_RULES } dialog_kind;
 typedef enum {
-    ACT_NONE, ACT_CREATE_FOLDER, ACT_RENAME_FOLDER, ACT_DELETE_FOLDER, ACT_MOVE, ACT_COPY, ACT_DESTROY, ACT_ADD_RULE, ACT_LOGOUT
+    ACT_NONE, ACT_CREATE_FOLDER, ACT_RENAME_FOLDER, ACT_DELETE_FOLDER, ACT_MOVE, ACT_COPY, ACT_DESTROY, ACT_ADD_RULE, ACT_LOGOUT,
+    ACT_DISCARD
 } action;
 
 typedef struct {
@@ -162,6 +163,7 @@ typedef struct {
     int visual;          /* visual mode: moving extends the selection from anchor */
     char *fonts_loaded;  /* the families the fonts were loaded for */
     int print_tab;       /* 1 + the tab whose conversation prints after this frame, 0 none */
+    int64_t print_message; /* a message alone (a reader card's Print), after this frame; 0 none */
     int page_flip;       /* Shift+L: the mail page against the theme; not saved */
     int dragging; /* 0, 1 sidebar edge, 2 list edge */
 
@@ -258,6 +260,13 @@ void act_delete(jd_app *app);
 void act_toggle_read(jd_app *app);
 void act_toggle_flag(jd_app *app);
 void act_move_to(jd_app *app, const char *folder, int copy);
+/* takes ids; single: one message of a conversation, not the list's selection */
+void act_move_ids(jd_app *app, int64_t *ids, int n, const char *folder, int copy, int single);
+/* a reader card's actions: on that one message, whatever the list has selected */
+void message_archive(jd_app *app, int64_t id);
+/* folder: where it is, so a message already in Trash is deleted for good (after asking) */
+void message_delete(jd_app *app, int64_t id, int64_t folder);
+void message_move_ask(jd_app *app, int64_t id, int copy);
 /* sends a pending move/delete now (when due, or before quitting); undo drops it */
 void pending_tick(jd_app *app, int force);
 void pending_undo(jd_app *app);
@@ -318,6 +327,8 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r);
 const char *compose_title(struct jd_compose *c);
 /* a compose tab with changes saves them as a draft before it closes */
 int compose_may_close(jd_app *app, struct jd_compose *c, int tab);
+/* the open tab's message thrown away: no draft kept, the saved ones of it removed from Drafts */
+void compose_discard(jd_app *app);
 void compose_free(struct jd_compose *c);
 void compose_sent(jd_app *app, int64_t serial, const char *error);
 void compose_saved(jd_app *app, int64_t serial, const char *error);

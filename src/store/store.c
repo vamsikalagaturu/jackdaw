@@ -602,11 +602,15 @@ static char *col_dup(sqlite3_stmt *st, int i)
 }
 
 /* "Ada, Bob" from the distinct senders of the thread's messages in the folder, by first appearance */
+/* the conversation's senders, from every folder but Trash and Junk (unless that is the folder on show) */
 static char *thread_senders(jd_store *s, int64_t thread, int64_t folder)
 {
     sqlite3_stmt *st = prep(s, "SELECT coalesce(nullif(a.name, ''), a.addr) FROM messages m"
+                               " JOIN folders f ON f.id = m.folder_id"
                                " JOIN addresses a ON a.message_id = m.id AND a.role = 0 AND a.position = 0"
-                               " WHERE m.thread_id = ?1 AND (?2 = 0 OR m.folder_id = ?2) GROUP BY a.addr ORDER BY min(m.date)");
+                               " WHERE m.thread_id = ?1 AND (m.folder_id = ?2"
+                               " OR coalesce(f.special_use, '') NOT IN ('Trash', 'Junk'))"
+                               " GROUP BY a.addr ORDER BY min(m.date)");
     sqlite3_bind_int64(st, 1, thread);
     sqlite3_bind_int64(st, 2, folder);
     jd_buf b = {0};
@@ -796,6 +800,15 @@ jd_thread_row *jd_store_list(jd_store *s, const jd_list_query *q, int *n)
         }
         sqlite3_finalize(st);
         if (!rows[i].subject || !rows[i].subject[0]) free(rows[i].subject), rows[i].subject = jd_strdup("(no subject)");
+        /* a conversation is all of it, as the reader shows it: the replies in Sent count in the Inbox too */
+        if (q->grouped && q->folder) {
+            st = prep(s, "SELECT count(*) FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.thread_id = ?"
+                         " AND (m.folder_id = ? OR coalesce(f.special_use, '') NOT IN ('Trash', 'Junk'))");
+            sqlite3_bind_int64(st, 1, rows[i].thread);
+            sqlite3_bind_int64(st, 2, q->folder);
+            int all = (int)run(st);
+            if (all > rows[i].count) rows[i].count = all;
+        }
         rows[i].senders = q->grouped ? thread_senders(s, rows[i].thread, q->folder) : message_sender(s, rows[i].latest);
     }
     return rows;
@@ -902,8 +915,15 @@ static char *addresses_of(jd_store *s, int64_t id, int role)
     jd_buf b = {0};
     while (sqlite3_step(st) == SQLITE_ROW) {
         const char *name = (const char *)sqlite3_column_text(st, 0), *addr = (const char *)sqlite3_column_text(st, 1);
-        if (name && name[0]) jd_buf_addf(&b, "%s%s <%s>", b.len ? ", " : "", name, addr ? addr : "");
-        else jd_buf_addf(&b, "%s%s", b.len ? ", " : "", addr ? addr : "");
+        if (b.len) jd_buf_adds(&b, ", ");
+        if (name && name[0]) {
+            /* RFC 5322 section 3.2.3: a name with specials (as "Hoppe, Kirstin") goes in quotes */
+            if (strpbrk(name, "()<>[]:;@\\,.\"")) {
+                jd_buf_adds(&b, "\"");
+                for (const char *p = name; *p; p++) jd_buf_addf(&b, "%s%c", *p == '"' || *p == '\\' ? "\\" : "", *p);
+                jd_buf_addf(&b, "\" <%s>", addr ? addr : "");
+            } else jd_buf_addf(&b, "%s <%s>", name, addr ? addr : "");
+        } else jd_buf_adds(&b, addr ? addr : "");
     }
     sqlite3_finalize(st);
     return b.s;

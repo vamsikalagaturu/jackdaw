@@ -15,6 +15,10 @@ namespace {
 
 /* Inter's vertical metrics as fractions of the em (hhea ascender 0.969, descender 0.242) */
 constexpr float ASCENT = 0.969f, DESCENT = 0.242f;
+/* The viewport height. litehtml 0.10 resolves a % height against it even inside an auto-height parent (CSS 2.1
+   10.5 says auto; fixed upstream after 0.10), and a real window's height would cut such mail off there: until
+   0.11 it stays this tall, which leaves those mails long instead */
+constexpr float VIEW_H = 100000;
 
 /* the page mail is drawn on, and its default text: mail written for white paper stays readable */
 std::string user_css(float size)
@@ -44,10 +48,9 @@ static float snap(float v)
 /* set while a mail is drawn on the dark page */
 bool dark_page = false;
 
-/* dark page: HSL lightness inverted into lo..hi, so white lands on jd_html_page and black on a soft white */
-Color to_color(const litehtml::web_color &c)
+/* HSL lightness inverted into lo..hi, so white lands on jd_html_page and black on a soft white */
+Color invert(const litehtml::web_color &c)
 {
-    if (!dark_page) return Color{c.red, c.green, c.blue, c.alpha};
     float r = c.red / 255.0f, g = c.green / 255.0f, b = c.blue / 255.0f;
     float mx = std::max({r, g, b}), mn = std::min({r, g, b}), l = (mx + mn) / 2, d = mx - mn;
     float h = 0, s = 0;
@@ -75,6 +78,44 @@ Color to_color(const litehtml::web_color &c)
     return Color{byte(hue(p, q, h + 1.0f / 3)), byte(hue(p, q, h)), byte(hue(p, q, h - 1.0f / 3)), c.alpha};
 }
 
+float luminance(Color c)
+{
+    auto lin = [](unsigned char v) {
+        float s = v / 255.0f;
+        return s <= 0.04045f ? s / 12.92f : std::pow((s + 0.055f) / 1.055f, 2.4f);
+    };
+    return 0.2126f * lin(c.r) + 0.7152f * lin(c.g) + 0.0722f * lin(c.b);
+}
+
+/* On the dark page only what would glare or vanish changes, as Apple Mail and Gmail darken mail: light
+   backgrounds go dark and dark text goes light; a mail's own dark sections (a navy footer, a blue box with white
+   text) are already right and stay. 0.2 is about the relative luminance of middle grey. */
+const float MID_LUMINANCE = 0.2f;
+
+Color original(const litehtml::web_color &c) { return Color{c.red, c.green, c.blue, c.alpha}; }
+
+/* backgrounds and borders */
+Color to_color(const litehtml::web_color &c)
+{
+    Color o = original(c);
+    return dark_page && luminance(o) > MID_LUMINANCE ? invert(c) : o;
+}
+
+/* Text on the dark page, then lightened towards white, hue kept, until it has WCAG 2.2's 4.5:1 against the page
+   (SC 1.4.3): HSL lightness says little about how light a colour looks (inverted pure blue stays dark) */
+Color text_color(const litehtml::web_color &web)
+{
+    Color c = original(web);
+    if (!dark_page) return c;
+    if (luminance(c) < MID_LUMINANCE) c = invert(web);
+    const float page = 0.028f, need = 4.5f * (page + 0.05f) - 0.05f;
+    Color out = c;
+    for (float t = 0.1f; luminance(out) < need && t <= 1.0f; t += 0.1f)
+        out = Color{(unsigned char)(c.r + (255 - c.r) * t), (unsigned char)(c.g + (255 - c.g) * t),
+                    (unsigned char)(c.b + (255 - c.b) * t), c.a};
+    return out;
+}
+
 class container : public litehtml::document_container {
 public:
     container(const jd_fonts *fonts, float size) : size(size), fonts(*fonts) {}
@@ -82,6 +123,16 @@ public:
     float size;
     float width = 600;
     std::string clicked;
+
+    /* Where the drawn content ends, from the collecting pass: a box as tall as the viewport is litehtml 0.10's
+       height:100% (see VIEW_H) and does not count, nor does what is too small to see (a 1x1 tracking pixel
+       placed after it). */
+    float content_bottom = 0;
+    void reach(const litehtml::position &p)
+    {
+        if (p.height < VIEW_H / 2 && p.width > 2 && p.height > 2)
+            content_bottom = std::max(content_bottom, (float)(p.y + p.height));
+    }
 
     /* The text as laid out, in drawing (reading) order, for selecting it: recorded by a drawing pass that
        draws nothing, after each layout. Positions are relative to the document's top left. */
@@ -131,12 +182,13 @@ public:
         /* raylib draws from the line's top; litehtml's box bottom sits DESCENT below the baseline */
         float top = pos.y + pos.height - f->size * (ASCENT + DESCENT);
         if (collecting) {
+            content_bottom = std::max(content_bottom, (float)(pos.y + pos.height));
             if (text && text[0])
                 runs.push_back(run{pos.x, top, MeasureTextEx(f->font(), text, f->size, 0).x, f->size * (ASCENT + DESCENT),
                                    text, f->face, f->size});
             return;
         }
-        Color c = to_color(color);
+        Color c = text_color(color);
         Font font = f->font();
         DrawTextEx(font, text, Vector2{snap(pos.x), snap(top)}, f->size, 0, c);
         float w = MeasureTextEx(font, text, f->size, 0).x, t = std::max(1.0f, f->size / 14);
@@ -189,7 +241,7 @@ public:
     void draw_list_marker(litehtml::uint_ptr, const litehtml::list_marker &m) override
     {
         if (collecting) return;
-        Color c = to_color(m.color);
+        Color c = text_color(m.color);
         float cx = m.pos.x + m.pos.width / 2, cy = m.pos.y + m.pos.height / 2, r = m.pos.width / 2;
         switch (m.marker_type) {
         case litehtml::list_style_type_circle: DrawCircleLinesV(Vector2{cx, cy}, r, c); break;
@@ -226,6 +278,7 @@ public:
     void draw_image(litehtml::uint_ptr, const litehtml::background_layer &layer, const std::string &url,
                     const std::string &) override
     {
+        if (collecting) reach(layer.origin_box);
         auto it = images.find(url);
         if (collecting || it == images.end()) return;
         const Texture2D &t = it->second;
@@ -236,6 +289,7 @@ public:
 
     void draw_solid_fill(litehtml::uint_ptr, const litehtml::background_layer &layer, const litehtml::web_color &color) override
     {
+        if (collecting && !layer.is_root && color.alpha) reach(layer.border_box);
         if (collecting || layer.is_root || color.alpha == 0) return;
         const auto &b = layer.border_box;
         DrawRectangleV(Vector2{b.x, b.y}, Vector2{b.width, b.height}, to_color(color));
@@ -250,8 +304,9 @@ public:
 
     void draw_borders(litehtml::uint_ptr, const litehtml::borders &b, const litehtml::position &p, bool root) override
     {
+        if (collecting && !root) reach(p);
         if (collecting || root) return;
-        auto side = [](const litehtml::border &s) { return s.width > 0 && s.style > litehtml::border_style_hidden; };
+        auto side =[](const litehtml::border &s) { return s.width > 0 && s.style > litehtml::border_style_hidden; };
         if (side(b.top)) DrawRectangleV(Vector2{p.x, p.y}, Vector2{p.width, b.top.width}, to_color(b.top.color));
         if (side(b.bottom))
             DrawRectangleV(Vector2{p.x, p.y + p.height - b.bottom.width}, Vector2{p.width, b.bottom.width}, to_color(b.bottom.color));
@@ -284,7 +339,7 @@ public:
     {
         v.x = v.y = 0;
         v.width = width;
-        v.height = 100000;
+        v.height = VIEW_H;
     }
 
     litehtml::element::ptr create_element(const char *, const litehtml::string_map &,
@@ -297,7 +352,7 @@ public:
     {
         m.type = litehtml::media_type_screen;
         m.width = m.device_width = width;
-        m.height = m.device_height = 100000;
+        m.height = m.device_height = VIEW_H;
         m.color = 8;
         m.monochrome = 0;
         m.color_index = 256;
@@ -339,6 +394,8 @@ struct jd_html {
     float base_zoom = 1; /* from the message text size */
     float zoom = 1;      /* base_zoom, or less where the mail is wider than the page (jd_html_layout) */
     bool dark = false;
+    bool has_media = false; /* the source has @media rules: their match depends on the width */
+    float media_w = -1;     /* the width they were matched for */
     float height = 0;
     bool selected = false;
     text_pos sel_a, sel_b;
@@ -621,6 +678,7 @@ extern "C" jd_html *jd_html_new(const char *html, const jd_fonts *fonts, float s
 {
     auto *h = new jd_html(fonts, size);
     h->source = html ? html : "";
+    h->has_media = h->source.find("@media") != std::string::npos;
     if (!parse(h, h->base_zoom)) {
         delete h;
         return nullptr;
@@ -661,7 +719,15 @@ static const float FIT_MIN = 0.45f;
 
 extern "C" float jd_html_layout(jd_html *h, float width)
 {
-    if (h->zoom != h->base_zoom) parse(h, h->base_zoom);
+    /* @media rules are matched against box.width when parsing (a mail's "max-width: 600px" phone styles must not
+       apply on a wide page), so mail with them is parsed again for a new width. litehtml 0.10's media_changed()
+       would avoid that, but its rebuilt render tree lays out nothing. */
+    bool media_stale = h->has_media && h->media_w != width;
+    if (h->zoom != h->base_zoom || media_stale) {
+        h->box.width = width / h->base_zoom;
+        parse(h, h->base_zoom);
+        h->media_w = width;
+    }
     h->box.width = width / h->zoom;
     {
         zoom_scope zs(h->zoom);
@@ -672,9 +738,9 @@ extern "C" float jd_html_layout(jd_html *h, float width)
         float wide = h->doc->width() * h->zoom;
         if (wide <= width + 1 || h->zoom <= h->base_zoom * FIT_MIN + 0.001f) break;
         float z = std::max(h->base_zoom * FIT_MIN, h->zoom * width / wide * 0.99f);
+        h->box.width = width / z;
         if (!parse(h, z)) break;
         zoom_scope zs(z);
-        h->box.width = width / z;
         h->doc->render(width / z);
     }
     zoom_scope zs(h->zoom);
@@ -684,9 +750,12 @@ extern "C" float jd_html_layout(jd_html *h, float width)
     h->selected = false;
     h->caret_on = false;
     h->box.collecting = true;
+    h->box.content_bottom = 0;
     litehtml::position all(0, 0, w + 100000, h->height + 100000);
     h->doc->draw(0, 0, 0, &all);
     h->box.collecting = false;
+    /* a page stretched to the viewport by litehtml 0.10's height:100% ends where its content does */
+    if (h->height >= VIEW_H / 2 && h->box.content_bottom > 0) h->height = std::min(h->height, h->box.content_bottom);
     return h->height * h->zoom;
 }
 

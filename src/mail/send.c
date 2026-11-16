@@ -238,9 +238,24 @@ char *jd_message_build(const jd_account *from, const jd_outgoing *o, size_t *len
     jd_buf_adds(&b, "Content-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n");
     quoted_printable(&b, o->body ? o->body : "");
     if (o->html) {
-        jd_buf_addf(&b, "--%s\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n",
-                    alt);
+        char rel[40] = "=_jd_rel_";
+        int related = o->nrelated > 0;
+        jd_buf_addf(&b, "--%s\r\n", alt);
+        if (related) {
+            random_hex(rel + 9, 12);
+            jd_buf_addf(&b, "Content-Type: multipart/related; type=\"text/html\"; boundary=\"%s\"\r\n\r\n--%s\r\n", rel,
+                        rel);
+        }
+        jd_buf_adds(&b, "Content-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n");
         quoted_printable(&b, o->html);
+        for (int i = 0; related && i < o->nrelated; i++) {
+            const jd_part *p = &o->related[i];
+            jd_buf_addf(&b, "--%s\r\nContent-Type: %s\r\nContent-Transfer-Encoding: base64\r\nContent-ID: <%s>\r\n"
+                            "Content-Disposition: inline\r\n\r\n",
+                        rel, p->type ? p->type : "application/octet-stream", p->cid);
+            base64(&b, (const unsigned char *)p->data, p->len, 1);
+        }
+        if (related) jd_buf_addf(&b, "--%s--\r\n", rel);
         jd_buf_addf(&b, "--%s--\r\n", alt);
     }
     for (int i = 0; i < o->nparts; i++) {

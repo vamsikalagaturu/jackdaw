@@ -50,12 +50,18 @@ static void confirm(jd_app *app)
         app_logout(app);
         return;
     }
+    if (d->act == ACT_DISCARD) {
+        close_dialog(app);
+        compose_discard(app);
+        return;
+    }
     if (!app->sync) {
         close_dialog(app);
         return;
     }
     switch (d->act) {
-    case ACT_LOGOUT: break;
+    case ACT_LOGOUT:
+    case ACT_DISCARD: break;
     case ACT_CREATE_FOLDER:
         if (d->field.len) jd_sync_create_folder(app->sync, d->field.text);
         break;
@@ -75,8 +81,13 @@ static void confirm(jd_app *app)
         if (to) {
             char *name = jd_strdup(to->name);
             int copy = d->act == ACT_COPY;
+            /* ids: one message of a conversation (a reader card), else the list's selection */
+            int64_t *ids = d->ids;
+            int nids = d->nids;
+            d->ids = NULL;
             close_dialog(app);
-            act_move_to(app, name, copy);
+            if (ids) act_move_ids(app, ids, nids, name, copy, 1);
+            else act_move_to(app, name, copy);
             free(name);
             return;
         }

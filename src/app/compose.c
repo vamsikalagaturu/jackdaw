@@ -13,6 +13,7 @@
 #include "mail/mime.h"
 #include "mail/send.h"
 #include "platform.h"
+#include "ui/html.h"
 #include "ui/icons.h"
 
 enum { C_TO, C_CC, C_BCC, C_SUBJECT, C_BODY, C_COUNT };
@@ -25,6 +26,15 @@ struct jd_compose {
     int focus, show_cc;
     char *msgid, *in_reply_to, *references;
     int64_t replied;
+    /* A reply: the attribution line and the "> " quote of the original. To HTML mail, with html_quote, the editor
+       holds no quote: the original shows below it as it is sent, its own HTML in the HTML part (the text part
+       still gets the "> " lines); without, the "> " lines are in the editor, as for plain mail. */
+    char *attribution, *quote_text, *quote_html;
+    int html_quote;
+    jd_part *related; /* the original's cid: images, sent beside the quoted HTML */
+    int nrelated;
+    jd_html *quote_doc;
+    float quote_w, quote_h, quote_scroll;
     jd_part *parts;
     int nparts;
     jd_contact *sugg;
@@ -80,6 +90,10 @@ void compose_free(struct jd_compose *c)
     if (!c) return;
     jd_editor_free(&c->body);
     free(c->msgid), free(c->in_reply_to), free(c->references);
+    free(c->quote_html), free(c->attribution), free(c->quote_text);
+    for (int i = 0; i < c->nrelated; i++) free(c->related[i].type), free(c->related[i].data), free(c->related[i].cid);
+    free(c->related);
+    if (c->quote_doc) jd_html_free(c->quote_doc);
     for (int i = 0; i < c->nparts; i++) free(c->parts[i].name), free(c->parts[i].type), free(c->parts[i].data);
     free(c->parts);
     jd_contacts_free(c->sugg, c->nsugg);
@@ -103,7 +117,7 @@ static struct jd_compose *new_compose(jd_app *app, compose_mode mode)
 static void add_part(struct jd_compose *c, const char *name, const char *type, char *data, size_t len)
 {
     c->parts = jd_realloc(c->parts, sizeof *c->parts * (size_t)(c->nparts + 1));
-    c->parts[c->nparts++] = (jd_part){jd_strdup(name), jd_strdup(type), data, len};
+    c->parts[c->nparts++] = (jd_part){.name = jd_strdup(name), .type = jd_strdup(type), .data = data, .len = len};
     c->dirty = 1;
 }
 
@@ -220,8 +234,17 @@ static const char *bare_address(const char *s, char *out, size_t n)
 static void add_others(jd_buf *b, const char *list, const char *self, const char *keep)
 {
     if (!list) return;
-    char *copy = jd_strdup(list), *save = NULL;
-    for (char *item = strtok_r(copy, ",", &save); item; item = strtok_r(NULL, ",", &save)) {
+    char *copy = jd_strdup(list), *next = copy;
+    while (next) {
+        /* a comma inside a quoted name ("Hoppe, Kirstin") does not end the address */
+        char *item = next, *p = next;
+        int quoted = 0;
+        for (; *p && (quoted || *p != ','); p++) {
+            if (*p == '\\' && quoted && p[1]) p++;
+            else if (*p == '"') quoted = !quoted;
+        }
+        next = *p ? p + 1 : NULL;
+        *p = 0;
         while (*item == ' ') item++;
         char addr[320];
         bare_address(item, addr, sizeof addr);
@@ -245,10 +268,14 @@ static void quote_into(jd_buf *b, const char *text)
     while (*p) {
         const char *nl = strchr(p, '\n');
         size_t n = nl ? (size_t)(nl - p) : strlen(p);
-        jd_buf_addf(b, ">%s%.*s\n", n && p[0] != '>' ? " " : "", (int)n, p);
+        /* without CRLF mail's \r: the quote reads as the editor holds it, so the HTML toggle finds it there */
+        size_t shown = n && p[n - 1] == '\r' ? n - 1 : n;
+        jd_buf_addf(b, ">%s%.*s\n", shown && p[0] != '>' ? " " : "", (int)shown, p);
         p += n + (nl ? 1 : 0);
     }
 }
+
+static void quote_lines(struct jd_compose *c, int in);
 
 static void signature_into(jd_buf *b, const char *sig)
 {
@@ -320,12 +347,29 @@ void compose_open(jd_app *app, compose_mode mode, int64_t source)
             }
             jd_attachments_free(files, files ? nf : 0);
         } else {
-            jd_buf_addf(&body, "\n\nOn %s, %s wrote:\n", date, row.from ? row.from : "someone");
-            quote_into(&body, text);
+            /* room to write above the quote, which goes in under this line once the editor holds it */
+            c->attribution = jd_printf("On %s, %s wrote:", date, row.from ? row.from : "someone");
+            jd_buf_addf(&body, "\n\n%s\n", c->attribution);
+            jd_buf q = {0};
+            quote_into(&q, text);
+            c->quote_text = q.s ? q.s : jd_strdup("");
+            c->quote_html = raw ? jd_mime_body_html(raw, len) : NULL;
+            int ni;
+            jd_inline_part *in = c->quote_html ? jd_mime_inline_parts(raw, len, &ni) : NULL;
+            if (in && ni) {
+                c->related = jd_alloc(sizeof *c->related * (size_t)ni);
+                for (int i = 0; i < ni; i++, c->nrelated++) {
+                    c->related[i] = (jd_part){.type = in[i].type, .data = in[i].data, .len = in[i].len, .cid = in[i].cid};
+                    in[i] = (jd_inline_part){0};
+                }
+            }
+            jd_inline_parts_free(in, in ? ni : 0);
         }
     }
     jd_editor_set(&c->body, body.s ? body.s : "");
     jd_buf_free(&body);
+    /* text by default: replies mostly answer line by line; Quote: HTML is a toggle away */
+    if (c->quote_text) quote_lines(c, 1);
     if (c->nparts) attachment_list(app, c);
     c->dirty = 0;
     free(text), free(raw);
@@ -377,6 +421,52 @@ void compose_open_draft(jd_app *app, int64_t draft)
     jd_message_row_clear(&row);
 }
 
+/* body with the "> " quote after its attribution line (at the end when that line is gone) */
+static char *with_quote(struct jd_compose *c, const char *body)
+{
+    const char *at = strstr(body, c->attribution);
+    size_t cut = strlen(body);
+    if (at) {
+        const char *nl = strchr(at, '\n');
+        cut = nl ? (size_t)(nl + 1 - body) : cut;
+    }
+    jd_buf b = {0};
+    jd_buf_add(&b, body, cut);
+    if (!at || (cut && body[cut - 1] != '\n')) jd_buf_adds(&b, "\n");
+    jd_buf_adds(&b, c->quote_text);
+    jd_buf_adds(&b, body + cut);
+    return b.s;
+}
+
+/* the "> " lines into the editor (Quote: text), or out of it again while they are as they were (Quote: HTML) */
+static void quote_lines(struct jd_compose *c, int in)
+{
+    const char *body = c->body.text ? c->body.text : "";
+    if (in) {
+        char *s = with_quote(c, body);
+        jd_editor_set(&c->body, s);
+        free(s);
+        c->html_quote = 0;
+        return;
+    }
+    const char *q = c->quote_text[0] ? strstr(body, c->quote_text) : NULL;
+    if (!q) {
+        snprintf(c->error, sizeof c->error, "The quoted lines were edited, so they stay as text.");
+        return;
+    }
+    jd_buf b = {0};
+    jd_buf_add(&b, body, (size_t)(q - body));
+    jd_buf_adds(&b, q + strlen(c->quote_text));
+    jd_editor_set(&c->body, b.s ? b.s : "");
+    jd_buf_free(&b);
+    c->html_quote = 1;
+}
+
+static void quote_toggle(struct jd_compose *c)
+{
+    if (c->quote_html) quote_lines(c, c->html_quote);
+}
+
 static char *build(jd_app *app, struct jd_compose *c, int draft, size_t *len, char ***rcpts, int *n)
 {
     jd_outgoing o = {
@@ -386,10 +476,22 @@ static char *build(jd_app *app, struct jd_compose *c, int draft, size_t *len, ch
         .parts = c->parts, .nparts = c->nparts, .draft = draft,
     };
     /* drafts keep only the Markdown source, which is what reopening one reads back */
-    char *html = app->prefs.markdown && !draft ? jd_markdown_html(o.body) : NULL;
+    char *html = NULL, *text = NULL;
+    if (c->html_quote) {
+        /* the text part (and a draft) quotes as "> " lines, after the attribution, as the editor would hold them */
+        text = with_quote(c, o.body);
+        if (!draft) {
+            const char *at = strstr(o.body, c->attribution);
+            char *mine = at ? jd_strndup(o.body, (size_t)(at - o.body)) : jd_strdup(o.body);
+            html = jd_markdown_reply_html(mine, app->prefs.markdown, c->attribution, c->quote_html);
+            free(mine);
+            o.related = c->related, o.nrelated = c->nrelated;
+        }
+        o.body = text;
+    } else if (app->prefs.markdown && !draft) html = jd_markdown_html(o.body);
     o.html = html;
     char *msg = jd_message_build(&app->account, &o, len, rcpts, n, c->error, sizeof c->error);
-    free(html);
+    free(html), free(text);
     return msg;
 }
 
@@ -458,6 +560,22 @@ void compose_sent(jd_app *app, int64_t serial, const char *error)
 void compose_saved(jd_app *app, int64_t serial, const char *error)
 {
     notify_user(app, "%s", error ? error : "Draft saved.");
+}
+
+void compose_discard(jd_app *app)
+{
+    if (app->tab <= 0 || app->tab >= app->ntabs || app->tabs[app->tab].kind != TAB_COMPOSE) return;
+    struct jd_compose *c = app->tabs[app->tab].compose;
+    char *name = NULL;
+    int64_t drafts = app->view ? jd_store_special(app->view, "Drafts", &name) : 0;
+    free(name);
+    int n = 0;
+    int64_t *ids = drafts ? jd_store_by_msgid(app->view, drafts, c->msgid, &n) : NULL;
+    if (n && app->sync) jd_sync_destroy(app->sync, ids, n);
+    free(ids);
+    c->dirty = 0, c->body.changed = 0;
+    tab_close(app, app->tab);
+    notify_user(app, "Discarded.");
 }
 
 int compose_may_close(jd_app *app, struct jd_compose *c, int tab)
@@ -801,6 +919,10 @@ void compose_keys(jd_app *app, struct jd_compose *c)
         save_draft(app, c);
         return;
     }
+    if (ctrl && shift && IsKeyPressed(KEY_Q) && c->quote_html) {
+        quote_toggle(c);
+        return;
+    }
     if (ctrl && shift && IsKeyPressed(KEY_A)) {
         if (plat_pick_files("Attach files") != 0) snprintf(c->error, sizeof c->error, "No file chooser available.");
         return;
@@ -932,7 +1054,37 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
     float bottom = r.y + r.height - (narrow ? 56 : 58);
     if (c->nparts) bottom -= 36;
     if (c->error[0]) bottom -= 24;
+    if (c->quote_html && narrow) bottom -= 44;
     Rectangle body = {x, y + 4, w, bottom - y - 4};
+    if (c->html_quote) {
+        /* the original below what is written, read-only, on the mail page, as the HTML part quotes it */
+        float qh = fmaxf(120, body.height * 0.5f);
+        body.height -= qh + 8;
+        Rectangle q = {x, body.y + body.height + 8, w, qh};
+        jd_text(ui, c->attribution, q.x + 2, q.y, 13, JD_MUTED, 0);
+        Rectangle paper = {q.x, q.y + 20, q.width, q.height - 20};
+        if (!c->quote_doc) {
+            c->quote_doc = jd_html_new(c->quote_html, &ui->reader, 15);
+            for (int i = 0; i < c->nrelated; i++) {
+                char *src = jd_printf("cid:%s", c->related[i].cid);
+                jd_html_add_image(c->quote_doc, src, c->related[i].data, c->related[i].len);
+                free(src);
+            }
+            c->quote_w = 0;
+        }
+        if (c->quote_w != paper.width - 12) c->quote_h = jd_html_layout(c->quote_doc, paper.width - 12), c->quote_w = paper.width - 12;
+        if (CheckCollisionPointRec(GetMousePosition(), paper) && !app->dialog.kind && !c->menu.open)
+            c->quote_scroll -= jd_wheel_y(60);
+        c->quote_scroll = fmaxf(0, fminf(c->quote_scroll, c->quote_h - paper.height));
+        int dark = mail_page_dark(app);
+        DrawRectangleRec(paper, jd_html_page(dark));
+        DrawRectangle((int)paper.x, (int)paper.y, 3, (int)paper.height, JD_NORD9);
+        jd_scissor(paper.x, paper.y, paper.width, paper.height);
+        jd_html_set_dark(c->quote_doc, dark);
+        jd_html_draw(c->quote_doc, paper.x + 12, paper.y - c->quote_scroll, paper.y, paper.y + paper.height);
+        jd_scissor_end();
+        if (c->quote_h > paper.height) jd_scrollbar(paper, c->quote_h, &c->quote_scroll);
+    }
     c->body.inert = c->menu.open;
     if (jd_editor_draw(ui, &c->body, body, c->focus == C_BODY)) c->focus = C_BODY, c->normal = 0;
     if (!c->menu.open && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && CheckCollisionPointRec(GetMousePosition(), body) &&
@@ -970,16 +1122,27 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
         jd_text_fit(ui, c->error, x, y, w, 13, JD_NORD11, 0);
         y += 24;
     }
-    Rectangle bsend = narrow ? (Rectangle){x, y, w - 2 * (48 + 8), 40} : (Rectangle){x, y, 130, 36};
-    Rectangle battach = narrow ? (Rectangle){x + w - 104, y, 48, 40} : (Rectangle){x + 140, y, 110, 36};
-    Rectangle bdraft = narrow ? (Rectangle){x + w - 48, y, 48, 40} : (Rectangle){x + 260, y, 136, 36};
+    Rectangle bsend = narrow ? (Rectangle){x, y, w - 3 * (48 + 8), 40} : (Rectangle){x, y, 130, 36};
+    Rectangle battach = narrow ? (Rectangle){x + w - 160, y, 48, 40} : (Rectangle){x + 140, y, 110, 36};
+    Rectangle bdraft = narrow ? (Rectangle){x + w - 104, y, 48, 40} : (Rectangle){x + 260, y, 136, 36};
+    Rectangle bdiscard = narrow ? (Rectangle){x + w - 48, y, 48, 40} : (Rectangle){x + w - 116, y, 116, 36};
     if (jd_icon_button(ui, "send", c->sending ? "Sending..." : "Send", bsend, 1)) send(app, c);
     if (jd_icon_button(ui, "paperclip", narrow ? NULL : "Attach", battach, 0) && plat_pick_files("Attach files") != 0)
         snprintf(c->error, sizeof c->error, "No file chooser available; drop files on the window instead.");
     if (jd_icon_button(ui, "file-pen", narrow ? NULL : "Save draft", bdraft, 0)) save_draft(app, c);
+    if (jd_icon_button(ui, "trash-2", narrow ? NULL : "Discard", bdiscard, 0) && !c->sending)
+        dialog_open(app, DLG_CONFIRM, ACT_DISCARD, "Discard this message? Its saved draft goes too.", NULL);
+    float hint_x = x + 412;
+    if (c->quote_html) {
+        /* narrow, the row has no room left: the toggle sits above it */
+        Rectangle bq = narrow ? (Rectangle){x, y - 44, 150, 36} : (Rectangle){x + 406, y, 150, 36};
+        if (jd_icon_button(ui, "text-quote", c->html_quote ? "Quote: HTML" : "Quote: text", bq, 0))
+            quote_toggle(c);
+        hint_x += 156;
+    }
     if (!plat_touch())
-        jd_text_fit(ui, "Ctrl+Enter sends · Ctrl+S saves · Esc normal mode, i insert · Ctrl+W closes", x + 412,
-                    y + 11, w - 412, 13, JD_MUTED, 0);
+        jd_text_fit(ui, "Ctrl+Enter sends · Ctrl+S saves · Ctrl+Shift+Q quote as HTML or text · Ctrl+W closes",
+                    hint_x, y + 11, x + w - 128 - hint_x, 13, JD_MUTED, 0);
 
     if (c->nsugg && c->focus <= C_BCC && sugg_y > 0) {
         Rectangle box = {x + label_w, sugg_y, fminf(420, w - label_w), (float)c->nsugg * 30 + 8};
