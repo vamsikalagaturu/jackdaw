@@ -113,14 +113,14 @@ static void finish_check(jd_app *app)
         return;
     }
     mark_checked();
-    if (jd_version_cmp(U.found.tag, JD_VERSION) > 0 && U.found.asset) {
+    if (jd_version_cmp(U.found.tag, jd_version) > 0 && U.found.asset) {
         jd_release_free(&U.rel);
         U.rel = U.found;
         U.found = (jd_release){0};
         U.dismissed = 0;
         snprintf(U.status, sizeof U.status, "jackdaw %s is available.", U.rel.tag + (U.rel.tag[0] == 'v'));
     } else {
-        snprintf(U.status, sizeof U.status, "jackdaw %s is the latest.", JD_VERSION);
+        snprintf(U.status, sizeof U.status, "jackdaw %s is the latest.", jd_version);
         if (U.manual) notify_user(app, "%s", U.status);
         jd_release_free(&U.found);
     }

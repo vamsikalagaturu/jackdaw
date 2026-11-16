@@ -216,8 +216,9 @@ static void rail_draw(jd_app *app, Rectangle r)
     static double shown_until;
     int on_mark = CheckCollisionPointRec(GetMousePosition(), mark);
     if (app->ui.touch && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) shown_until = on_mark ? GetTime() + 4 : 0;
-    if ((on_mark && !app->ui.touch) || GetTime() < shown_until)
-        tip = "jackdaw " JD_VERSION ", built " JD_BUILD_DATE, tip_at = (Vector2){mark.x + 46, mark.y + 6};
+    static char version[96];
+    if (!version[0]) snprintf(version, sizeof version, "jackdaw %s, built %s", jd_version, jd_build_date);
+    if ((on_mark && !app->ui.touch) || GetTime() < shown_until) tip = version, tip_at = (Vector2){mark.x + 46, mark.y + 6};
     if (icon_button(app, "panel-left-open", (Rectangle){cx, r.y + 49, 40, 36}, "Show the sidebar (Ctrl+B)", JD_NORD4, &tip, &tip_at)) {
         app->prefs.sidebar_rail = 0;
         save_prefs(app);
@@ -389,5 +390,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
         }
         fx += fw + 4;
     }
-    jd_text_fit(ui, "jackdaw " JD_VERSION " · built " JD_BUILD_DATE, r.x + 22, bottom + 50, r.width - 34, 12, JD_NORD4, 0);
+    char version[96];
+    snprintf(version, sizeof version, "jackdaw %s · built %s", jd_version, jd_build_date);
+    jd_text_fit(ui, version, r.x + 22, bottom + 50, r.width - 34, 12, JD_NORD4, 0);
 }

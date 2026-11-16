@@ -515,7 +515,9 @@ static void notifications(jd_app *app, float x, float y, float w)
 static void about(jd_app *app, float x, float y, float w)
 {
     jd_prefs *p = &app->prefs;
-    y = heading(app, x, y, "About", JD_APP_NAME " " JD_VERSION ", built " JD_BUILD_DATE);
+    char built[96];
+    snprintf(built, sizeof built, "%s %s, built %s", JD_APP_NAME, jd_version, jd_build_date);
+    y = heading(app, x, y, "About", built);
     if (!strcmp(JD_APP_NAME, "jackdaw")) {
         float cx = label(app, x, &y, "Check for updates automatically", "Once a day, from the latest GitHub release");
         if (jd_switch(&app->ui, cx, y + 10, p->update_check)) p->update_check = !p->update_check, changed(app);

@@ -127,7 +127,7 @@ static void handle_events(jd_app *app)
 int main(int argc, char **argv)
 {
     if (argc > 1 && strcmp(argv[1], "--version") == 0) {
-        puts(JD_APP_NAME " " JD_VERSION);
+        printf("%s %s\n", JD_APP_NAME, jd_version);
         return 0;
     }
     plat_init();

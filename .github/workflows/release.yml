@@ -1,31 +1,34 @@
-# After CI passes on main: when project() VERSION in CMakeLists.txt has no release yet, platform/release.sh builds
-# both apps with JD_RELEASE=1 and publishes vX.Y.Z. The APK is signed with the key every earlier release used
-# (secret ANDROID_KEYSTORE_B64), or phones would refuse the update.
+# On main, which only a PR that passed CI reaches (the ruleset): when project() VERSION in CMakeLists.txt has no
+# release yet, platform/release.sh builds both apps with JD_RELEASE=1 and publishes vX.Y.Z. The APK is signed with
+# the key every earlier release used (secret ANDROID_KEYSTORE_B64), or phones would refuse the update.
+# The caches it saves on main are the ones the next PRs restore.
 name: Release
 
 on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+  push:
     branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
   release:
-    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
+      ANDROID_NDK: /usr/local/lib/android/sdk/ndk/28.2.13676358
       CCACHE_DIR: /home/runner/.cache/ccache
       CCACHE_MAXSIZE: 1G
+      CCACHE_COMPILERCHECK: content
+      CCACHE_SLOPPINESS: include_file_mtime,include_file_ctime
       CMAKE_C_COMPILER_LAUNCHER: ccache
       CMAKE_CXX_COMPILER_LAUNCHER: ccache
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha }}
       - name: Version
         id: version
         run: |
@@ -45,7 +48,6 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      # the caches CI saved on main (same keys), so a release rebuilds only jackdaw itself
       - name: Cache Android SDK packages
         id: sdk
         if: steps.version.outputs.new == '1'
