@@ -19,6 +19,10 @@ float plat_drag_x(void);
 int plat_finger_scrolling(void);
 /* this frame's finger (or fling) scroll in logical pixels, down and right positive; 0 leaves it to the wheel */
 int plat_scroll(float *dx, float *dy);
+/* where the finger is (logical pixels), 0 when none is down */
+int plat_finger(float *x, float *y);
+/* the finger now down is the caller's until it lifts: no scroll, swipe, tap or long press comes of it */
+void plat_finger_claim(void);
 
 /* The system keystore. Without one (no libsecret at build time) passwords last until jackdaw quits. */
 int plat_secret_available(void);
@@ -45,6 +49,12 @@ void plat_notify_shutdown(void);
 int plat_pick_files(const char *title);
 /* the system's handler for a link (browser for http/https) */
 int plat_open_uri(const char *uri);
+/* the system's share sheet for text; -1 when there is none */
+int plat_share_text(const char *text);
+/* the system's actions on selected text (Android: apps taking PROCESS_TEXT, such as Translate): their labels one
+   per line, NULL when there are none; free() it. plat_text_action runs the i-th line's on text. */
+char *plat_text_actions(void);
+int plat_text_action(int i, const char *text);
 /* the system's handler for a local file (by its type) */
 int plat_open_file(const char *path);
 /* the system's print dialog for a PDF file; -1 when there is none */

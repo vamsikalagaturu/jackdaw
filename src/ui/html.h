@@ -29,6 +29,10 @@ Color jd_html_page(int dark);
 /* Selecting text: from (ax, ay) to (bx, by), relative to the top left; laying out again drops the selection */
 void jd_html_select(jd_html *h, float ax, float ay, float bx, float by);
 void jd_html_select_all(jd_html *h);
+/* the word under (x, y), without the punctuation around it; 0 when no text is there */
+int jd_html_select_word(jd_html *h, float x, float y);
+/* where the selection starts and ends: the x and the top of each end's line, and the end line's height */
+int jd_html_selection_ends(jd_html *h, float *ax, float *ay, float *bx, float *by, float *line_h);
 void jd_html_select_none(jd_html *h);
 int jd_html_has_selection(jd_html *h);
 /* the selected text, or NULL; free() it */

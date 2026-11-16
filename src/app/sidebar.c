@@ -159,8 +159,8 @@ static float tab_rows(jd_app *app, Rectangle r, float y, int rail)
     for (int i = 0; i < app->ntabs; i++) {
         Rectangle box = {r.x + 8, y, r.width - 16, 30};
         int hover = CheckCollisionPointRec(GetMousePosition(), box) && !app->dialog.kind && !app->menu.open;
-        if (i == app->tab) DrawRectangleRounded(box, 0.25f, 6, JD_NORD2);
-        else if (hover) DrawRectangleRounded(box, 0.25f, 6, ColorAlpha(JD_NORD2, 0.5f));
+        if (i == app->tab) DrawRectangleRounded(box, 0.25f, 6, ColorAlpha(JD_NORD10, 0.45f));
+        else if (hover) DrawRectangleRounded(box, 0.25f, 6, JD_NORD3);
         jd_icon(icons[app->tabs[i].kind], box.x + (rail ? (box.width - 16) / 2 : 12), y + 7, 16,
                 i == app->tab ? JD_NORD8 : JD_NORD4);
         Rectangle close = {box.x + box.width - 24, y + 6, 18, 18};
@@ -217,7 +217,7 @@ static void rail_draw(jd_app *app, Rectangle r)
     int on_mark = CheckCollisionPointRec(GetMousePosition(), mark);
     if (app->ui.touch && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) shown_until = on_mark ? GetTime() + 4 : 0;
     static char version[96];
-    if (!version[0]) snprintf(version, sizeof version, "jackdaw %s, built %s", jd_version, jd_build_date);
+    if (!version[0]) snprintf(version, sizeof version, "jackdaw %s", jd_version);
     if ((on_mark && !app->ui.touch) || GetTime() < shown_until) tip = version, tip_at = (Vector2){mark.x + 46, mark.y + 6};
     if (icon_button(app, "panel-left-open", (Rectangle){cx, r.y + 49, 40, 36}, "Show the sidebar (Ctrl+B)", JD_NORD4, &tip, &tip_at)) {
         app->prefs.sidebar_rail = 0;
@@ -252,7 +252,7 @@ static void rail_draw(jd_app *app, Rectangle r)
             continue;
         }
         int active = i == app->folder && app->tab == 0;
-        if (active) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
+        if (active) DrawRectangleRounded(b, 0.3f, 6, ColorAlpha(JD_NORD10, 0.45f));
         if (icon_button(app, folder_icon(f), b, folder_label(f), active ? JD_NORD8 : JD_NORD4, &tip, &tip_at) && over)
             select_folder(app, i);
         if (f->unread) {
@@ -339,10 +339,10 @@ void sidebar_draw(jd_app *app, Rectangle r)
         }
         int hover = CheckCollisionPointRec(GetMousePosition(), box) && over && free_input;
         if (i == app->folder && app->tab == 0) {
-            DrawRectangleRounded(box, 0.25f, 6, JD_NORD2);
+            DrawRectangleRounded(box, 0.25f, 6, ColorAlpha(JD_NORD10, 0.45f));
             if (app->pane == PANE_FOLDERS && !plat_touch()) DrawRectangleRoundedLinesEx(box, 0.25f, 6, 1.5f, JD_NORD8);
         }
-        else if (hover) DrawRectangleRounded(box, 0.25f, 6, ColorAlpha(JD_NORD2, 0.5f));
+        else if (hover) DrawRectangleRounded(box, 0.25f, 6, JD_NORD3);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             app->pane = PANE_FOLDERS;
             select_folder(app, i);
@@ -391,6 +391,6 @@ void sidebar_draw(jd_app *app, Rectangle r)
         fx += fw + 4;
     }
     char version[96];
-    snprintf(version, sizeof version, "jackdaw %s · built %s", jd_version, jd_build_date);
+    snprintf(version, sizeof version, "jackdaw %s", jd_version);
     jd_text_fit(ui, version, r.x + 22, bottom + 50, r.width - 34, 12, JD_NORD4, 0);
 }

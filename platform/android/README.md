@@ -14,7 +14,8 @@ platform/android/build.sh check    # only compiles libjackdaw.so
 JD_ABIS=x86_64 platform/android/build.sh   # the emulator's ABI alone, faster
 ```
 
-`deps.sh` builds OpenSSL, libcurl and libetpan for each ABI once, under `~/.cache/jackdaw/android`
+`deps.sh` builds OpenSSL, libcurl, GNU libiconv (bionic's iconv converts no 8-bit charset) and libetpan for each
+ABI once, under `~/.cache/jackdaw/android`
 (`JD_ANDROID_OUT` overrides), which also keeps the debug signing key. The APK trusts the test server's CA
 (`~/.cache/jackdaw/imap-test/ca.crt`, from `tests/imap/start.sh`) besides the system's roots when that file exists;
 `JD_TEST_CA= platform/android/build.sh` builds without it.

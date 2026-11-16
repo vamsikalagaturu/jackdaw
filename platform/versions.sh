@@ -38,6 +38,11 @@ OPENSSL_SHA256=603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a
 CURL_VERSION=8.23.0
 CURL_URL=https://curl.se/download/curl-$CURL_VERSION.tar.xz
 CURL_SHA256=8dadd7d2536a314f982ad05a651b713f426bf7d02cc2c76cffb9796f2218e6c5
+# Android only: bionic's iconv opens no 8-bit charset (ISO-8859-*, Windows-125x), which mail headers and bodies use;
+# the SHA-256 is of the tarball whose GNU signature (Bruno Haible, key B6301D9E1BBEAC08) was checked
+LIBICONV_VERSION=1.19.1
+LIBICONV_URL=https://ftp.gnu.org/gnu/libiconv/libiconv-$LIBICONV_VERSION.tar.gz
+LIBICONV_SHA256=9a06844846d664d7122161700c10a64480d7c7bcead3091925a785b38c91edab
 
 # download $1 to $2 once and check it against SHA-256 $3
 fetch() {

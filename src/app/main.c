@@ -184,6 +184,13 @@ int main(int argc, char **argv)
             if (app.print_tab <= app.ntabs) print_conv(&app, &app.tabs[app.print_tab - 1].conv);
             app.print_tab = 0;
         }
+        if (app.print_message) {
+            jd_conv one = {0};
+            conv_open(&app, &one, jd_message_thread(app.view, app.print_message), app.print_message);
+            print_conv(&app, &one);
+            conv_close(&one);
+            app.print_message = 0;
+        }
     }
     pending_tick(&app, 1);
     app_disconnect(&app);

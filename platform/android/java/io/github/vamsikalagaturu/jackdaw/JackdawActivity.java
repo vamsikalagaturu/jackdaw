@@ -5,6 +5,9 @@ import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.database.Cursor;
 import android.graphics.Insets;
 import android.net.Uri;
@@ -162,6 +165,54 @@ public class JackdawActivity extends NativeActivity {
                 startActivity(i);
                 return "1";
             } catch (ActivityNotFoundException e) {
+                return null;
+            }
+        });
+    }
+
+    public String shareText(String text) {
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("text/plain");
+        send.putExtra(Intent.EXTRA_TEXT, text);
+        Intent i = Intent.createChooser(send, null);
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        return onUi(() -> {
+            try {
+                startActivity(i);
+                return "1";
+            } catch (ActivityNotFoundException e) {
+                return null;
+            }
+        });
+    }
+
+    private java.util.List<ResolveInfo> textActions = new java.util.ArrayList<>();
+
+    /* the apps acting on selected text (ACTION_PROCESS_TEXT), their labels one per line; null when none */
+    public String textActions() {
+        Intent q = new Intent(Intent.ACTION_PROCESS_TEXT).setType("text/plain");
+        PackageManager pm = getPackageManager();
+        textActions = pm.queryIntentActivities(q, 0);
+        if (textActions.isEmpty()) return null;
+        StringBuilder b = new StringBuilder();
+        for (ResolveInfo r : textActions) b.append(r.loadLabel(pm).toString().replace('\n', ' ')).append('\n');
+        return b.toString();
+    }
+
+    /* index: a line of what textActions() returned */
+    public String textAction(String index, String text) {
+        int i = Integer.parseInt(index);
+        if (i < 0 || i >= textActions.size()) return null;
+        ActivityInfo a = textActions.get(i).activityInfo;
+        Intent intent = new Intent(Intent.ACTION_PROCESS_TEXT).setType("text/plain")
+            .setClassName(a.packageName, a.name)
+            .putExtra(Intent.EXTRA_PROCESS_TEXT, text)
+            .putExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, true);
+        return onUi(() -> {
+            try {
+                startActivity(intent);
+                return "1";
+            } catch (ActivityNotFoundException | SecurityException e) {
                 return null;
             }
         });

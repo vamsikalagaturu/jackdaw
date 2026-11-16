@@ -20,7 +20,9 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       GH_TOKEN: ${{ github.token }}
-      ANDROID_NDK: /usr/local/lib/android/sdk/ndk/28.2.13676358
+      # pinned SDK packages in a folder of the runner's own: a cache restored into its root-owned SDK fails
+      ANDROID_HOME: /home/runner/android-sdk
+      ANDROID_NDK: /home/runner/android-sdk/ndk/28.2.13676358
       CCACHE_DIR: /home/runner/.cache/ccache
       CCACHE_MAXSIZE: 1G
       CCACHE_COMPILERCHECK: content
@@ -53,11 +55,8 @@ jobs:
         if: steps.version.outputs.new == '1'
         uses: actions/cache@v4
         with:
-          path: |
-            /usr/local/lib/android/sdk/ndk/28.2.13676358
-            /usr/local/lib/android/sdk/build-tools/36.1.0
-            /usr/local/lib/android/sdk/platforms/android-36.1
-          key: android-sdk-ndk28.2.13676358-bt36.1.0-p36.1
+          path: /home/runner/android-sdk
+          key: android-sdk-home-ndk28.2.13676358-bt36.1.0-p36.1
       - name: Cache Linux third-party builds
         if: steps.version.outputs.new == '1'
         uses: actions/cache@v4
@@ -90,8 +89,9 @@ jobs:
       - name: SDK packages
         if: steps.version.outputs.new == '1' && steps.sdk.outputs.cache-hit != 'true'
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" "build-tools;36.1.0" "platforms;android-36.1" >/dev/null
+          SM=/usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager
+          yes | "$SM" --sdk_root="$ANDROID_HOME" --licenses >/dev/null
+          "$SM" --sdk_root="$ANDROID_HOME" "ndk;28.2.13676358" "build-tools;36.1.0" "platforms;android-36.1" >/dev/null
       - name: Signing key
         if: steps.version.outputs.new == '1'
         env:

@@ -550,8 +550,10 @@ int jd_editor_draw(jd_ui *ui, jd_editor *e, Rectangle r, int focused)
             DrawRectangleV((Vector2){r.x + pad + x0, y + ED_SIZE * 0.5f - ED_SIZE * 0.625f}, (Vector2){x1 - x0, ED_SIZE * 1.25f},
                            ColorAlpha(JD_NORD10, 0.55f));
         }
-        jd_text_range(ui, e->text, e->starts[l], l + 1 < e->nlines ? e->starts[l + 1] : e->len, r.x + pad, y, ED_SIZE,
-                      e->text[e->starts[l]] == '>' ? JD_NORD9 : JD_NORD6, 0);
+        /* a quote wrapped onto more rows keeps the quote colour: what counts is where its line starts */
+        int src = ls;
+        while (src > 0 && e->text[src - 1] != '\n') src--;
+        jd_text_range(ui, e->text, ls, le, r.x + pad, y, ED_SIZE, e->text[src] == '>' ? JD_NORD9 : JD_NORD6, 0);
     }
     if (focused && (int)(GetTime() * 2) % 2 == 0) {
         float cx = span_width(ui, e->text, e->starts[cl], e->cursor, ED_SIZE);

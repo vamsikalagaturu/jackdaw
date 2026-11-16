@@ -147,6 +147,18 @@ jd_store *jd_store_open(const char *path, char *err, int errlen)
         }
         exec(s, "COMMIT");
     }
+    if (run(prep(s, "PRAGMA user_version")) == 3) {
+        exec(s, "BEGIN IMMEDIATE");
+        if (run(prep(s, "PRAGMA user_version")) == 3) {
+            exec(s, "ALTER TABLE folders ADD COLUMN headers_stale INTEGER NOT NULL DEFAULT 0");
+#ifdef __ANDROID__
+            /* bionic's iconv decoded no 8-bit charset: subjects, names and snippets stored before are wrong */
+            exec(s, "UPDATE folders SET headers_stale = 1");
+#endif
+            exec(s, "PRAGMA user_version = 4");
+        }
+        exec(s, "COMMIT");
+    }
     return s;
 bad:
     snprintf(err, (size_t)errlen, "%s: %s", path, s->db ? sqlite3_errmsg(s->db) : "cannot open");
@@ -426,6 +438,54 @@ int64_t jd_message_put(jd_store *s, int64_t folder, const jd_header *h, int *is_
     return id;
 }
 
+int64_t jd_message_refresh(jd_store *s, int64_t folder, const jd_header *h)
+{
+    int64_t id = jd_message_id(s, folder, h->uid);
+    if (!id) return 0;
+    sqlite3_stmt *st = prep(s, "UPDATE messages SET subject = ? WHERE id = ?");
+    bind_text(st, 1, h->subject);
+    sqlite3_bind_int64(st, 2, id);
+    run(st);
+    st = prep(s, "DELETE FROM addresses WHERE message_id = ?");
+    sqlite3_bind_int64(st, 1, id);
+    run(st);
+    for (int r = 0; r < JD_ROLE_COUNT; r++)
+        for (int i = 0; i < h->naddrs[r]; i++) {
+            st = prep(s, "INSERT INTO addresses(message_id, role, position, name, addr) VALUES(?, ?, ?, ?, ?)");
+            sqlite3_bind_int64(st, 1, id);
+            sqlite3_bind_int(st, 2, r);
+            sqlite3_bind_int(st, 3, i);
+            bind_text(st, 4, h->addrs[r][i].name);
+            bind_text(st, 5, h->addrs[r][i].addr);
+            run(st);
+        }
+    char *sender, *recipients;
+    join_addrs(&sender, h, JD_ROLE_FROM, JD_ROLE_FROM);
+    join_addrs(&recipients, h, JD_ROLE_TO, JD_ROLE_CC);
+    st = prep(s, "UPDATE search SET subject = ?, sender = ?, recipients = ? WHERE rowid = ?");
+    bind_text(st, 1, h->subject);
+    bind_text(st, 2, sender);
+    bind_text(st, 3, recipients);
+    sqlite3_bind_int64(st, 4, id);
+    run(st);
+    free(sender), free(recipients);
+    return id;
+}
+
+int jd_folder_headers_stale(jd_store *s, int64_t folder)
+{
+    sqlite3_stmt *st = prep(s, "SELECT headers_stale FROM folders WHERE id = ?");
+    sqlite3_bind_int64(st, 1, folder);
+    return run(st) != 0;
+}
+
+void jd_folder_headers_done(jd_store *s, int64_t folder)
+{
+    sqlite3_stmt *st = prep(s, "UPDATE folders SET headers_stale = 0 WHERE id = ?");
+    sqlite3_bind_int64(st, 1, folder);
+    run(st);
+}
+
 void jd_message_set_flags(jd_store *s, int64_t folder, uint32_t uid, int flags, const char *keywords, uint64_t modseq)
 {
     sqlite3_stmt *st = prep(s, "UPDATE messages SET flags = ?, keywords = ?, modseq = max(modseq, ?)"
@@ -542,11 +602,15 @@ static char *col_dup(sqlite3_stmt *st, int i)
 }
 
 /* "Ada, Bob" from the distinct senders of the thread's messages in the folder, by first appearance */
+/* the conversation's senders, from every folder but Trash and Junk (unless that is the folder on show) */
 static char *thread_senders(jd_store *s, int64_t thread, int64_t folder)
 {
     sqlite3_stmt *st = prep(s, "SELECT coalesce(nullif(a.name, ''), a.addr) FROM messages m"
+                               " JOIN folders f ON f.id = m.folder_id"
                                " JOIN addresses a ON a.message_id = m.id AND a.role = 0 AND a.position = 0"
-                               " WHERE m.thread_id = ?1 AND (?2 = 0 OR m.folder_id = ?2) GROUP BY a.addr ORDER BY min(m.date)");
+                               " WHERE m.thread_id = ?1 AND (m.folder_id = ?2"
+                               " OR coalesce(f.special_use, '') NOT IN ('Trash', 'Junk'))"
+                               " GROUP BY a.addr ORDER BY min(m.date)");
     sqlite3_bind_int64(st, 1, thread);
     sqlite3_bind_int64(st, 2, folder);
     jd_buf b = {0};
@@ -736,6 +800,15 @@ jd_thread_row *jd_store_list(jd_store *s, const jd_list_query *q, int *n)
         }
         sqlite3_finalize(st);
         if (!rows[i].subject || !rows[i].subject[0]) free(rows[i].subject), rows[i].subject = jd_strdup("(no subject)");
+        /* a conversation is all of it, as the reader shows it: the replies in Sent count in the Inbox too */
+        if (q->grouped && q->folder) {
+            st = prep(s, "SELECT count(*) FROM messages m JOIN folders f ON f.id = m.folder_id WHERE m.thread_id = ?"
+                         " AND (m.folder_id = ? OR coalesce(f.special_use, '') NOT IN ('Trash', 'Junk'))");
+            sqlite3_bind_int64(st, 1, rows[i].thread);
+            sqlite3_bind_int64(st, 2, q->folder);
+            int all = (int)run(st);
+            if (all > rows[i].count) rows[i].count = all;
+        }
         rows[i].senders = q->grouped ? thread_senders(s, rows[i].thread, q->folder) : message_sender(s, rows[i].latest);
     }
     return rows;
@@ -842,8 +915,15 @@ static char *addresses_of(jd_store *s, int64_t id, int role)
     jd_buf b = {0};
     while (sqlite3_step(st) == SQLITE_ROW) {
         const char *name = (const char *)sqlite3_column_text(st, 0), *addr = (const char *)sqlite3_column_text(st, 1);
-        if (name && name[0]) jd_buf_addf(&b, "%s%s <%s>", b.len ? ", " : "", name, addr ? addr : "");
-        else jd_buf_addf(&b, "%s%s", b.len ? ", " : "", addr ? addr : "");
+        if (b.len) jd_buf_adds(&b, ", ");
+        if (name && name[0]) {
+            /* RFC 5322 section 3.2.3: a name with specials (as "Hoppe, Kirstin") goes in quotes */
+            if (strpbrk(name, "()<>[]:;@\\,.\"")) {
+                jd_buf_adds(&b, "\"");
+                for (const char *p = name; *p; p++) jd_buf_addf(&b, "%s%c", *p == '"' || *p == '\\' ? "\\" : "", *p);
+                jd_buf_addf(&b, "\" <%s>", addr ? addr : "");
+            } else jd_buf_addf(&b, "%s <%s>", name, addr ? addr : "");
+        } else jd_buf_adds(&b, addr ? addr : "");
     }
     sqlite3_finalize(st);
     return b.s;

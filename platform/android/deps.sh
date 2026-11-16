@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fetches the sources pinned in platform/versions.sh into thirdparty/, checks the Android SDK and NDK, and builds
-# OpenSSL, libcurl and libetpan, static, once per ABI. build.sh sources this file first and uses the paths it sets.
+# OpenSSL, libcurl, libiconv and libetpan, static, once per ABI. build.sh sources this file first and uses the paths it sets.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -27,6 +27,7 @@ step "sources"
 fetch_sources "$REPO"
 fetch_unpacked "$OPENSSL_URL" "$OPENSSL_SHA256" "openssl-$OPENSSL_VERSION" "$REPO"
 fetch_unpacked_xz "$CURL_URL" "$CURL_SHA256" "curl-$CURL_VERSION" "$REPO"
+fetch_unpacked "$LIBICONV_URL" "$LIBICONV_SHA256" "libiconv-$LIBICONV_VERSION" "$REPO"
 
 triple() {
     case $1 in
@@ -36,14 +37,15 @@ triple() {
     esac
 }
 
-# OpenSSL, libcurl and libetpan for ABI $1, under the folder this names (build.sh passes it as JD_ANDROID_DEPS)
+# OpenSSL, libcurl, libiconv and libetpan for ABI $1, under the folder this names (build.sh passes it as JD_ANDROID_DEPS)
 deps_prefix() {
-    echo "$ROOT/deps-$1-openssl-$OPENSSL_VERSION-curl-$CURL_VERSION-etpan-$LIBETPAN_VERSION-$BUILD_TAG"
+    echo "$ROOT/deps-$1-openssl-$OPENSSL_VERSION-curl-$CURL_VERSION-iconv-$LIBICONV_VERSION-etpan-$LIBETPAN_VERSION-$BUILD_TAG"
 }
 
 for ABI in $ABIS; do
     OUT=$(deps_prefix $ABI)
-    [ -f "$OUT/lib/libssl.a" ] && [ -f "$OUT/lib/libcurl.a" ] && [ -f "$OUT/lib/libetpan.a" ] && continue
+    [ -f "$OUT/lib/libssl.a" ] && [ -f "$OUT/lib/libcurl.a" ] && [ -f "$OUT/lib/libiconv.a" ] &&
+        [ -f "$OUT/lib/libetpan.a" ] && continue
     TRIPLE=$(triple $ABI)
     mkdir -p "$OUT"
 
@@ -82,6 +84,20 @@ for ABI in $ABIS; do
         cmake --build "$OUT/curl.build" --target install -j"$JOBS" >/dev/null
     fi
 
+    if [ ! -f "$OUT/lib/libiconv.a" ]; then
+        step "libiconv $LIBICONV_VERSION ($ABI)"
+        rm -rf "$OUT/libiconv.build"
+        mkdir -p "$OUT/libiconv.build"
+        (cd "$OUT/libiconv.build" &&
+            CC="$TC/clang --target=$TRIPLE$MIN_API" AR="$TC/llvm-ar" RANLIB="$TC/llvm-ranlib" \
+                CFLAGS="$SIZE_CFLAGS -fPIC -DNDEBUG" \
+                "$REPO/thirdparty/libiconv-$LIBICONV_VERSION/configure" --host=$TRIPLE --prefix="$OUT" \
+                --libdir="$OUT/lib" --disable-shared --enable-static --with-pic --disable-nls >/dev/null &&
+            make lib/localcharset.h >/dev/null && make -j"$JOBS" -C lib >/dev/null && make -C lib install >/dev/null &&
+            install -m 644 include/iconv.h.inst "$OUT/include/iconv.h")
+    fi
+
+    # libetpan's iconv calls go to libiconv: its iconv.h, found first in $OUT/include, renames them
     if [ ! -f "$OUT/lib/libetpan.a" ]; then
         step "libetpan $LIBETPAN_VERSION ($ABI)"
         # autotools build in place, so it runs in a copy and thirdparty/ stays pristine

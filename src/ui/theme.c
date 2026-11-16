@@ -29,7 +29,13 @@ void jd_set_insets(float top, float bottom)
 
 void jd_scale_begin(void)
 {
-    camera = (Camera2D){.zoom = jd_scale, .offset = {0, inset_top}};
+#ifdef __ANDROID__
+    float dpi = 1; /* the screen density is part of jd_scale there */
+#else
+    /* BeginMode2D loads identity, dropping raylib's HiDPI screen scale, so the camera carries it */
+    float dpi = GetWindowScaleDPI().x;
+#endif
+    camera = (Camera2D){.zoom = jd_scale * dpi, .offset = {0, inset_top}};
     SetMouseScale(1 / jd_scale, 1 / jd_scale);
     SetMouseOffset(0, (int)-inset_top);
     BeginMode2D(camera);

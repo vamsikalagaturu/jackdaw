@@ -7,6 +7,7 @@ typedef struct {
     char *name, *type;
     char *data;
     size_t len;
+    char *cid; /* a part the HTML shows (cid: URL, RFC 2392), without <>; NULL for an attachment */
 } jd_part;
 
 /* What the compose view hands over. to, cc, bcc are address lists as typed ("Ada <ada@x>, bob@y"). */
@@ -17,6 +18,9 @@ typedef struct {
     const char *message_id;               /* kept across draft saves; made when NULL */
     const jd_part *parts;
     int nparts;
+    /* images the HTML shows by cid: (a quoted original's): beside it in multipart/related (RFC 2387) */
+    const jd_part *related;
+    int nrelated;
     int draft; /* Bcc stays in the headers of a draft, so it survives reopening */
 } jd_outgoing;
 

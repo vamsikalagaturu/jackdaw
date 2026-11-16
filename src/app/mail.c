@@ -440,8 +440,8 @@ static void footer(jd_app *app, float sw, float sh)
     if (app->tab == 0 && !plat_touch()) {
         static const char *panes[] = {"Folders", "List", "Reader"};
         const char *pane = panes[app->pane % 3];
-        jd_text(ui, pane, x, y + 7, 13, JD_NORD8, 1);
-        x += jd_text_width(ui, pane, 13, 1) + 16;
+        jd_text(ui, pane, x, y + 7, 14, JD_NORD8, 1);
+        x += jd_text_width(ui, pane, 14, 1) + 16;
     }
     const char *chord = app->pending_g ? "g  (g top, i Inbox, s Sent, d Drafts, a Archive, t Trash, j Junk)"
                         : app->pending_d ? "d  (d again deletes)"
@@ -450,8 +450,8 @@ static void footer(jd_app *app, float sw, float sh)
                         : app->pending_f ? "f  (u unread, f flagged, a files, s sender, c clear)"
                                          : NULL;
     if (chord) {
-        jd_text(ui, chord, x, y + 7, 13, JD_NORD8, 1);
-        x += jd_text_width(ui, chord, 13, 1) + 16;
+        jd_text(ui, chord, x, y + 7, 14, JD_NORD8, 1);
+        x += jd_text_width(ui, chord, 14, 1) + 16;
     }
     int noting = app->notice[0] && GetTime() < app->notice_until;
     const char *line = app->error ? app->error : app->status ? app->status : noting ? app->notice : "Up to date";
@@ -466,9 +466,9 @@ static void footer(jd_app *app, float sw, float sh)
                       app->grouped ? (app->nrows == 1 ? "conversation" : "conversations") : (app->nrows == 1 ? "message" : "messages"));
         if (!app->query && f->unread) snprintf(counts + n, sizeof counts - (size_t)n, "  ·  %d unread", f->unread);
     }
-    float cw = jd_text_width(ui, counts, 13, 0);
-    jd_text_fit(ui, line, x + 22, y + 7, sw - x - 40 - cw - 24, 13, app->error ? JD_NORD13 : JD_NORD4, 0);
-    jd_text(ui, counts, sw - cw - 14, y + 7, 13, JD_MUTED, 0);
+    float cw = jd_text_width(ui, counts, 14, 0);
+    jd_text_fit(ui, line, x + 22, y + 7, sw - x - 40 - cw - 24, 14, app->error ? JD_NORD13 : JD_NORD4, 0);
+    jd_text(ui, counts, sw - cw - 14, y + 7, 14, JD_NORD4, 0);
 }
 
 static void tab_keys(jd_app *app)

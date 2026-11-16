@@ -162,6 +162,29 @@ static void on_header(void *data, jd_header *h)
     c->fresh[c->nfresh++] = id;
 }
 
+typedef struct {
+    jd_sync *s;
+    int64_t folder;
+    uint32_t uidvalidity;
+} refresh_ctx;
+
+/* a stale message's headers again, and its snippet and search text from the body already on disk */
+static void on_refresh(void *data, jd_header *h)
+{
+    refresh_ctx *c = data;
+    int64_t id = jd_message_refresh(c->s->store, c->folder, h);
+    if (!id) return;
+    char *path = jd_body_path(c->s->dir, c->folder, c->uidvalidity, h->uid);
+    size_t len;
+    char *raw = jd_read_file(path, &len);
+    if (raw) {
+        char *text = jd_mime_body_text(raw, len);
+        jd_message_set_body(c->s->store, id, text);
+        free(text), free(raw);
+    }
+    free(path);
+}
+
 static void on_flags(void *data, uint32_t uid, int flags, const char *keywords, uint64_t modseq)
 {
     fetch_ctx *c = data;
@@ -340,6 +363,25 @@ static int sync_folder(jd_sync *s, int64_t folder, const char *name)
         }
         if (!nnew) emit(s, JD_EV_CHANGED, NULL, NULL, folder, 0);
         free(fresh), free(server), free(local);
+    }
+    if (r == JD_IMAP_OK && jd_folder_headers_stale(s->store, folder)) {
+        status(s, "Refreshing %s", name);
+        int nl;
+        uint32_t *local = jd_folder_uids(s->store, folder, &nl);
+        refresh_ctx rc = {s, folder, sel.uidvalidity};
+        for (int i = 0; i < nl && r == JD_IMAP_OK && !quitting(s); i += HEADER_BATCH) {
+            int k = nl - i < HEADER_BATCH ? nl - i : HEADER_BATCH;
+            jd_store_begin(s->store);
+            r = jd_imap_fetch_headers(s->imap, local + i, k, on_refresh, &rc);
+            jd_store_commit(s->store);
+            emit(s, JD_EV_CHANGED, NULL, NULL, folder, 0);
+        }
+        if (r == JD_IMAP_OK && !quitting(s)) {
+            jd_store_begin(s->store);
+            jd_folder_headers_done(s->store, folder);
+            jd_store_commit(s->store);
+        }
+        free(local);
     }
     int flags_unchanged = jd_imap_condstore(s->imap) && st.highestmodseq && sel.highestmodseq == st.highestmodseq;
     if (r == JD_IMAP_OK && !flags_unchanged && st.uidvalidity) {

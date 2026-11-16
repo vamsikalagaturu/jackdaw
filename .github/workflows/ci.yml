@@ -54,7 +54,7 @@ jobs:
             ccache-linux-debug-
             ccache-release-
       - name: Build
-        run: platform/linux/build.sh debug
+        run: ccache --zero-stats && platform/linux/build.sh debug
       - name: Tests
         run: xvfb-run -a -s "-screen 0 1280x1024x24" ctest --test-dir ~/.cache/jackdaw/linux/build-debug --output-on-failure
       - name: Compiler cache use
@@ -63,8 +63,10 @@ jobs:
   android:
     runs-on: ubuntu-24.04
     env:
-      # the runner points ANDROID_NDK at its own NDK; the build is pinned to this one
-      ANDROID_NDK: /usr/local/lib/android/sdk/ndk/28.2.13676358
+      # the runner's SDK is root-owned, so a cache restored into it fails and the NDK was downloaded every run;
+      # the pinned packages live in a folder of the runner's own instead
+      ANDROID_HOME: /home/runner/android-sdk
+      ANDROID_NDK: /home/runner/android-sdk/ndk/28.2.13676358
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -75,16 +77,14 @@ jobs:
         id: sdk
         uses: actions/cache@v4
         with:
-          path: |
-            /usr/local/lib/android/sdk/ndk/28.2.13676358
-            /usr/local/lib/android/sdk/build-tools/36.1.0
-            /usr/local/lib/android/sdk/platforms/android-36.1
-          key: android-sdk-ndk28.2.13676358-bt36.1.0-p36.1
+          path: /home/runner/android-sdk
+          key: android-sdk-home-ndk28.2.13676358-bt36.1.0-p36.1
       - name: SDK packages
         if: steps.sdk.outputs.cache-hit != 'true'
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;28.2.13676358" "build-tools;36.1.0" "platforms;android-36.1" >/dev/null
+          SM=/usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager
+          yes | "$SM" --sdk_root="$ANDROID_HOME" --licenses >/dev/null
+          "$SM" --sdk_root="$ANDROID_HOME" "ndk;28.2.13676358" "build-tools;36.1.0" "platforms;android-36.1" >/dev/null
       - name: Packages
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ninja-build autoconf automake libtool ccache
       - name: Cache third-party builds
@@ -106,7 +106,7 @@ jobs:
             ccache-android-
             ccache-release-
       - name: Build
-        run: platform/android/build.sh
+        run: ccache --zero-stats && platform/android/build.sh
       - name: Compiler cache use
         run: ccache --show-stats | head -8
       - uses: actions/upload-artifact@v4

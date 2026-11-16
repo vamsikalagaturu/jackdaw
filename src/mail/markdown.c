@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "core/util.h"
 
@@ -270,9 +271,8 @@ static void blocks(jd_buf *b, line *ls, int n)
     }
 }
 
-char *jd_markdown_html(const char *text)
+static void markdown_blocks(jd_buf *b, const char *text)
 {
-    if (!text) text = "";
     int n = 0, cap = 64;
     line *ls = jd_alloc(sizeof *ls * (size_t)cap);
     for (const char *p = text;;) {
@@ -284,12 +284,54 @@ char *jd_markdown_html(const char *text)
         if (!nl) break;
         p = nl + 1;
     }
-    jd_buf b = {0};
-    jd_buf_adds(&b, "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"></head>\n"
-                    "<body style=\"font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:14px;"
-                    "line-height:1.5\">\n");
-    blocks(&b, ls, n);
-    jd_buf_adds(&b, "</body></html>\n");
+    blocks(b, ls, n);
     free(ls);
+}
+
+static const char *doc_head = "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"></head>\n"
+                              "<body style=\"font-family:-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;"
+                              "font-size:14px;line-height:1.5\">\n";
+
+char *jd_markdown_html(const char *text)
+{
+    jd_buf b = {0};
+    jd_buf_adds(&b, doc_head);
+    markdown_blocks(&b, text ? text : "");
+    jd_buf_adds(&b, "</body></html>\n");
+    return b.s;
+}
+
+/* where s holds tag (as "<body"), case aside; NULL when it does not */
+static const char *find_tag(const char *s, const char *tag)
+{
+    size_t n = strlen(tag);
+    for (; *s; s++)
+        if (strncasecmp(s, tag, n) == 0 && (s[n] == '>' || s[n] == ' ' || s[n] == '\t' || s[n] == '\n' || s[n] == '\r'))
+            return s;
+    return NULL;
+}
+
+char *jd_markdown_reply_html(const char *mine, int markdown, const char *attribution, const char *quoted)
+{
+    jd_buf b = {0};
+    jd_buf_adds(&b, doc_head);
+    if (markdown) markdown_blocks(&b, mine ? mine : "");
+    else {
+        jd_buf_adds(&b, "<div style=\"white-space:pre-wrap\">");
+        escape(&b, mine ? mine : "", (int)strlen(mine ? mine : ""));
+        jd_buf_adds(&b, "</div>\n");
+    }
+    jd_buf_adds(&b, "<p>");
+    escape(&b, attribution, (int)strlen(attribution));
+    /* type="cite" is how Thunderbird and Apple Mail mark a quoted message; the bar is for readers that ignore it */
+    jd_buf_adds(&b, "</p>\n<blockquote type=\"cite\" style=\"margin:0 0 0 .8ex;border-left:2px solid #ccc;"
+                    "padding-left:1ex\">\n");
+    const char *from = find_tag(quoted, "<body"), *to = NULL;
+    if (from && (from = strchr(from, '>'))) {
+        from++;
+        for (const char *p = from; (p = find_tag(p, "</body")); p++) to = p;
+    } else from = quoted;
+    jd_buf_add(&b, from, to ? (size_t)(to - from) : strlen(from));
+    jd_buf_adds(&b, "\n</blockquote>\n</body></html>\n");
     return b.s;
 }

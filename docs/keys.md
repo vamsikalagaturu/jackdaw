@@ -1,7 +1,9 @@
 # Keys
 
 `?` in the app shows these keys; start typing to find one. On Android a tap works like a click and a long press
-opens the menu; the vim-style modes are left out.
+opens the menu; the vim-style modes are left out. In a message a long press on text selects the word: drag its
+handles to change the selection, and the bar above it copies, selects all, shares or (⋮) hands it to apps such as
+Translate.
 
 | Where | Keys |
 |---|---|
@@ -12,8 +14,8 @@ opens the menu; the vim-style modes are left out.
 | List | `x` / `Shift+j` `Shift+k` / `Ctrl+A` select, `t` conversations/messages, `fu` `ff` `fa` `fs` `fc` filters (unread, flagged, attachments, sender, clear) |
 | Search | `/` or `Ctrl+K` search; operators become pills once followed by a space (`in:<folder>` is there from the start: remove it to search every folder), `Backspace` at the start takes the last pill back, the quick filter chips are pills too, `Esc` leave, `Shift+S` also search the server, `Shift+M` make a rule from the search |
 | Folders | `Space` collapse, `a` new, `Shift+R` rename, `Shift+D` delete |
-| Reader | `j` `k` `Space` scroll, `o` expand all, `Shift+P` plain text / HTML, `Shift+L` light / dark mail page (follows the theme until flipped), `v` a caret to move (`v` again starts selecting, `y` copies, `Esc` steps back), drag to select and `Ctrl+C`, `Shift+A` save attachments (several as one .zip), `Ctrl+S` save as .eml, `Ctrl+P` print; a click on an attachment opens it, its download icon saves it |
-| Compose | `Ctrl+Enter` send, `Ctrl+S` save draft, `Ctrl+Shift+A` attach (or drop files), `Ctrl+Shift+C` Cc/Bcc |
+| Reader | `j` `k` `Space` scroll, `o` expand all, `Shift+P` plain text / HTML, `Shift+L` light / dark mail page (follows the theme until flipped), `v` a caret to move (`v` again starts selecting, `y` copies, `Esc` steps back), drag to select and `Ctrl+C`, `Shift+A` save attachments (several as one .zip), `Ctrl+S` save as .eml, `Ctrl+P` print; a click on an attachment opens it, its download icon saves it; each open message has its own reply, reply all, forward, read, flag and delete icons and a ⋮ menu (archive, move, copy, open in a tab, save, print) |
+| Compose | `Ctrl+Enter` send, `Ctrl+S` save draft, `Ctrl+Shift+A` attach (or drop files), `Ctrl+Shift+C` Cc/Bcc, `Ctrl+Shift+Q` quote an HTML original as `> ` text (the default, to answer line by line) or as its own HTML (with its images); Discard throws the message and its saved draft away |
 | Rules | `Ctrl+Shift+L` list rules, `Ctrl+Shift+F` server filters (Sieve) |
 
 ## Search operators

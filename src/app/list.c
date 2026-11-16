@@ -263,7 +263,8 @@ void pending_settled(jd_app *app)
     if (app->pending.ids && app->pending.due < 0) pending_clear(app);
 }
 
-static void schedule(jd_app *app, int64_t *ids, int n, const char *to, const char *verb)
+/* single: ids is one message of a conversation (a reader card), not the list's selection */
+static void schedule(jd_app *app, int64_t *ids, int n, const char *to, const char *verb, int single)
 {
     if (!n || !app->sync) {
         free(ids);
@@ -271,10 +272,10 @@ static void schedule(jd_app *app, int64_t *ids, int n, const char *to, const cha
     }
     pending_tick(app, 1);
     pending_clear(app);
-    int rows = selected_rows(app);
+    int rows = single ? 1 : selected_rows(app);
     app->pending = (jd_pending){.ids = ids, .n = n, .to = jd_strdup(to), .due = GetTime() + UNDO_SECONDS};
     snprintf(app->pending.label, sizeof app->pending.label, "%s %d %s", verb, rows,
-             app->grouped ? (rows == 1 ? "conversation" : "conversations") : (rows == 1 ? "message" : "messages"));
+             app->grouped && !single ? (rows == 1 ? "conversation" : "conversations") : (rows == 1 ? "message" : "messages"));
     clear_picks(app);
     list_reload(app);
     conv_refresh(app, preview(app));
@@ -299,10 +300,8 @@ int list_select_conv(jd_app *app, const jd_conv *c)
     return 0;
 }
 
-void act_move_to(jd_app *app, const char *folder, int copy)
+void act_move_ids(jd_app *app, int64_t *ids, int n, const char *folder, int copy, int single)
 {
-    int n;
-    int64_t *ids = selection_ids(app, &n);
     if (copy) {
         if (app->sync && n) jd_sync_move(app->sync, ids, n, folder, 1);
         free(ids);
@@ -311,30 +310,33 @@ void act_move_to(jd_app *app, const char *folder, int copy)
     }
     char verb[200];
     snprintf(verb, sizeof verb, "Moved to %s:", folder);
-    schedule(app, ids, n, folder, verb);
+    schedule(app, ids, n, folder, verb, single);
 }
 
-void act_archive(jd_app *app)
+void act_move_to(jd_app *app, const char *folder, int copy)
+{
+    int n;
+    int64_t *ids = selection_ids(app, &n);
+    act_move_ids(app, ids, n, folder, copy, 0);
+}
+
+static void archive_ids(jd_app *app, int64_t *ids, int n, int single)
 {
     const jd_folder_row *archive = special(app, "Archive");
     if (!archive) {
+        free(ids);
         free(app->error);
         app->error = jd_strdup("The server has no Archive folder.");
         return;
     }
-    int n;
-    int64_t *ids = selection_ids(app, &n);
-    schedule(app, ids, n, archive->name, "Archived");
+    schedule(app, ids, n, archive->name, "Archived", single);
 }
 
 /* to Trash; inside Trash (or without one) for good, after asking */
-void act_delete(jd_app *app)
+static void delete_ids(jd_app *app, int64_t *ids, int n, int64_t folder, int single)
 {
     const jd_folder_row *trash = special(app, "Trash");
-    int n;
-    int64_t *ids = selection_ids(app, &n);
-    int in_trash = trash && !app->query && current_folder(app) == trash->id;
-    if (!trash || in_trash) {
+    if (!trash || folder == trash->id) {
         char *title = jd_printf("Delete %d message%s for good?", n, n == 1 ? "" : "s");
         dialog_open(app, DLG_CONFIRM, ACT_DESTROY, title, NULL);
         free(title);
@@ -342,7 +344,40 @@ void act_delete(jd_app *app)
         app->dialog.nids = n;
         return;
     }
-    schedule(app, ids, n, trash->name, "Deleted");
+    schedule(app, ids, n, trash->name, "Deleted", single);
+}
+
+void act_archive(jd_app *app)
+{
+    int n;
+    int64_t *ids = selection_ids(app, &n);
+    archive_ids(app, ids, n, 0);
+}
+
+void act_delete(jd_app *app)
+{
+    int n;
+    int64_t *ids = selection_ids(app, &n);
+    delete_ids(app, ids, n, app->query ? 0 : current_folder(app), 0);
+}
+
+static int64_t *one_id(int64_t id)
+{
+    int64_t *ids = jd_alloc(sizeof *ids);
+    ids[0] = id;
+    return ids;
+}
+
+void message_archive(jd_app *app, int64_t id) { archive_ids(app, one_id(id), 1, 1); }
+
+void message_delete(jd_app *app, int64_t id, int64_t folder) { delete_ids(app, one_id(id), 1, folder, 1); }
+
+/* the folder picker, the move or copy then for this one message (dialog.ids) */
+void message_move_ask(jd_app *app, int64_t id, int copy)
+{
+    dialog_open(app, DLG_PICK_FOLDER, copy ? ACT_COPY : ACT_MOVE, copy ? "Copy to" : "Move to", NULL);
+    app->dialog.ids = one_id(id);
+    app->dialog.nids = 1;
 }
 
 static int selection_any(jd_app *app, int unread)
@@ -1264,26 +1299,25 @@ void list_draw(jd_app *app, Rectangle r)
     y += 44;
 
     const char *title = app->query ? "Search results" : app->nfolders ? folder_label(&app->folders[app->folder]) : "";
-    jd_text_fit(ui, title, x, y, w - 236, 20, JD_NORD6, 1);
+    jd_text_fit(ui, title, x, y, w - 120, 20, JD_NORD6, 1);
     /* view toggles: conversations or messages, and where the reading pane goes */
     static const char *pane_icons[] = {"panel-right", "panel-bottom", "rows-2"};
     static const char *pane_tips[] = {"Reading pane: right (p)", "Reading pane: bottom (p)", "Reading pane: off (p)"};
     struct {
-        const char *icon, *label;
-    } toggles[] = {{app->grouped ? "layout-grid" : "list", app->grouped ? "Conversations" : "Messages"},
-                   {pane_icons[app->prefs.reader_pos % 3], NULL}};
+        const char *icon, *tip;
+    } toggles[] = {{app->grouped ? "layout-grid" : "list", app->grouped ? "Showing conversations (t)" : "Showing messages (t)"},
+                   {pane_icons[app->prefs.reader_pos % 3], pane_tips[app->prefs.reader_pos % 3]}};
     float tx2 = x + w;
     /* a phone has no room for a reading pane: no toggle for it */
     for (int k = plat_touch() ? 0 : 1; k >= 0; k--) {
-        float bw = toggles[k].label ? jd_text_width(ui, toggles[k].label, 13, 1) + 38 : 30;
+        float bw = 30;
         tx2 -= bw;
         Rectangle b = {tx2, y - 2, bw, 26};
         int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind && !app->menu.open && !under_hints;
         if (hover) DrawRectangleRounded(b, 0.4f, 6, JD_NORD2);
         jd_icon(toggles[k].icon, b.x + 8, y + 3, 14, hover ? JD_NORD8 : JD_NORD4);
-        if (toggles[k].label) jd_text(ui, toggles[k].label, b.x + 28, y + 3, 13, JD_NORD4, 1);
-        if (hover && !toggles[k].label) {
-            const char *tip = pane_tips[app->prefs.reader_pos % 3];
+        if (hover && !app->ui.touch) {
+            const char *tip = toggles[k].tip;
             jd_tooltip(tip, b.x + b.width - (jd_text_width(ui, tip, 12, 0) + 16), y + 26);
         }
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
