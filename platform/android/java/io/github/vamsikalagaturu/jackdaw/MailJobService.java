@@ -38,6 +38,8 @@ public class MailJobService extends JobService {
     @Override
     public boolean onStartJob(JobParameters params) {
         if (JackdawActivity.running || PushService.running) return false;
+        /* push died with its process; its own first sync replaces this check */
+        if (PushService.wanted(this) && PushService.set(this, true)) return false;
         worker = new Thread(() -> {
             try {
                 System.loadLibrary("jackdaw");
