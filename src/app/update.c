@@ -71,14 +71,21 @@ static char *installed_program(void)
 #ifdef __ANDROID__
     return NULL;
 #else
-    char self[4096];
-    ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
-    const char *home = getenv("HOME");
-    if (n <= 0 || !home) return NULL;
-    self[n] = 0;
-    char *want = jd_printf("%s/.local/bin/jackdaw", home);
-    if (strcmp(self, want)) free(want), want = NULL;
-    return want;
+    /* resolved once: after the update is renamed over it, /proc/self/exe reads "... (deleted)" (proc(5)) */
+    static int resolved;
+    static char *installed;
+    if (!resolved) {
+        resolved = 1;
+        char self[4096];
+        ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+        const char *home = getenv("HOME");
+        if (n > 0 && home) {
+            self[n] = 0;
+            installed = jd_printf("%s/.local/bin/jackdaw", home);
+            if (strcmp(self, installed)) free(installed), installed = NULL;
+        }
+    }
+    return installed ? jd_strdup(installed) : NULL;
 #endif
 }
 
@@ -117,7 +124,8 @@ static void finish_check(jd_app *app)
         jd_release_free(&U.rel);
         U.rel = U.found;
         U.found = (jd_release){0};
-        U.dismissed = 0;
+        /* a check from Settings is answered there (update_action), not in the list */
+        U.dismissed = U.manual;
         snprintf(U.status, sizeof U.status, "jackdaw %s is available.", U.rel.tag + (U.rel.tag[0] == 'v'));
     } else {
         snprintf(U.status, sizeof U.status, "jackdaw %s is the latest.", jd_version);
@@ -156,6 +164,7 @@ void update_tick(jd_app *app)
 {
     if (!U.started) {
         U.started = 1;
+        free(installed_program());
         if (updatable() && app->prefs.update_check && !checked_lately()) update_check(app, 0);
     }
     if (U.state == IDLE || !atomic_load(&U.done)) return;
@@ -201,11 +210,37 @@ static void restart(jd_app *app)
 }
 
 const char *update_status(void) { return U.status; }
-int update_busy(void) { return U.state != IDLE; }
+int update_checking(void) { return U.state == CHECKING; }
+
+static const char *go_label(void)
+{
+    char *prog = installed_program();
+    const char *go = U.installed ? "Restart" : (plat_touch() || prog) ? "Update" : "Open";
+    free(prog);
+    return go;
+}
+
+static void go(jd_app *app) { U.installed ? restart(app) : update_now(app); }
+
+float update_action(jd_app *app, float x, float y, float w)
+{
+    if (!U.rel.tag) return 0;
+    jd_ui *ui = &app->ui;
+    if (U.state == DOWNLOADING) {
+        char line[96];
+        snprintf(line, sizeof line, "Downloading... %d%%", (int)(U.progress * 100));
+        jd_text_fit(ui, line, x, y, w, 14, JD_NORD6, 0);
+        DrawRectangleRounded((Rectangle){x, y + 26, w < 300 ? w : 300, 4}, 1, 4, JD_NORD1);
+        DrawRectangleRounded((Rectangle){x, y + 26, (w < 300 ? w : 300) * U.progress, 4}, 1, 4, JD_NORD8);
+        return 46;
+    }
+    if (jd_button(ui, go_label(), (Rectangle){x, y, 200, 34}, 1)) go(app);
+    return 46;
+}
 
 float update_bar(jd_app *app, float x, float y, float w)
 {
-    if (!U.rel.tag || (U.dismissed && U.state != DOWNLOADING)) return 0;
+    if (!U.rel.tag || U.dismissed) return 0;
     jd_ui *ui = &app->ui;
     const float h = 40;
     const char *v = U.rel.tag + (U.rel.tag[0] == 'v');
@@ -221,12 +256,10 @@ float update_bar(jd_app *app, float x, float y, float w)
         return h + 6;
     }
     snprintf(line, sizeof line, U.installed ? "jackdaw %s is installed" : "jackdaw %s is available", v);
-    char *prog = installed_program();
-    const char *go = U.installed ? "Restart" : (plat_touch() || prog) ? "Update" : "Open";
-    free(prog);
-    float gw = jd_text_width(ui, go, 14, 1) + 24, lw = jd_text_width(ui, "Later", 14, 1) + 24;
+    const char *label = go_label();
+    float gw = jd_text_width(ui, label, 14, 1) + 24, lw = jd_text_width(ui, "Later", 14, 1) + 24;
     jd_text_fit(ui, line, x + 38, y + 12, w - 60 - gw - lw, 14, JD_NORD6, 1);
-    if (jd_button(ui, go, (Rectangle){x + w - 4 - gw, y + 4, gw, h - 8}, 1)) U.installed ? restart(app) : update_now(app);
+    if (jd_button(ui, label, (Rectangle){x + w - 4 - gw, y + 4, gw, h - 8}, 1)) go(app);
     if (!U.installed && jd_button(ui, "Later", (Rectangle){x + w - 8 - gw - lw, y + 4, lw, h - 8}, 0)) U.dismissed = 1;
     return h + 6;
 }

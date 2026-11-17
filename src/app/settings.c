@@ -523,11 +523,12 @@ static void about(jd_app *app, float x, float y, float w)
         float cx = label(app, x, &y, "Check for updates automatically", "Once a day, from the latest GitHub release");
         if (jd_switch(&app->ui, cx, y + 10, p->update_check)) p->update_check = !p->update_check, changed(app);
         y = divider(x, y + row_h, w);
-        if (jd_button(&app->ui, update_busy() ? "Checking..." : "Check for updates", (Rectangle){x, y, 200, 34}, 0) &&
-            !update_busy())
+        if (jd_button(&app->ui, update_checking() ? "Checking..." : "Check for updates", (Rectangle){x, y, 200, 34}, 0) &&
+            !update_checking())
             update_check(app, 1);
         y += 46;
-        if (update_status()[0]) y = para(app, update_status(), x, y, w, 14, JD_NORD4);
+        if (update_status()[0]) y = para(app, update_status(), x, y, w, 14, JD_NORD4) + 12;
+        y += update_action(app, x, y, w);
     } else {
         y = para(app, "A development build: it does not update itself.", x, y, w, 14, JD_MUTED);
     }
