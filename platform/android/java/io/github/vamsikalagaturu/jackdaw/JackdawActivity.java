@@ -101,7 +101,26 @@ public class JackdawActivity extends NativeActivity {
     /* plat_push; on is "1" or "0" */
     public String setPush(String on) {
         PushService.set(this, "1".equals(on));
+        if ("1".equals(on)) askBatteryExemption();
         return "1";
+    }
+
+    private static final String PREF_ASKED_BATTERY = "asked_battery";
+
+    /* Once: the exemption lets the 15-minute job restart push after Android killed the process
+       (background foreground-service starts are refused otherwise). */
+    private void askBatteryExemption() {
+        android.content.SharedPreferences prefs = getSharedPreferences(PushService.PREFS, MODE_PRIVATE);
+        android.os.PowerManager pm = getSystemService(android.os.PowerManager.class);
+        if (pm == null || pm.isIgnoringBatteryOptimizations(getPackageName()) || prefs.getBoolean(PREF_ASKED_BATTERY, false))
+            return;
+        prefs.edit().putBoolean(PREF_ASKED_BATTERY, true).apply();
+        try {
+            startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                     Uri.parse("package:" + getPackageName())));
+        } catch (ActivityNotFoundException e) {
+            /* push still runs while the process lives */
+        }
     }
 
     /* NativeActivity drops intents delivered to a running instance (launchMode singleTask) */

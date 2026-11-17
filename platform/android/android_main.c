@@ -42,6 +42,10 @@
 
 struct android_app *GetAndroidApp(void); /* rcore_android.c; not in raylib.h */
 
+/* rcore_android.c's __wrap_fopen calls it; without --wrap=fopen nothing calls that wrapper (CMakeLists.txt) */
+FILE *__real_fopen(const char *name, const char *mode);
+FILE *__real_fopen(const char *name, const char *mode) { return fopen(name, mode); }
+
 /* raylib's AutomationEventType, which rcore.c keeps to itself */
 enum { EV_KEY_UP = 1, EV_KEY_DOWN = 2, EV_MOUSE_POSITION = 7, EV_TOUCH_UP = 14, EV_TOUCH_DOWN = 15 };
 

@@ -12,8 +12,9 @@ set_target_properties(raylib PROPERTIES C_STANDARD 99 C_EXTENSIONS ON)
 target_compile_definitions(raylib PUBLIC PLATFORM_ANDROID GRAPHICS_API_OPENGL_ES2)
 target_include_directories(raylib PUBLIC ${RAYLIB_SRC} ${ANDROID_NDK}/sources/android/native_app_glue)
 target_compile_options(raylib PRIVATE -w -fno-strict-aliasing)
-# rcore_android.c defines __wrap_fopen (APK assets) on top of __real_fopen
-target_link_options(raylib PUBLIC -Wl,--wrap=fopen)
+# No -Wl,--wrap=fopen: raylib's wrapper reads its activity, which a process started only for PushService or
+# MailJobService lacks, so every fopen crashed there. The app ships no APK assets; android_main.c defines the
+# __real_fopen the unused wrapper still references.
 target_link_libraries(raylib PUBLIC log android EGL GLESv2 OpenSLES m)
 
 # the shared sources (jdcore, jdapp with platform/android/android_main.c); no programs or tests

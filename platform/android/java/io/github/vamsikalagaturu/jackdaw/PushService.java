@@ -23,14 +23,16 @@ public class PushService extends Service {
     private Thread worker;
 
     /* kept where the boot receiver can read it without the native side */
-    static void set(Context ctx, boolean on) {
+    /* false when Android refuses the start: from the background only an app exempt from battery optimisation may */
+    static boolean set(Context ctx, boolean on) {
         ctx.getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(PREF_PUSH, on).apply();
         Intent i = new Intent(ctx, PushService.class);
         try {
             if (on) ctx.startForegroundService(i);
             else ctx.stopService(i);
+            return true;
         } catch (RuntimeException e) {
-            /* not allowed to start now (in the background): the 15-minute check covers it */
+            return false;
         }
     }
 
@@ -50,10 +52,16 @@ public class PushService extends Service {
         context = getApplicationContext();
         Notifier.channel(this);
         Notification status = Notifier.status(this);
-        if (android.os.Build.VERSION.SDK_INT >= 34)
-            startForeground(STATUS_ID, status, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        else
-            startForeground(STATUS_ID, status);
+        /* a START_STICKY restart after the process was killed counts as a background start */
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 34)
+                startForeground(STATUS_ID, status, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            else
+                startForeground(STATUS_ID, status);
+        } catch (RuntimeException e) {
+            stopSelf();
+            return;
+        }
         running = true;
         worker = new Thread(() -> {
             try {

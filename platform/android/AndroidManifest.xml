@@ -12,6 +12,8 @@
     <!-- push: a foreground service keeping IMAP IDLE open (specialUse, as no other type fits a mail connection) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- asks once to be exempt from battery optimisation, so push can restart after its process was killed -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- updates: the downloaded release's APK goes to Android's installer -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- apps acting on selected text (Translate, ...): Android 11 hides other apps unless they are queried for -->
