@@ -431,7 +431,8 @@ jd_mode current_mode(jd_app *app)
     jd_tab *t = &app->tabs[app->tab];
     if (app->searching || (app->dialog.kind == DLG_PROMPT || app->dialog.kind == DLG_PICK_FOLDER) ||
         (t->kind == TAB_COMPOSE && compose_inserting(t->compose)) || (t->kind == TAB_SETTINGS && app->settings_focus >= 0) ||
-        (t->kind == TAB_FILTERS && app->filters.state == 1) || app->show_form)
+        (t->kind == TAB_FILTERS && app->filters.state == 1) || (t->kind == TAB_CALENDAR && calendar_typing()) ||
+        app->show_form)
         return MODE_INSERT;
     return app->visual || reader_visual() || (t->kind == TAB_COMPOSE && compose_visual(t->compose)) ? MODE_VISUAL
                                                                                                    : MODE_NORMAL;
@@ -461,7 +462,7 @@ static void footer(jd_app *app, float sw, float sh)
         jd_text(ui, pane, x, y + 7, 14, JD_NORD8, 1);
         x += jd_text_width(ui, pane, 14, 1) + 16;
     }
-    const char *chord = app->pending_g ? "g  (g top, i Inbox, s Sent, d Drafts, a Archive, t Trash, j Junk)"
+    const char *chord = app->pending_g ? "g  (g top, i Inbox, s Sent, d Drafts, a Archive, t Trash, j Junk, c Calendar)"
                         : app->pending_d ? "d  (d again deletes)"
                         : reader_caret() ? "Caret: h j k l w b move, v starts selecting, Esc leaves"
                         : reader_visual() ? "y copies, v or Esc stops selecting"
@@ -472,9 +473,13 @@ static void footer(jd_app *app, float sw, float sh)
         x += jd_text_width(ui, chord, 14, 1) + 16;
     }
     int noting = app->notice[0] && GetTime() < app->notice_until;
-    const char *line = app->error ? app->error : app->status ? app->status : noting ? app->notice : "Up to date";
-    jd_icon(app->error ? "triangle-alert" : app->status ? "refresh-cw" : noting ? "check" : "circle-check", x, y + 6, 15,
-            app->error ? JD_NORD13 : noting ? JD_NORD8 : JD_NORD4);
+    /* the calendar's tab shows its own worker */
+    int cal = app->tabs[app->tab].kind == TAB_CALENDAR;
+    const char *error = cal ? calendar_error() : app->error, *status = cal ? calendar_status() : app->status;
+    const char *line = noting && cal ? app->notice : error ? error : status ? status : noting ? app->notice
+                       : cal ? (app->calsync ? "Calendars up to date" : "No calendar connected") : "Up to date";
+    jd_icon(error && !(noting && cal) ? "triangle-alert" : status ? "refresh-cw" : noting ? "check" : "circle-check", x, y + 6, 15,
+            error && !(noting && cal) ? JD_NORD13 : noting ? JD_NORD8 : JD_NORD4);
     char counts[200] = "";
     if (app->tab == 0 && app->nfolders) {
         const jd_folder_row *f = &app->folders[app->folder];
@@ -485,7 +490,7 @@ static void footer(jd_app *app, float sw, float sh)
         if (!app->query && f->unread) snprintf(counts + n, sizeof counts - (size_t)n, "  ·  %d unread", f->unread);
     }
     float cw = jd_text_width(ui, counts, 14, 0);
-    jd_text_fit(ui, line, x + 22, y + 7, sw - x - 40 - cw - 24, 14, app->error ? JD_NORD13 : JD_NORD4, 0);
+    jd_text_fit(ui, line, x + 22, y + 7, sw - x - 40 - cw - 24, 14, line == error ? JD_NORD13 : JD_NORD4, 0);
     jd_text(ui, counts, sw - cw - 14, y + 7, 14, JD_NORD4, 0);
 }
 
@@ -502,6 +507,7 @@ static void tab_keys(jd_app *app)
         else if (IsKeyPressed(KEY_F) && shift) compose_open(app, COMPOSE_FORWARD, last);
     } else if (t->kind == TAB_FILTERS) filters_keys(app);
     else if (t->kind == TAB_SETTINGS) settings_keys(app);
+    else if (t->kind == TAB_CALENDAR) calendar_keys(app);
     else compose_keys(app, t->compose);
 }
 
@@ -571,7 +577,7 @@ void mail_frame(jd_app *app)
     jd_tab *t = &app->tabs[app->tab];
     /* a phone has no Esc to close what is open: a back bar does it, to the folder it came from */
     Rectangle actions = {0};
-    if (plat_touch() && (t->kind == TAB_CONV || t->kind == TAB_COMPOSE || t->kind == TAB_FILTERS)) {
+    if (plat_touch() && (t->kind == TAB_CONV || t->kind == TAB_COMPOSE || t->kind == TAB_FILTERS || t->kind == TAB_CALENDAR)) {
         const char *to = app->nfolders ? folder_label(&app->folders[app->folder]) : "Back";
         Rectangle back = {page.x, page.y, page.width, 44};
         int hover = CheckCollisionPointRec(GetMousePosition(), back) && !app->dialog.kind && !app->menu.open;
@@ -681,6 +687,7 @@ void mail_frame(jd_app *app)
     }
     else if (t->kind == TAB_FILTERS) filters_draw(app, page);
     else if (t->kind == TAB_SETTINGS) settings_draw(app, page);
+    else if (t->kind == TAB_CALENDAR) calendar_draw(app, page);
     else compose_draw(app, t->compose, page);
 
     if (drawer_k > 0 && drawer_shot.id) {

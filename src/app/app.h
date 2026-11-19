@@ -15,7 +15,7 @@ enum { PANE_FOLDERS, PANE_LIST, PANE_READER };
 typedef enum { DLG_NONE, DLG_PROMPT, DLG_CONFIRM, DLG_PICK_FOLDER, DLG_RULES } dialog_kind;
 typedef enum {
     ACT_NONE, ACT_CREATE_FOLDER, ACT_RENAME_FOLDER, ACT_DELETE_FOLDER, ACT_MOVE, ACT_COPY, ACT_DESTROY, ACT_ADD_RULE, ACT_LOGOUT,
-    ACT_DISCARD, ACT_SEND_LATER
+    ACT_DISCARD, ACT_SEND_LATER, ACT_DELETE_EVENT
 } action;
 
 typedef struct {
@@ -38,6 +38,7 @@ typedef struct {
     int expanded;
     jd_attachment *files;
     int nfiles;
+    char *invite;      /* the iCalendar object of an invitation or an answer to one (RFC 6047), NULL for other mail */
     Texture2D *thumbs; /* per file: a preview for images, id 0 for the rest */
     int quote_at;      /* where the trailing quoted history starts in text, -1 when there is none */
     int show_quote;
@@ -67,7 +68,7 @@ typedef struct {
     int plain; /* show the plain text even where there is HTML */
 } jd_conv;
 
-typedef enum { TAB_MAIL, TAB_CONV, TAB_COMPOSE, TAB_FILTERS, TAB_SETTINGS } tab_kind;
+typedef enum { TAB_MAIL, TAB_CONV, TAB_COMPOSE, TAB_FILTERS, TAB_SETTINGS, TAB_CALENDAR } tab_kind;
 
 /* a move or delete that waits a few seconds before it goes to the server, so it can be undone */
 typedef struct {
@@ -114,6 +115,7 @@ typedef struct {
     char *password;
     char *dir;
     jd_sync *sync;
+    struct jd_calsync *calsync; /* the [calendar] worker, NULL when no calendar is set up or signed in */
     jd_store *view;
 
     jd_field fields[F_COUNT];
@@ -278,6 +280,8 @@ void menu_draw(jd_app *app);
 void help_draw(jd_app *app);
 
 void settings_open(jd_app *app);
+/* Settings, at its Calendar section */
+void settings_show_calendar(jd_app *app);
 void settings_keys(jd_app *app);
 void settings_draw(jd_app *app, Rectangle r);
 /* the theme, scale and layout of prefs, on screen now */
@@ -341,6 +345,31 @@ void compose_sent(jd_app *app, int64_t serial, const char *error);
 void compose_saved(jd_app *app, int64_t serial, const char *error);
 void compose_attach_paths(jd_app *app, struct jd_compose *c, char **paths, int n);
 void compose_set_to(struct jd_compose *c, const char *mailto);
+
+/* calendar.c: the [calendar] worker started (when set up and its secret is in the keystore) and stopped */
+void calendar_start(jd_app *app);
+void calendar_stop(jd_app *app);
+/* every frame: the worker's events, reminders due */
+void calendar_tick(jd_app *app);
+void calendar_open(jd_app *app);
+void calendar_keys(jd_app *app);
+void calendar_draw(jd_app *app, Rectangle r);
+/* the event editor has the keyboard */
+int calendar_typing(void);
+const char *calendar_title(void);
+/* the worker's status and last failure, for the footer while the calendar shows */
+const char *calendar_status(void);
+const char *calendar_error(void);
+void calendar_delete_confirmed(jd_app *app);
+/* a sent mail's outcome: 1 when it was the calendar's answer to an organizer */
+int calendar_sent(jd_app *app, int64_t serial, const char *error);
+/* the keystore entry of the calendar's password or Google sign-in */
+char *calendar_secret_key(jd_app *app);
+/* Settings' Calendar section; returns the y below it */
+float calendar_settings(jd_app *app, float x, float y, float w, int *focus);
+int calendar_settings_keys(jd_app *app);
+/* an invitation, update, cancellation or answer in a message, with Accept / Maybe / Decline; the y below it */
+float invite_card(jd_app *app, const char *ics, float x, float y, float w, Rectangle clip);
 
 void tabs_draw(jd_app *app, Rectangle r);
 int tabs_keys(jd_app *app);

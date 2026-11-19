@@ -79,7 +79,7 @@ void jd_prefs_load(jd_prefs *p)
 {
     *p = (jd_prefs){.conversations = 1, .scale = 100, .snippets = 1, .mark_read = 1, .notify = 1, .notify_focused = 1, .push = 1, .update_check = 1,
                     .prefetch_days = 30, .check_minutes = 5, .list_text = 15, .reader_text = 15,
-                    .attachment_list = 1, .markdown = 1};
+                    .attachment_list = 1, .markdown = 1, .cal_check_minutes = 15, .cal_reminders = 1};
     jd_toml *t = jd_toml_load(jd_settings_path(), NULL, 0);
     if (!t) return;
     p->attachment_list = jd_toml_bool(t, "compose", "attachment_list", 1);
@@ -117,6 +117,12 @@ void jd_prefs_load(jd_prefs *p)
     if (jd_toml_int(t, "view", "reader_text", &v) == 0 && v >= 8 && v <= 40) p->reader_text = (int)v;
     if (jd_toml_int(t, "sync", "prefetch_days", &v) == 0 && v >= 0 && v <= 3650) p->prefetch_days = (int)v;
     if (jd_toml_int(t, "sync", "check_minutes", &v) == 0 && v >= 1 && v <= 1440) p->check_minutes = (int)v;
+    const char *provider = jd_toml_str(t, "calendar", "provider");
+    p->cal_provider = jd_streq(provider, "caldav") ? 1 : jd_streq(provider, "google") ? 2 : 0;
+    p->cal_url = jd_strdup(jd_toml_str(t, "calendar", "url"));
+    p->cal_username = jd_strdup(jd_toml_str(t, "calendar", "username"));
+    if (jd_toml_int(t, "calendar", "check_minutes", &v) == 0 && v >= 1 && v <= 1440) p->cal_check_minutes = (int)v;
+    p->cal_reminders = jd_toml_bool(t, "calendar", "reminders", 1);
     p->signature_new = jd_strdup(jd_toml_str(t, "signature", "new"));
     p->signature_reply = jd_strdup(jd_toml_str(t, "signature", "reply"));
     int n = jd_toml_count(t, "rule");
@@ -164,6 +170,7 @@ void jd_prefs_free(jd_prefs *p)
 {
     for (int i = 0; i < p->nrules; i++) free(p->rules[i].match), free(p->rules[i].action);
     free(p->rules), free(p->signature_new), free(p->signature_reply), free(p->image_senders);
+    free(p->cal_url), free(p->cal_username);
     free(p->font_ui), free(p->font_list), free(p->font_reader), free(p->font_mono);
     for (int i = 0; i < 13; i++) free(p->theme_roles[i]);
     *p = (jd_prefs){0};
@@ -216,6 +223,15 @@ int jd_settings_save(const jd_account *a, const jd_prefs *p)
                 p->markdown ? "true" : "false");
     jd_buf_addf(&b, "\n[sync]\nprefetch_days = %d\ncheck_minutes = %d\n", p->prefetch_days,
                 p->check_minutes ? p->check_minutes : 5);
+    if (p->cal_provider) {
+        jd_buf_adds(&b, "\n# provider is caldav (url: the server, or a calendar's address) or google (username: the address).\n"
+                        "# The password or Google's sign-in is kept in the system keystore.\n[calendar]\n");
+        put(&b, "provider", p->cal_provider == 2 ? "google" : "caldav");
+        put(&b, "url", p->cal_url ? p->cal_url : "");
+        put(&b, "username", p->cal_username ? p->cal_username : "");
+        jd_buf_addf(&b, "check_minutes = %d\nreminders = %s\n", p->cal_check_minutes ? p->cal_check_minutes : 15,
+                    p->cal_reminders ? "true" : "false");
+    }
     jd_buf_adds(&b, "\n# Added below what you write: new to new messages, reply to replies and forwards.\n[signature]\n");
     put(&b, "new", p->signature_new ? p->signature_new : "");
     put(&b, "reply", p->signature_reply ? p->signature_reply : "");

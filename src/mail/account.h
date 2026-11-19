@@ -54,6 +54,11 @@ typedef struct {
     int prefetch_days;   /* [sync] prefetch_days, default 30; 0 downloads bodies only when opened */
     int check_minutes;   /* [sync] check_minutes, default 5: all folders; the Inbox waits in IDLE */
     char *signature_new, *signature_reply;      /* [signature] new, reply */
+    int cal_provider;    /* [calendar] provider = "caldav" (1) | "google" (2); absent: none (0) */
+    char *cal_url;       /* [calendar] url: where CalDAV discovery starts (a server, principal or calendar) */
+    char *cal_username;  /* [calendar] username: the CalDAV login, or the Google address */
+    int cal_check_minutes; /* [calendar] check_minutes, default 15 */
+    int cal_reminders;   /* [calendar] reminders: notifications for events' alarms, default true */
     jd_rule *rules;      /* [[rule]] */
     int nrules;
 } jd_prefs;

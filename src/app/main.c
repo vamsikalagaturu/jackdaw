@@ -39,6 +39,7 @@ void app_connect(jd_app *app)
         free(images);
         mail_reload(app);
         arm_scheduled(app);
+        calendar_start(app);
     }
     free(db);
 }
@@ -47,6 +48,7 @@ void app_connect(jd_app *app)
 void app_disconnect(jd_app *app)
 {
     while (app->ntabs > 1) tab_close(app, app->ntabs - 1);
+    calendar_stop(app);
     jd_sync_stop(app->sync);
     app->sync = NULL;
     jd_fetcher_stop(app->fetcher);
@@ -105,7 +107,7 @@ static void handle_events(jd_app *app)
             mail_server_results(app, ev.id, ev.ids, ev.nids);
             break;
         case JD_EV_SENT:
-            compose_sent(app, ev.id, ev.text);
+            if (!calendar_sent(app, ev.id, ev.text)) compose_sent(app, ev.id, ev.text);
             break;
         case JD_EV_SAVED:
             compose_saved(app, ev.id, ev.text);
@@ -176,6 +178,7 @@ int main(int argc, char **argv)
     while (!WindowShouldClose()) {
         plat_frame(current_mode(&app) == MODE_INSERT);
         handle_events(&app);
+        calendar_tick(&app);
         if (!app.show_form) update_tick(&app);
         char *url;
         int ok;

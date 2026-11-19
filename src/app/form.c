@@ -10,8 +10,13 @@
 void app_logout(jd_app *app)
 {
     char *address = jd_strdup(app->account.address), *dir = jd_strdup(app->dir);
+    char *calendar = calendar_secret_key(app);
     app_disconnect(app);
     if (address) plat_secret_delete(address);
+    /* the calendar was this account's too */
+    plat_secret_delete(calendar);
+    free(calendar);
+    app->prefs.cal_provider = 0;
     if (app->password) memset(app->password, 0, strlen(app->password));
     free(app->password), free(app->dir);
     app->password = app->dir = NULL;

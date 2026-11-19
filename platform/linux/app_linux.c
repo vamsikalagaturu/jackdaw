@@ -65,6 +65,11 @@ int plat_swipe(void) { return 0; }
 int plat_install_package(const char *path) { (void)path; return -1; }
 void plat_push(int on) { (void)on; }
 void plat_wake_at(int64_t t) { (void)t; }
+int plat_reminders(int n, const int64_t *at, const char *const *title, const char *const *text)
+{
+    (void)n, (void)at, (void)title, (void)text;
+    return 0;
+}
 float plat_drag_x(void) { return 0; }
 int plat_finger_scrolling(void) { return 0; }
 int plat_scroll(float *dx, float *dy) { (void)dx, (void)dy; return 0; }

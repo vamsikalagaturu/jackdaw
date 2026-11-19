@@ -39,6 +39,7 @@ static const char *title_of(jd_app *app, jd_tab *t)
     if (t->kind == TAB_COMPOSE) return compose_title(t->compose);
     if (t->kind == TAB_FILTERS) return "Server filters";
     if (t->kind == TAB_SETTINGS) return "Settings";
+    if (t->kind == TAB_CALENDAR) return calendar_title();
     const char *s = t->conv.n ? t->conv.reading[t->conv.n - 1].row.subject : NULL;
     return s && s[0] ? s : "(no subject)";
 }
@@ -102,7 +103,7 @@ void tabs_draw(jd_app *app, Rectangle r)
         int hover = CheckCollisionPointRec(GetMousePosition(), tab);
         if (i == app->tab) DrawRectangleRounded(tab, 0.25f, 6, JD_NORD0);
         else if (hover) DrawRectangleRounded(tab, 0.25f, 6, JD_NORD2);
-        static const char *icons[] = {"inbox", "mail", "pencil", "flag", "settings"};
+        static const char *icons[] = {"inbox", "mail", "pencil", "flag", "settings", "calendar"};
         const char *icon = icons[t->kind];
         jd_icon(icon, x + 10, r.y + 12, 14, i == app->tab ? JD_NORD8 : JD_NORD4);
         jd_text_fit(ui, title, x + 30, r.y + 12, w - (i ? 62 : 40), 13, i == app->tab ? JD_NORD6 : JD_NORD4, 1);

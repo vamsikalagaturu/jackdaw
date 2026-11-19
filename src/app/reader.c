@@ -97,7 +97,7 @@ static void free_thumbs(jd_reading *r)
 
 static void free_reading(jd_reading *r)
 {
-    free(r->text), free(r->line_starts);
+    free(r->text), free(r->line_starts), free(r->invite);
     free_thumbs(r);
     jd_attachments_free(r->files, r->nfiles);
     if (r->html) jd_html_free(r->html);
@@ -152,10 +152,11 @@ static int trailing_quote(const char *text)
 
 static void load_text(jd_app *app, jd_reading *r)
 {
-    free(r->text), free(r->line_starts);
+    free(r->text), free(r->line_starts), free(r->invite);
     free_thumbs(r);
     jd_attachments_free(r->files, r->nfiles);
     if (r->html) jd_html_free(r->html);
+    r->invite = NULL;
     r->text = NULL;
     r->line_starts = NULL;
     r->files = NULL;
@@ -168,6 +169,7 @@ static void load_text(jd_app *app, jd_reading *r)
     r->text = jd_mime_body_text(raw, len);
     r->quote_at = trailing_quote(r->text);
     r->files = jd_mime_attachments(raw, len, &r->nfiles);
+    r->invite = jd_mime_calendar(raw, len);
     r->thumbs = jd_alloc(sizeof *r->thumbs * (size_t)(r->nfiles + 1));
     for (int i = 0; i < r->nfiles; i++) {
         if (strncmp(r->files[i].type, "image/", 6) != 0) continue;
@@ -1919,6 +1921,7 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         y += 10;
         float x0 = x, w0 = w;
         x = ix, w = iw;
+        if (m->invite) y = invite_card(app, m->invite, x, y, w, r);
         y = draw_files(app, m, x, y, w, r);
         if (m->html && !c->plain) y = remote_images(app, m, x, y, w, r);
         if (m->html && !c->plain) {

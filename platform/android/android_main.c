@@ -262,6 +262,28 @@ void plat_wake_at(int64_t t)
     free(java("wakeAt", 1, at));
 }
 
+/* ReminderAlarm: the reminders as lines of "at\ttitle\ttext", tabs and newlines in the text made spaces */
+int plat_reminders(int n, const int64_t *at, const char *const *title, const char *const *text)
+{
+    jd_buf spec = {0};
+    for (int i = 0; i < n; i++) {
+        jd_buf_addf(&spec, "%lld\t", (long long)at[i]);
+        for (int k = 0; k < 2; k++) {
+            for (const char *c = k ? text[i] : title[i]; c && *c; c++) jd_buf_add(&spec, *c == '\t' || *c == '\n' ? " " : c, 1);
+            jd_buf_adds(&spec, k ? "\n" : "\t");
+        }
+    }
+    static char *was;
+    const char *now = spec.s ? spec.s : "";
+    if (!was || strcmp(was, now) != 0) {
+        free(java("setReminders", 1, now));
+        free(was);
+        was = jd_strdup(now);
+    }
+    jd_buf_free(&spec);
+    return 1;
+}
+
 /* The soonest scheduled draft's time, 0 when none. One already due, or one waiting in the outbox, was not sent by
    the check just made: tried again after sync.c's OUTBOX_RETRY. */
 static int64_t next_send(jd_store *view, const char *account_dir)

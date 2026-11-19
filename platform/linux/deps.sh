@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Fetches the sources pinned in platform/versions.sh into thirdparty/ and builds raylib (GLFW, Wayland and X11)
-# into $JD_LINUX_OUT (default ~/.cache/jackdaw/linux). build.sh sources this file first.
+# Fetches the sources pinned in platform/versions.sh into thirdparty/ and builds raylib (GLFW, Wayland and X11),
+# libetpan and libical into $JD_LINUX_OUT (default ~/.cache/jackdaw/linux). build.sh sources this file first.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -44,3 +44,8 @@ if [ ! -f "$LIBETPAN_OUT/lib/libetpan.a" ]; then
             --disable-db --disable-lockfile --enable-ipv6 CFLAGS="$SIZE_CFLAGS -DNDEBUG" >/dev/null &&
         make -j"$JOBS" >/dev/null && make install >/dev/null)
 fi
+
+step "libical $LIBICAL_VERSION (static)"
+command -v perl >/dev/null || { echo "missing: perl (libical generates sources with it)" >&2; exit 1; }
+LIBICAL_OUT=$ROOT/libical-$LIBICAL_VERSION-$BUILD_TAG
+[ -f "$LIBICAL_OUT/lib/libical.a" ] || build_libical "$LIBICAL_OUT" "$REPO"

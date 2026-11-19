@@ -10,7 +10,8 @@ public class BootReceiver extends BroadcastReceiver {
         String a = intent.getAction();
         if (!Intent.ACTION_BOOT_COMPLETED.equals(a) && !Intent.ACTION_MY_PACKAGE_REPLACED.equals(a)) return;
         if (PushService.wanted(ctx)) PushService.set(ctx, true);
-        /* alarms do not outlive a reboot: the check sets SendAlarm again */
+        /* alarms do not outlive a reboot: the check sets SendAlarm again, and the kept reminders are set again */
         MailJobService.sendNow(ctx);
+        ReminderAlarm.arm(ctx);
     }
 }

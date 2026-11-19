@@ -43,6 +43,9 @@ void plat_push(int on);
 /* Android: wakes a check at t (epoch seconds) to send a scheduled draft, 0 for none; nothing on a desktop, where
    the running worker keeps time itself */
 void plat_wake_at(int64_t t);
+/* Calendar reminders: the next ones, at[i] (epoch seconds) with title[i] and text[i]. Android sets them as alarms
+   that notify with the app closed and returns 1; a desktop returns 0, and the running app notifies itself. */
+int plat_reminders(int n, const int64_t *at, const char *const *title, const char *const *text);
 /* Android: hands a downloaded APK to the system's installer (the user confirms); -1 elsewhere */
 int plat_install_package(const char *path);
 void plat_notify_shutdown(void);

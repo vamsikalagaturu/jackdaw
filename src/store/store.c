@@ -181,6 +181,21 @@ jd_store *jd_store_open(const char *path, char *err, int errlen)
             exec(s, "CREATE TABLE account_ns(prefix TEXT NOT NULL, delim TEXT); PRAGMA user_version = 7;");
         exec(s, "COMMIT");
     }
+    if (run(prep(s, "PRAGMA user_version")) == 7) {
+        exec(s, "BEGIN IMMEDIATE");
+        if (run(prep(s, "PRAGMA user_version")) == 7)
+            exec(s, "CREATE TABLE calendars(id INTEGER PRIMARY KEY, href TEXT NOT NULL UNIQUE, name TEXT, color TEXT,"
+                    " sync_token TEXT, ctag TEXT, readonly INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1);"
+                    "CREATE TABLE events(id INTEGER PRIMARY KEY,"
+                    " calendar_id INTEGER NOT NULL REFERENCES calendars(id) ON DELETE CASCADE, href TEXT NOT NULL,"
+                    " etag TEXT, uid TEXT, ics TEXT NOT NULL, summary TEXT, location TEXT,"
+                    " dtstart INTEGER NOT NULL DEFAULT 0, dtend INTEGER NOT NULL DEFAULT 0,"
+                    " all_day INTEGER NOT NULL DEFAULT 0, recurring INTEGER NOT NULL DEFAULT 0, UNIQUE(calendar_id, href));"
+                    "CREATE INDEX events_start ON events(dtstart);"
+                    "CREATE INDEX events_uid ON events(uid);"
+                    "PRAGMA user_version = 8;");
+        exec(s, "COMMIT");
+    }
     return s;
 bad:
     snprintf(err, (size_t)errlen, "%s: %s", path, s->db ? sqlite3_errmsg(s->db) : "cannot open");
@@ -1107,4 +1122,175 @@ void jd_message_delete_id(jd_store *s, int64_t id)
     sqlite3_stmt *st = prep(s, "DELETE FROM messages WHERE id = ?");
     sqlite3_bind_int64(st, 1, id);
     run(st);
+}
+
+/* ---- calendars ---- */
+
+static char *col(sqlite3_stmt *st, int i)
+{
+    return jd_strdup((const char *)sqlite3_column_text(st, i));
+}
+
+jd_calendar_row *jd_store_calendars(jd_store *s, int *n)
+{
+    *n = 0;
+    jd_calendar_row *out = NULL;
+    sqlite3_stmt *st = prep(s, "SELECT id, href, name, color, sync_token, ctag, readonly, enabled FROM calendars"
+                               " ORDER BY readonly, name COLLATE NOCASE, id");
+    while (st && sqlite3_step(st) == SQLITE_ROW) {
+        out = jd_realloc(out, sizeof *out * (size_t)(*n + 1));
+        out[(*n)++] = (jd_calendar_row){sqlite3_column_int64(st, 0), col(st, 1), col(st, 2), col(st, 3), col(st, 4),
+                                        col(st, 5), sqlite3_column_int(st, 6), sqlite3_column_int(st, 7)};
+    }
+    sqlite3_finalize(st);
+    return out;
+}
+
+void jd_calendar_rows_free(jd_calendar_row *r, int n)
+{
+    for (int i = 0; i < n; i++) free(r[i].href), free(r[i].name), free(r[i].color), free(r[i].sync_token), free(r[i].ctag);
+    free(r);
+}
+
+int64_t jd_store_calendar_put(jd_store *s, const char *href, const char *name, const char *color, int readonly)
+{
+    sqlite3_stmt *st = prep(s, "INSERT INTO calendars(href, name, color, readonly) VALUES(?1, ?2, ?3, ?4)"
+                               " ON CONFLICT(href) DO UPDATE SET name = ?2, color = ?3, readonly = ?4");
+    bind_text(st, 1, href);
+    bind_text(st, 2, name);
+    bind_text(st, 3, color);
+    sqlite3_bind_int(st, 4, readonly);
+    run(st);
+    st = prep(s, "SELECT id FROM calendars WHERE href = ?");
+    bind_text(st, 1, href);
+    return run(st);
+}
+
+void jd_store_calendar_state(jd_store *s, int64_t id, const char *sync_token, const char *ctag)
+{
+    sqlite3_stmt *st = prep(s, "UPDATE calendars SET sync_token = ?, ctag = ? WHERE id = ?");
+    bind_text(st, 1, sync_token);
+    bind_text(st, 2, ctag);
+    sqlite3_bind_int64(st, 3, id);
+    run(st);
+}
+
+void jd_store_calendar_enable(jd_store *s, int64_t id, int on)
+{
+    sqlite3_stmt *st = prep(s, "UPDATE calendars SET enabled = ? WHERE id = ?");
+    sqlite3_bind_int(st, 1, on);
+    sqlite3_bind_int64(st, 2, id);
+    run(st);
+}
+
+void jd_store_calendars_keep(jd_store *s, char **hrefs, int n)
+{
+    int nrows;
+    jd_calendar_row *rows = jd_store_calendars(s, &nrows);
+    for (int i = 0; i < nrows; i++) {
+        int kept = 0;
+        for (int k = 0; k < n && !kept; k++) kept = strcmp(rows[i].href, hrefs[k]) == 0;
+        if (kept) continue;
+        sqlite3_stmt *st = prep(s, "DELETE FROM calendars WHERE id = ?");
+        sqlite3_bind_int64(st, 1, rows[i].id);
+        run(st);
+    }
+    jd_calendar_rows_free(rows, nrows);
+}
+
+void jd_store_event_put(jd_store *s, int64_t calendar, const char *href, const char *etag, const char *ics,
+                        const char *uid, const char *summary, const char *location, int64_t dtstart, int64_t dtend,
+                        int all_day, int recurring)
+{
+    sqlite3_stmt *st = prep(s, "INSERT INTO events(calendar_id, href, etag, uid, ics, summary, location, dtstart, dtend,"
+                               " all_day, recurring) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+                               " ON CONFLICT(calendar_id, href) DO UPDATE SET etag = ?3, uid = ?4, ics = ?5,"
+                               " summary = ?6, location = ?7, dtstart = ?8, dtend = ?9, all_day = ?10, recurring = ?11");
+    sqlite3_bind_int64(st, 1, calendar);
+    bind_text(st, 2, href);
+    bind_text(st, 3, etag);
+    bind_text(st, 4, uid);
+    bind_text(st, 5, ics);
+    bind_text(st, 6, summary);
+    bind_text(st, 7, location);
+    sqlite3_bind_int64(st, 8, dtstart);
+    sqlite3_bind_int64(st, 9, dtend);
+    sqlite3_bind_int(st, 10, all_day);
+    sqlite3_bind_int(st, 11, recurring);
+    run(st);
+}
+
+void jd_store_event_delete(jd_store *s, int64_t calendar, const char *href)
+{
+    sqlite3_stmt *st = prep(s, "DELETE FROM events WHERE calendar_id = ? AND href = ?");
+    sqlite3_bind_int64(st, 1, calendar);
+    bind_text(st, 2, href);
+    run(st);
+}
+
+static const char *event_cols = "SELECT e.id, e.calendar_id, e.href, e.etag, e.uid, e.ics, e.summary, e.location,"
+                                " e.dtstart, e.dtend, e.all_day, e.recurring, c.color, c.name, c.readonly"
+                                " FROM events e JOIN calendars c ON c.id = e.calendar_id";
+
+static jd_event_row *event_rows(sqlite3_stmt *st, int *n)
+{
+    *n = 0;
+    jd_event_row *out = NULL;
+    while (st && sqlite3_step(st) == SQLITE_ROW) {
+        out = jd_realloc(out, sizeof *out * (size_t)(*n + 1));
+        out[(*n)++] = (jd_event_row){sqlite3_column_int64(st, 0), sqlite3_column_int64(st, 1), col(st, 2), col(st, 3),
+                                     col(st, 4), col(st, 5), col(st, 6), col(st, 7), sqlite3_column_int64(st, 8),
+                                     sqlite3_column_int64(st, 9), sqlite3_column_int(st, 10), sqlite3_column_int(st, 11),
+                                     col(st, 12), col(st, 13), sqlite3_column_int(st, 14)};
+    }
+    sqlite3_finalize(st);
+    return out;
+}
+
+jd_event_row *jd_store_events(jd_store *s, int64_t from, int64_t to, int *n)
+{
+    char *sql = jd_printf("%s WHERE c.enabled AND e.dtstart < ?2 AND (e.recurring OR e.dtend > ?1 OR"
+                          " (e.dtend = e.dtstart AND e.dtstart >= ?1)) ORDER BY e.dtstart", event_cols);
+    sqlite3_stmt *st = prep(s, sql);
+    free(sql);
+    sqlite3_bind_int64(st, 1, from);
+    sqlite3_bind_int64(st, 2, to);
+    return event_rows(st, n);
+}
+
+jd_event_row *jd_store_calendar_events(jd_store *s, int64_t calendar, int *n)
+{
+    char *sql = jd_printf("%s WHERE e.calendar_id = ?", event_cols);
+    sqlite3_stmt *st = prep(s, sql);
+    free(sql);
+    sqlite3_bind_int64(st, 1, calendar);
+    return event_rows(st, n);
+}
+
+jd_event_row *jd_store_event(jd_store *s, int64_t id)
+{
+    char *sql = jd_printf("%s WHERE e.id = ?", event_cols);
+    sqlite3_stmt *st = prep(s, sql);
+    free(sql);
+    sqlite3_bind_int64(st, 1, id);
+    int n;
+    return event_rows(st, &n);
+}
+
+jd_event_row *jd_store_event_by_uid(jd_store *s, const char *uid)
+{
+    char *sql = jd_printf("%s WHERE e.uid = ? ORDER BY c.readonly LIMIT 1", event_cols);
+    sqlite3_stmt *st = prep(s, sql);
+    free(sql);
+    bind_text(st, 1, uid);
+    int n;
+    return event_rows(st, &n);
+}
+
+void jd_event_rows_free(jd_event_row *r, int n)
+{
+    for (int i = 0; i < n; i++)
+        free(r[i].href), free(r[i].etag), free(r[i].uid), free(r[i].ics), free(r[i].summary), free(r[i].location),
+            free(r[i].color), free(r[i].calendar_name);
+    free(r);
 }

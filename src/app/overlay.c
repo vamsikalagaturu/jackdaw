@@ -142,7 +142,7 @@ static const char *help_lines[][2] = {
     {"Backspace", "at the start of the search: the last pill back into the text"},
     {"Tab  h  l", "folders / list / reader"},
     {"j  k  gg  G", "move"},
-    {"gi  gs  gd  ga  gt  gj", "go to Inbox, Sent, Drafts, Archive, Trash, Junk"}, {"Enter  Shift+Enter", "open, open in a tab"}, {"x  Shift+j/k  Ctrl+A", "select"},
+    {"gi  gs  gd  ga  gt  gj", "go to Inbox, Sent, Drafts, Archive, Trash, Junk"}, {"gc", "the calendar"}, {"Enter  Shift+Enter", "open, open in a tab"}, {"x  Shift+j/k  Ctrl+A", "select"},
     {"t", "conversations or single messages"}, {"p", "reading pane right, bottom or off"},
     {"fu  ff  fa  fs  fc", "filter: unread, flagged, files, this sender, clear"},
     {"Messages", NULL},
@@ -157,6 +157,12 @@ static const char *help_lines[][2] = {
     {"Ctrl+S  Ctrl+P", "save the message as .eml in Downloads, print"},
     {"Folders", NULL},
     {"Space  a  Shift+R  Shift+D", "collapse, new, rename, delete"},
+    {"Calendar", NULL},
+    {"gc", "open the calendar"}, {"a  w  m", "agenda, week, month"},
+    {"h  l  Shift+h/l  t", "the day before, after (agenda: a week); the period before, after; today"},
+    {"j  k  Enter", "the next, previous event; its details (Enter again edits)"},
+    {"n  e  d  r", "new event, edit, delete, sync now"},
+    {"Tab  Ctrl+S  Esc", "in an event: the next field, save, cancel"},
 };
 
 /* a line is shown when the filter is empty, or found in its keys, its description or its section's name */

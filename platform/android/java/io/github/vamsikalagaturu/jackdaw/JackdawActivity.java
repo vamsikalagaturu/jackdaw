@@ -108,6 +108,12 @@ public class JackdawActivity extends NativeActivity {
         return "1";
     }
 
+    /* plat_reminders; spec as ReminderAlarm.set takes it */
+    public String setReminders(String spec) {
+        ReminderAlarm.set(this, spec);
+        return "1";
+    }
+
     /* plat_push; on is "1" or "0" */
     public String setPush(String on) {
         PushService.set(this, "1".equals(on));

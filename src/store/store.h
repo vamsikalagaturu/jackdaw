@@ -175,3 +175,41 @@ void jd_message_rows_free(jd_message_row *rows, int n);
 
 void jd_store_set_flag(jd_store *s, int64_t id, int flag, int on);
 void jd_message_delete_id(jd_store *s, int64_t id);
+
+/* Calendars of the account's [calendar] server (schema 8), and their events as the server holds them: one iCalendar
+   object per resource (href), with the fields the views and searches need taken out of it (cal/ical.h). */
+typedef struct {
+    int64_t id;
+    char *href, *name, *color; /* href: the collection's absolute URL; color "#rrggbb", NULL when unset */
+    char *sync_token, *ctag;   /* RFC 6578 and getctag: where the last look left off */
+    int readonly, enabled;     /* enabled: shown in the views */
+} jd_calendar_row;
+jd_calendar_row *jd_store_calendars(jd_store *s, int *n);
+void jd_calendar_rows_free(jd_calendar_row *r, int n);
+/* added, or renamed and recoloured (its events and enabled kept); returns its id */
+int64_t jd_store_calendar_put(jd_store *s, const char *href, const char *name, const char *color, int readonly);
+void jd_store_calendar_state(jd_store *s, int64_t id, const char *sync_token, const char *ctag);
+void jd_store_calendar_enable(jd_store *s, int64_t id, int on);
+/* the calendars whose href is not among hrefs go, with their events */
+void jd_store_calendars_keep(jd_store *s, char **hrefs, int n);
+
+/* dtstart, dtend: Unix seconds (cal/ical.h); a recurring event's dtend is its first occurrence's */
+typedef struct {
+    int64_t id, calendar;
+    char *href, *etag, *uid, *ics, *summary, *location;
+    int64_t dtstart, dtend;
+    int all_day, recurring;
+    char *color, *calendar_name; /* of its calendar */
+    int readonly;
+} jd_event_row;
+void jd_store_event_put(jd_store *s, int64_t calendar, const char *href, const char *etag, const char *ics,
+                        const char *uid, const char *summary, const char *location, int64_t dtstart, int64_t dtend,
+                        int all_day, int recurring);
+void jd_store_event_delete(jd_store *s, int64_t calendar, const char *href);
+/* the events of shown calendars that may have an occurrence in [from, to): every recurring one starting before to */
+jd_event_row *jd_store_events(jd_store *s, int64_t from, int64_t to, int *n);
+jd_event_row *jd_store_calendar_events(jd_store *s, int64_t calendar, int *n);
+/* one event, NULL when gone */
+jd_event_row *jd_store_event(jd_store *s, int64_t id);
+jd_event_row *jd_store_event_by_uid(jd_store *s, const char *uid);
+void jd_event_rows_free(jd_event_row *r, int n);

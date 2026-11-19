@@ -764,6 +764,10 @@ int go_keys(jd_app *app)
             if (app->nrows) move_row(app, 0, 0);
             return 1;
         }
+        if (IsKeyPressed(KEY_C)) {
+            calendar_open(app);
+            return 1;
+        }
         static const struct {
             int key;
             const char *use;

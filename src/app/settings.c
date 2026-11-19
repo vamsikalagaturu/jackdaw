@@ -7,7 +7,7 @@
 #include "platform.h"
 #include "ui/icons.h"
 
-enum { S_ACCOUNT, S_APPEARANCE, S_FONTS, S_LAYOUT, S_READING, S_COMPOSE, S_NOTIFY, S_SYNC, S_RULES, S_FILTERS, S_KEYS, S_ABOUT, S_COUNT };
+enum { S_ACCOUNT, S_APPEARANCE, S_FONTS, S_LAYOUT, S_READING, S_COMPOSE, S_NOTIFY, S_SYNC, S_CALENDAR, S_RULES, S_FILTERS, S_KEYS, S_ABOUT, S_COUNT };
 enum { FOCUS_NONE = -1, FOCUS_SIG_NEW = 100, FOCUS_SIG_REPLY, FOCUS_RULE_MATCH, FOCUS_FONT, FOCUS_KEYS };
 
 /* what the Keyboard section is narrowed to */
@@ -30,7 +30,7 @@ static const struct {
     const char *label, *icon;
 } sections[S_COUNT] = {
     {"Account", "user"}, {"Appearance", "paintbrush"}, {"Fonts", "type"}, {"Layout", "panel-right"}, {"Reading", "mail-open"},
-    {"Compose", "pencil"}, {"Notifications", "bell"}, {"Sync", "refresh-cw"}, {"Rules", "list"},
+    {"Compose", "pencil"}, {"Notifications", "bell"}, {"Sync", "refresh-cw"}, {"Calendar", "calendar"}, {"Rules", "list"},
     {"Server filters", "flag"}, {"Keyboard", "keyboard"}, {"About", "circle-help"},
 };
 
@@ -55,6 +55,15 @@ void settings_open(jd_app *app)
     app->settings_focus = FOCUS_NONE;
     app->settings_scroll = 0;
     narrow_detail = 0;
+}
+
+void settings_show_calendar(jd_app *app)
+{
+    settings_open(app);
+    app->settings_section = S_CALENDAR;
+    app->settings_focus = FOCUS_NONE;
+    app->settings_scroll = 0;
+    narrow_detail = 1;
 }
 
 static void changed(jd_app *app)
@@ -116,6 +125,7 @@ void settings_keys(jd_app *app)
         if (IsKeyPressed(KEY_K) || IsKeyPressed(KEY_UP)) app->settings_section = (app->settings_section + S_COUNT - 1) % S_COUNT;
         return;
     }
+    if (calendar_settings_keys(app)) return;
     if (f >= 0 && f < F_COUNT) {
         if (IsKeyPressed(KEY_TAB)) app->settings_focus = (f + 1) % F_COUNT;
         else if (IsKeyPressed(KEY_ENTER)) form_submit(app);
@@ -648,6 +658,32 @@ static void rules(jd_app *app, float x, float y, float w)
     qfield_hints_draw(app, &rule_match, focused);
 }
 
+static void calendar(jd_app *app, float x, float y, float w)
+{
+    y = heading(app, x, y, "Calendar",
+                "A CalDAV server (Nextcloud, Fastmail, iCloud, mailbox.org, Radicale...) or Google Calendar. "
+                "The calendar opens from the sidebar or with g c; invitations in mail are answered from the message.");
+    int focus = app->settings_focus;
+    y = calendar_settings(app, x, y, w, &focus);
+    if (focus != app->settings_focus) app->settings_focus = focus;
+    reach(y + 20);
+    if (!app->prefs.cal_provider) return;
+    y = divider(x, y, w);
+    float cx = label(app, x, &y, "Check every", "How often the calendars are read again; changes made here go at once");
+    if (stepper(app, cx, y + 6, &app->prefs.cal_check_minutes, 5, 5, 240, " min")) {
+        save_prefs(app);
+        calendar_start(app);
+    }
+    y = divider(x, y + row_h, w);
+    cx = label(app, x, &y, "Reminders",
+               plat_touch() ? "A notification at each event's reminder, also while jackdaw is closed"
+                            : "A notification at each event's reminder, while jackdaw runs");
+    if (jd_switch(&app->ui, cx, y + 10, app->prefs.cal_reminders)) {
+        app->prefs.cal_reminders = !app->prefs.cal_reminders;
+        save_prefs(app);
+    }
+}
+
 static void server_filters(jd_app *app, float x, float y, float w)
 {
     y = heading(app, x, y, "Server filters", "Sieve scripts (RFC 5228) run by the server, even while jackdaw is closed.");
@@ -738,6 +774,7 @@ void settings_draw(jd_app *app, Rectangle r)
     case S_COMPOSE: compose(app, x, top, w); break;
     case S_NOTIFY: notifications(app, x, top, w); break;
     case S_SYNC: sync(app, x, top, w); break;
+    case S_CALENDAR: calendar(app, x, top, w); break;
     case S_RULES: rules(app, x, top, w); break;
     case S_FILTERS: server_filters(app, x, top, w); break;
     case S_ABOUT: about(app, x, top, w); break;

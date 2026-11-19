@@ -123,12 +123,39 @@ set_target_properties(jd_etpan PROPERTIES IMPORTED_LOCATION ${JD_LIBETPAN_DIR}/l
                       INTERFACE_INCLUDE_DIRECTORIES ${JD_LIBETPAN_DIR}/include
                       INTERFACE_LINK_LIBRARIES "${JD_SSL_LIBS}")
 
-# mail, storage and helpers: no window, shared by every platform
-file(GLOB JD_CORE_SOURCES CONFIGURE_DEPENDS src/core/*.c src/mail/*.c src/store/*.c)
+# libical (calendar data), static, as platform/*/deps.sh builds it; Android's lands in JD_ANDROID_DEPS with expat
+if(ANDROID)
+  set(JD_LIBICAL_DIR ${JD_ANDROID_DEPS})
+else()
+  set(JD_LIBICAL_DIR "" CACHE PATH "libical's install prefix (include/libical, lib/libical.a)")
+endif()
+if(NOT EXISTS "${JD_LIBICAL_DIR}/lib/libical.a")
+  message(FATAL_ERROR "JD_LIBICAL_DIR: no lib/libical.a in '${JD_LIBICAL_DIR}' (platform/*/deps.sh builds it)")
+endif()
+add_library(jd_ical STATIC IMPORTED GLOBAL)
+set_target_properties(jd_ical PROPERTIES IMPORTED_LOCATION ${JD_LIBICAL_DIR}/lib/libical.a
+                      INTERFACE_INCLUDE_DIRECTORIES ${JD_LIBICAL_DIR}/include
+                      INTERFACE_LINK_LIBRARIES "Threads::Threads;m")
+if(ANDROID)
+  add_library(jd_expat STATIC IMPORTED GLOBAL)
+  set_target_properties(jd_expat PROPERTIES IMPORTED_LOCATION ${JD_ANDROID_DEPS}/lib/libexpat.a
+                        INTERFACE_INCLUDE_DIRECTORIES ${JD_ANDROID_DEPS}/include)
+  set(JD_EXPAT_LIB jd_expat)
+else()
+  pkg_check_modules(JD_EXPAT REQUIRED IMPORTED_TARGET expat)
+  set(JD_EXPAT_LIB PkgConfig::JD_EXPAT)
+endif()
+file(GLOB JD_CJSON_DIR LIST_DIRECTORIES true ${JD_REPO}/thirdparty/cjson-*)
+add_library(jd_cjson STATIC ${JD_CJSON_DIR}/cJSON.c)
+target_include_directories(jd_cjson SYSTEM PUBLIC ${JD_CJSON_DIR})
+target_compile_options(jd_cjson PRIVATE -w)
+
+# mail, calendars, storage and helpers: no window, shared by every platform
+file(GLOB JD_CORE_SOURCES CONFIGURE_DEPENDS src/core/*.c src/mail/*.c src/cal/*.c src/store/*.c)
 add_library(jdcore STATIC ${JD_CORE_SOURCES})
 target_include_directories(jdcore PUBLIC src)
 target_compile_options(jdcore PRIVATE ${JD_WARNINGS})
-target_link_libraries(jdcore PUBLIC jd_etpan jd_sqlite ${JD_CURL_LIB})
+target_link_libraries(jdcore PUBLIC jd_etpan jd_sqlite ${JD_CURL_LIB} jd_ical ${JD_EXPAT_LIB} jd_cjson)
 target_compile_definitions(jdcore PUBLIC JD_APP_NAME="${JD_APP_NAME}" JD_APP_ID="${JD_APP_ID}")
 
 set(LITEHTML_BUILD_TESTING OFF CACHE BOOL "" FORCE)
@@ -196,6 +223,12 @@ if(JD_BUILD_TESTS)
   add_test(NAME keys COMMAND jackdaw_keys_test)
   # the test exits without tearing the interface down; leaks it reports at exit are not findings
   set_tests_properties(keys PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 ENVIRONMENT "ASAN_OPTIONS=detect_leaks=0")
+  # calendar data: zones, repeats, invitations
+  add_executable(jackdaw_ical_test tests/cal/ical_test.c)
+  target_compile_options(jackdaw_ical_test PRIVATE ${JD_WARNINGS})
+  target_link_libraries(jackdaw_ical_test PRIVATE jdcore)
+  add_test(NAME ical COMMAND jackdaw_ical_test)
+  set_tests_properties(ical PROPERTIES TIMEOUT 60)
 endif()
 include(GNUInstallDirs)
 install(TARGETS jackdaw RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

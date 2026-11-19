@@ -245,6 +245,18 @@ int main(void)
     check(!strcmp(folder_now(&app), "INBOX") && shown->thread == wanted_thread,
           "a notification opens its message (folder %s, thread %lld)", folder_now(&app), (long long)shown->thread);
 
+    /* the calendar: g c opens its tab (with no calendar set up), n asks for one first, Esc closes the tab */
+    app.tab = 0;
+    app.pane = PANE_LIST;
+    tap(&app, KEY_G);
+    tap(&app, KEY_C);
+    check(app.tabs[app.tab].kind == TAB_CALENDAR, "g c opens the calendar");
+    tap(&app, KEY_M);
+    tap(&app, KEY_N);
+    check(!calendar_typing() && strstr(app.notice, "Settings"), "n without a calendar points to Settings (%s)", app.notice);
+    tap(&app, KEY_ESCAPE);
+    check(app.tabs[app.tab].kind != TAB_CALENDAR, "Esc closes the calendar");
+
     UnloadRenderTexture(target);
     CloseWindow();
     printf("%s\n", failures ? "FAILED" : "all passed");

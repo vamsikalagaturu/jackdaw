@@ -72,6 +72,11 @@ static void confirm(jd_app *app)
         free(typed);
         return;
     }
+    if (d->act == ACT_DELETE_EVENT) {
+        close_dialog(app);
+        calendar_delete_confirmed(app);
+        return;
+    }
     if (!app->sync) {
         close_dialog(app);
         return;
@@ -79,7 +84,8 @@ static void confirm(jd_app *app)
     switch (d->act) {
     case ACT_LOGOUT:
     case ACT_DISCARD:
-    case ACT_SEND_LATER: break;
+    case ACT_SEND_LATER:
+    case ACT_DELETE_EVENT: break;
     case ACT_CREATE_FOLDER:
         if (d->field.len) {
             char *name = server_name(app, NULL, d->field.text);

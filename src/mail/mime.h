@@ -17,6 +17,8 @@ char **jd_mime_references(const char *headers, size_t len, int *n);
 char *jd_mime_body_text(const char *raw, size_t len);
 /* the first text/html part, decoded to UTF-8; NULL when the message has none */
 char *jd_mime_body_html(const char *raw, size_t len);
+/* the iCalendar object an invitation or its answer carries (RFC 6047), UTF-8; NULL when the message has none */
+char *jd_mime_calendar(const char *raw, size_t len);
 
 /* the headers a draft is reopened with; address lists come back as "Name <addr>, ..." */
 typedef struct {

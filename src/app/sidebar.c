@@ -155,7 +155,7 @@ static int icon_button(jd_app *app, const char *icon, Rectangle b, const char *t
 static float tab_rows(jd_app *app, Rectangle r, float y, int rail)
 {
     jd_ui *ui = &app->ui;
-    static const char *icons[] = {"inbox", "mail", "pencil", "flag", "settings"};
+    static const char *icons[] = {"inbox", "mail", "pencil", "flag", "settings", "calendar"};
     for (int i = 0; i < app->ntabs; i++) {
         Rectangle box = {r.x + 8, y, r.width - 16, 30};
         int hover = CheckCollisionPointRec(GetMousePosition(), box) && !app->dialog.kind && !app->menu.open;
@@ -231,7 +231,7 @@ static void rail_draw(jd_app *app, Rectangle r)
     if (hover_write && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) compose_open(app, COMPOSE_NEW, 0);
     float y = r.y + 134;
     if (app->prefs.tabs_side && app->ntabs > 1) y = tab_rows(app, r, y, 1);
-    float bottom = r.y + r.height - 50;
+    float bottom = r.y + r.height - 86;
     Rectangle view = {r.x, y, r.width, bottom - 4 - y};
     float content = 0, sel = -1;
     for (int i = 0; i < app->nfolders; i++) {
@@ -268,7 +268,9 @@ static void rail_draw(jd_app *app, Rectangle r)
     jd_scissor_end();
     jd_scrollbar(view, content, &app->side_scroll);
     DrawRectangle((int)r.x + 10, (int)bottom, (int)r.width - 20, 1, JD_NORD2);
-    if (icon_button(app, "settings", (Rectangle){cx, bottom + 8, 40, 34}, "Settings (Ctrl+,)", JD_NORD4, &tip, &tip_at))
+    if (icon_button(app, "calendar", (Rectangle){cx, bottom + 8, 40, 34}, "Calendar (g c)", JD_NORD4, &tip, &tip_at))
+        calendar_open(app);
+    if (icon_button(app, "settings", (Rectangle){cx, bottom + 44, 40, 34}, "Settings (Ctrl+,)", JD_NORD4, &tip, &tip_at))
         settings_open(app);
     if (tip) tooltip(app, tip, tip_at.x, tip_at.y);
 }
@@ -314,7 +316,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
     jd_text(ui, "New message", write.x + 40, write.y + 11, 14, JD_ON_ACCENT, 1);
     if (hover_write && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) drawer_done(app), compose_open(app, COMPOSE_NEW, 0);
 
-    float y = r.y + 154, bottom = r.y + r.height - 82;
+    float y = r.y + 154, bottom = r.y + r.height - 118;
     if (app->prefs.tabs_side && app->ntabs > 1) y = tab_rows(app, r, y, 0);
     Rectangle view = {r.x, y, r.width, bottom - 4 - y};
     float content = 0, sel = -1;
@@ -374,23 +376,26 @@ void sidebar_draw(jd_app *app, Rectangle r)
     DrawRectangle((int)r.x + 12, (int)bottom, (int)r.width - 24, 1, JD_NORD2);
     struct {
         const char *icon, *label;
-    } foot[] = {{"settings", "Settings"}, {"circle-help", "Keys (?)"}};
-    float fx = r.x + 12;
-    for (int k = 0; k < 2; k++) {
+    } foot[] = {{"calendar", "Calendar"}, {"settings", "Settings"}, {"circle-help", "Keys (?)"}};
+    /* the calendar on a line of its own, Settings and Keys under it */
+    float fx = r.x + 12, fy = bottom + 8;
+    for (int k = 0; k < 3; k++) {
+        if (k == 1) fx = r.x + 12, fy += 36;
         float fw = jd_text_width(ui, foot[k].label, 13, 0) + 40;
-        Rectangle b = {fx, bottom + 8, fw, 32};
+        Rectangle b = {fx, fy, fw, 32};
         int hover = CheckCollisionPointRec(GetMousePosition(), b) && free_input;
         if (hover) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
-        jd_icon(foot[k].icon, fx + 10, bottom + 16, 16, hover ? JD_NORD8 : JD_NORD4);
-        jd_text(ui, foot[k].label, fx + 32, bottom + 17, 13, JD_NORD4, 0);
+        jd_icon(foot[k].icon, fx + 10, fy + 8, 16, hover ? JD_NORD8 : JD_NORD4);
+        jd_text(ui, foot[k].label, fx + 32, fy + 9, 13, JD_NORD4, 0);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             drawer_done(app);
-            if (k == 0) settings_open(app);
+            if (k == 0) calendar_open(app);
+            else if (k == 1) settings_open(app);
             else app->help = 1;
         }
         fx += fw + 4;
     }
     char version[96];
     snprintf(version, sizeof version, "jackdaw %s", jd_version);
-    jd_text_fit(ui, version, r.x + 22, bottom + 50, r.width - 34, 12, JD_NORD4, 0);
+    jd_text_fit(ui, version, r.x + 22, fy + 42, r.width - 34, 12, JD_NORD4, 0);
 }

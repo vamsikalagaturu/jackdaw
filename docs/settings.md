@@ -4,8 +4,13 @@ Everything is in the Settings tab (`Ctrl+,`) and saved to `~/.config/jackdaw/set
 the system keystore (Secret Service on Linux, Android Keystore on Android), never in that file. Mail is stored in
 `~/.local/share/jackdaw/<address>/`. Development builds use `jackdaw-dev` in place of `jackdaw` in both paths.
 
-**Log out** (Settings → Account) forgets the password and the `[account]` section and moves the local mail folder to
-the trash (deletes it on Android); the other settings and the rules stay.
+**Log out** (Settings → Account) forgets the password and the `[account]` and `[calendar]` sections (and the calendar's
+password or Google sign-in) and moves the local mail folder to the trash (deletes it on Android); the other settings
+and the rules stay.
+
+**Calendar** (Settings → Calendar): CalDAV takes the server's address, a username and a password. Google needs a
+sign-in in the browser: jackdaw asks Google for access to your calendars (OAuth 2.0 with PKCE, answered on a port of
+127.0.0.1), and keeps the sign-in in the keystore. Shown calendars are chosen there too.
 
 | Section | Keys |
 |---|---|
@@ -18,5 +23,6 @@ the trash (deletes it on Android); the other settings and the rules stay.
 | `[compose]` | `markdown`: the body also goes out as HTML rendered from Markdown; `attachment_list`: a `[1] name` list of attachments in the body |
 | `[updates]` | `check`: look for a new release once a day and offer it (default true); Settings → About checks by hand |
 | `[sync]` | `prefetch_days` (days of Inbox bodies fetched for offline reading), `check_minutes` (5) |
+| `[calendar]` | `provider` = `caldav` / `google` (absent: no calendar), `url` (CalDAV: the server, a principal or one calendar's address; discovery follows RFC 6764 and RFC 4791), `username` (the CalDAV login, or the Google address), `check_minutes` (15), `reminders` (true: a notification at each event's reminder; on Android also while jackdaw is closed). The CalDAV password, or Google's sign-in, is in the keystore |
 | `[signature]` | `new`, `reply` |
 | `[[rule]]` | `match` in search syntax, `action` = `read`, `flag`, `delete`, `move:<folder>`, `copy:<folder>` |
