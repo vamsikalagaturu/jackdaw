@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fetches the sources pinned in platform/versions.sh into thirdparty/, checks the Android SDK and NDK, and builds
-# OpenSSL, libcurl, libiconv and libetpan, static, once per ABI. build.sh sources this file first and uses the paths it sets.
+# OpenSSL, libcurl, libiconv, libetpan, expat and libical, static, once per ABI. build.sh sources this file first and uses the paths it sets.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -28,6 +28,7 @@ fetch_sources "$REPO"
 fetch_unpacked "$OPENSSL_URL" "$OPENSSL_SHA256" "openssl-$OPENSSL_VERSION" "$REPO"
 fetch_unpacked_xz "$CURL_URL" "$CURL_SHA256" "curl-$CURL_VERSION" "$REPO"
 fetch_unpacked "$LIBICONV_URL" "$LIBICONV_SHA256" "libiconv-$LIBICONV_VERSION" "$REPO"
+fetch_unpacked "$EXPAT_URL" "$EXPAT_SHA256" "expat-$EXPAT_VERSION" "$REPO"
 
 triple() {
     case $1 in
@@ -39,13 +40,13 @@ triple() {
 
 # OpenSSL, libcurl, libiconv and libetpan for ABI $1, under the folder this names (build.sh passes it as JD_ANDROID_DEPS)
 deps_prefix() {
-    echo "$ROOT/deps-$1-openssl-$OPENSSL_VERSION-curl-$CURL_VERSION-iconv-$LIBICONV_VERSION-etpan-$LIBETPAN_VERSION-$BUILD_TAG"
+    echo "$ROOT/deps-$1-openssl-$OPENSSL_VERSION-curl-$CURL_VERSION-iconv-$LIBICONV_VERSION-etpan-$LIBETPAN_VERSION-expat-$EXPAT_VERSION-ical-$LIBICAL_VERSION-$BUILD_TAG"
 }
 
 for ABI in $ABIS; do
     OUT=$(deps_prefix $ABI)
     [ -f "$OUT/lib/libssl.a" ] && [ -f "$OUT/lib/libcurl.a" ] && [ -f "$OUT/lib/libiconv.a" ] &&
-        [ -f "$OUT/lib/libetpan.a" ] && continue
+        [ -f "$OUT/lib/libetpan.a" ] && [ -f "$OUT/lib/libexpat.a" ] && [ -f "$OUT/lib/libical.a" ] && continue
     TRIPLE=$(triple $ABI)
     mkdir -p "$OUT"
 
@@ -111,5 +112,21 @@ for ABI in $ABIS; do
                 --with-pic --with-openssl="$OUT" --without-gnutls --without-sasl --without-curl --without-expat \
                 --with-zlib --with-poll --disable-db --disable-lockfile --enable-ipv6 >/dev/null &&
             make -j"$JOBS" >/dev/null && make install >/dev/null)
+    fi
+
+    ANDROID_CMAKE=(-DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" -DANDROID_ABI=$ABI
+                   -DANDROID_PLATFORM=android-$MIN_API)
+    if [ ! -f "$OUT/lib/libexpat.a" ]; then
+        step "expat $EXPAT_VERSION ($ABI)"
+        cmake -S "$REPO/thirdparty/expat-$EXPAT_VERSION" -B "$OUT/expat.build" -G Ninja "${ANDROID_CMAKE[@]}" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS_RELEASE="$SIZE_CFLAGS -DNDEBUG" -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DCMAKE_INSTALL_PREFIX="$OUT" -DCMAKE_INSTALL_LIBDIR=lib -DEXPAT_SHARED_LIBS=OFF -DEXPAT_BUILD_TOOLS=OFF \
+            -DEXPAT_BUILD_EXAMPLES=OFF -DEXPAT_BUILD_TESTS=OFF -DEXPAT_BUILD_DOCS=OFF -DEXPAT_BUILD_PKGCONFIG=OFF >/dev/null
+        cmake --build "$OUT/expat.build" --target install -j"$JOBS" >/dev/null
+    fi
+
+    if [ ! -f "$OUT/lib/libical.a" ]; then
+        step "libical $LIBICAL_VERSION ($ABI)"
+        build_libical "$OUT" "$REPO" "${ANDROID_CMAKE[@]}"
     fi
 done

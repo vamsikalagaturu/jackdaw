@@ -36,6 +36,27 @@ void jd_text(jd_ui *ui, const char *s, float x, float y, float size, Color c, in
     DrawTextEx(font(ui, bold, size), s, (Vector2){snap(x), snap(y)}, size, 0, c);
 }
 
+Rectangle jd_text_ink(jd_ui *ui, const char *s, float size, int bold)
+{
+    size = jd_text_size(size);
+    Font f = font(ui, bold, size);
+    float scale = size / (float)f.baseSize, x = 0;
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    for (int i = 0; s[i];) {
+        int n = 0, cp = GetCodepointNext(s + i, &n);
+        i += n > 0 ? n : 1;
+        int g = GetGlyphIndex(f, cp);
+        Rectangle r = f.recs[g];
+        float gx = x + (float)f.glyphs[g].offsetX * scale, gy = (float)f.glyphs[g].offsetY * scale;
+        if (r.width > 0 && r.height > 0) {
+            x0 = fminf(x0, gx), y0 = fminf(y0, gy);
+            x1 = fmaxf(x1, gx + r.width * scale), y1 = fmaxf(y1, gy + r.height * scale);
+        }
+        x += (f.glyphs[g].advanceX ? (float)f.glyphs[g].advanceX : r.width) * scale;
+    }
+    return x1 < x0 ? (Rectangle){0} : (Rectangle){x0, y0, x1 - x0, y1 - y0};
+}
+
 float jd_text_width(jd_ui *ui, const char *s, float size, int bold)
 {
     size = jd_text_size(size);
@@ -278,7 +299,7 @@ int jd_field_draw(jd_ui *ui, jd_field *f, Rectangle r, int focused)
     if (focused && (int)(GetTime() * 2) % 2 == 0)
         DrawRectangle((int)(r.x + pad + cx - shift), (int)ty, 1, (int)size + 2, JD_NORD8);
     jd_scissor_end();
-    int over = CheckCollisionPointRec(GetMousePosition(), r) &&
+    int over = !f->inert && CheckCollisionPointRec(GetMousePosition(), r) &&
                !(field_menu.pop.open && CheckCollisionPointRec(GetMousePosition(), field_menu.pop.box));
     if (f == field_menu.f) field_menu.seen = 1;
     /* a phone's long press arrives as a right click */
@@ -643,11 +664,13 @@ int jd_editor_draw(jd_ui *ui, jd_editor *e, Rectangle r, int focused)
     }
     int cl = line_of(e, e->cursor);
     float cy = (float)cl * ED_LINE;
-    if (focused) {
+    /* only once the cursor moved or the focus came, so the wheel can scroll away from it */
+    if (focused && e->cursor != e->drawn_cursor) {
         if (cy < e->scroll) e->scroll = cy;
         if (cy + ED_LINE > e->scroll + r.height - 2 * pad) e->scroll = cy + ED_LINE - (r.height - 2 * pad);
-        jd_follow_field(e, (Rectangle){r.x, r.y + pad + cy - e->scroll, r.width, ED_LINE});
     }
+    e->drawn_cursor = focused ? e->cursor : -1;
+    if (focused) jd_follow_field(e, (Rectangle){r.x, r.y + pad + cy - e->scroll, r.width, ED_LINE});
     int hover = CheckCollisionPointRec(GetMousePosition(), r);
     if (hover) {
         e->scroll -= jd_wheel_y(ED_LINE * 3);
@@ -883,7 +906,14 @@ int jd_popup_draw(jd_ui *ui, jd_popup *p, const jd_popup_item *items, int n)
         return -1;
     }
     float h = 8, w = 240;
-    for (int i = 0; i < n; i++) h += items[i].label ? 30 : 9;
+    for (int i = 0; i < n; i++) {
+        h += items[i].label ? 30 : 9;
+        /* as wide as its longest row: icon, label, then its keys apart from it */
+        float need = items[i].label ? 8 + 34 + jd_text_width(ui, items[i].label, 14, 0) + 16 : 0;
+        if (items[i].label && items[i].keys && !ui->touch) need += jd_text_width(ui, items[i].keys, 12, 0) + 20;
+        if (need > w) w = need;
+    }
+    if (w > jd_screen_w() - 8) w = jd_screen_w() - 8;
     float x = p->at.x, y = p->at.y;
     if (x + w > jd_screen_w() - 4) x = jd_screen_w() - w - 4;
     if (y + h > jd_screen_h() - 4) y = jd_screen_h() - h - 4;
@@ -905,11 +935,10 @@ int jd_popup_draw(jd_ui *ui, jd_popup *p, const jd_popup_item *items, int n)
         Color fg = items[i].disabled ? JD_MUTED : JD_NORD6;
         if (hover) DrawRectangleRounded(row, 0.2f, 6, JD_NORD2);
         if (items[i].icon) jd_icon(items[i].icon, row.x + 8, yy + 6, 16, items[i].disabled ? JD_MUTED : hover ? JD_NORD8 : JD_NORD4);
-        jd_text(ui, items[i].label, row.x + 34, yy + 7, 14, fg, 0);
-        if (items[i].keys && !ui->touch) {
-            float kw = jd_text_width(ui, items[i].keys, 12, 0);
-            jd_text(ui, items[i].keys, row.x + row.width - kw - 8, yy + 8, 12, JD_MUTED, 0);
-        }
+        /* the label stops short of the keys on a screen too narrow for both */
+        float kw = items[i].keys && !ui->touch ? jd_text_width(ui, items[i].keys, 12, 0) : 0;
+        jd_text_fit(ui, items[i].label, row.x + 34, yy + 7, row.width - 34 - 8 - (kw ? kw + 20 : 0), 14, fg, 0);
+        if (kw) jd_text(ui, items[i].keys, row.x + row.width - kw - 8, yy + 8, 12, JD_MUTED, 0);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) chosen = i;
         yy += 30;
     }

@@ -10,11 +10,47 @@
 #include "platform.h"
 #include "ui/icons.h"
 
+/* the accounts list under the sidebar's account (accounts_menu_draw draws it over everything) */
+static jd_popup accounts_menu;
+
+int accounts_menu_open(void)
+{
+    return accounts_menu.open;
+}
+
+void accounts_menu_draw(jd_app *app)
+{
+    if (!accounts_menu.open) return;
+    int n = accounts_count(app);
+    if (n > 9) n = 9;
+    jd_popup_item items[12];
+    char labels[9][300], counts[9][48];
+    int folder_unread = 0;
+    for (int i = 0; i < app->nfolders; i++)
+        if (strcasecmp(app->folders[i].name, "INBOX") == 0) folder_unread = app->folders[i].unread;
+    for (int i = 0; i < n; i++) {
+        const jd_account *a = account_at(app, i);
+        const jd_slot *s = app->nslots ? &app->slots[i] : NULL;
+        int unread = i == app->cur ? folder_unread : s ? s->unread : 0;
+        snprintf(labels[i], sizeof labels[i], "%s%s", a->address ? a->address : "?", s && s->refused ? "  (sign in)" : "");
+        if (unread && !app->ui.touch) snprintf(counts[i], sizeof counts[i], "%d  ·  Ctrl+Shift+%d", unread, i + 1);
+        else if (unread) snprintf(counts[i], sizeof counts[i], "%d", unread);
+        else if (!app->ui.touch) snprintf(counts[i], sizeof counts[i], "Ctrl+Shift+%d", i + 1);
+        else counts[i][0] = 0;
+        items[i] = (jd_popup_item){labels[i], i == app->cur ? "check" : "mail", counts[i][0] ? counts[i] : NULL, 0};
+    }
+    items[n] = (jd_popup_item){NULL, NULL, NULL, 0};
+    items[n + 1] = (jd_popup_item){"Add an account...", "user", NULL, 0};
+    int k = jd_popup_draw(&app->ui, &accounts_menu, items, n + 2);
+    if (k >= 0 && k < n) account_switch(app, k);
+    else if (k == n + 1) account_add_open(app);
+}
+
 const char *folder_label(const jd_folder_row *f)
 {
     if (strcasecmp(f->name, "INBOX") == 0) return "Inbox";
-    const char *leaf = f->delim ? strrchr(f->name, f->delim) : NULL;
-    return leaf ? leaf + 1 : f->name;
+    const char *leaf = f->delim ? strrchr(f->path, f->delim) : NULL;
+    return leaf ? leaf + 1 : f->path;
 }
 
 static const char *folder_icon(const jd_folder_row *f)
@@ -32,15 +68,15 @@ static const char *folder_icon(const jd_folder_row *f)
 static int depth_of(const jd_folder_row *f)
 {
     int d = 0;
-    for (const char *c = f->name; f->delim && *c; c++) d += *c == f->delim;
+    for (const char *c = f->path; f->delim && *c; c++) d += *c == f->delim;
     return d;
 }
 
-/* a child's name is its parent's, the delimiter, then more */
+/* a child's path is its parent's, the delimiter, then more */
 static int is_under(const jd_folder_row *child, const jd_folder_row *parent)
 {
-    size_t n = strlen(parent->name);
-    return parent->delim && strncmp(child->name, parent->name, n) == 0 && child->name[n] == parent->delim;
+    size_t n = strlen(parent->path);
+    return parent->delim && strncmp(child->path, parent->path, n) == 0 && child->path[n] == parent->delim;
 }
 
 static int has_children(jd_app *app, int i)
@@ -119,13 +155,13 @@ int sidebar_keys(jd_app *app)
     else if (IsKeyPressed(KEY_K) || IsKeyPressed(KEY_UP)) step(app, -1);
     else if (IsKeyPressed(KEY_SPACE) && has_children(app, app->folder)) toggle_collapsed(app, app->folder);
     else if (IsKeyPressed(KEY_A) && !shift) {
-        char *prefix = f->delim && !jd_streq(f->name, "INBOX") ? jd_printf("%s%c", f->name, f->delim) : jd_strdup("");
+        char *prefix = f->delim && !jd_streq(f->name, "INBOX") ? jd_printf("%s%c", f->path, f->delim) : jd_strdup("");
         dialog_open(app, DLG_PROMPT, ACT_CREATE_FOLDER, "New folder (full path)", prefix);
         free(prefix);
     } else if (IsKeyPressed(KEY_R) && shift && !jd_streq(f->name, "INBOX")) {
-        dialog_open(app, DLG_PROMPT, ACT_RENAME_FOLDER, "Rename folder (full path)", f->name);
+        dialog_open(app, DLG_PROMPT, ACT_RENAME_FOLDER, "Rename folder (full path)", f->path);
     } else if (IsKeyPressed(KEY_D) && shift && !jd_streq(f->name, "INBOX")) {
-        char *title = jd_printf("Delete the folder %s and all %d messages in it, on the server?", f->name, f->total);
+        char *title = jd_printf("Delete the folder %s and all %d messages in it, on the server?", f->path, f->total);
         dialog_open(app, DLG_CONFIRM, ACT_DELETE_FOLDER, title, NULL);
         free(title);
     } else {
@@ -155,7 +191,7 @@ static int icon_button(jd_app *app, const char *icon, Rectangle b, const char *t
 static float tab_rows(jd_app *app, Rectangle r, float y, int rail)
 {
     jd_ui *ui = &app->ui;
-    static const char *icons[] = {"inbox", "mail", "pencil", "flag", "settings"};
+    static const char *icons[] = {"inbox", "mail", "pencil", "flag", "settings", "calendar"};
     for (int i = 0; i < app->ntabs; i++) {
         Rectangle box = {r.x + 8, y, r.width - 16, 30};
         int hover = CheckCollisionPointRec(GetMousePosition(), box) && !app->dialog.kind && !app->menu.open;
@@ -231,7 +267,7 @@ static void rail_draw(jd_app *app, Rectangle r)
     if (hover_write && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) compose_open(app, COMPOSE_NEW, 0);
     float y = r.y + 134;
     if (app->prefs.tabs_side && app->ntabs > 1) y = tab_rows(app, r, y, 1);
-    float bottom = r.y + r.height - 50;
+    float bottom = r.y + r.height - 86;
     Rectangle view = {r.x, y, r.width, bottom - 4 - y};
     float content = 0, sel = -1;
     for (int i = 0; i < app->nfolders; i++) {
@@ -268,7 +304,9 @@ static void rail_draw(jd_app *app, Rectangle r)
     jd_scissor_end();
     jd_scrollbar(view, content, &app->side_scroll);
     DrawRectangle((int)r.x + 10, (int)bottom, (int)r.width - 20, 1, JD_NORD2);
-    if (icon_button(app, "settings", (Rectangle){cx, bottom + 8, 40, 34}, "Settings (Ctrl+,)", JD_NORD4, &tip, &tip_at))
+    if (icon_button(app, "calendar", (Rectangle){cx, bottom + 8, 40, 34}, "Calendar (g c)", JD_NORD4, &tip, &tip_at))
+        calendar_open(app);
+    if (icon_button(app, "settings", (Rectangle){cx, bottom + 44, 40, 34}, "Settings (Ctrl+,)", JD_NORD4, &tip, &tip_at))
         settings_open(app);
     if (tip) tooltip(app, tip, tip_at.x, tip_at.y);
 }
@@ -300,12 +338,27 @@ void sidebar_draw(jd_app *app, Rectangle r)
     }
     tip_at.x = r.x + r.width - 160;
     tip_at.y = r.y + 48;
+    /* the open account; a click lists them all, to switch or add one */
+    Rectangle who = {r.x + 8, r.y + 54, r.width - 16, 42};
+    int hover_who = CheckCollisionPointRec(GetMousePosition(), who) && free_input && !accounts_menu.open;
+    if (hover_who || accounts_menu.open) DrawRectangleRounded(who, 0.25f, 6, JD_NORD2);
     char initial[8] = "?";
     if (app->account.address) snprintf(initial, sizeof initial, "%c", toupper((unsigned char)app->account.address[0]));
     DrawCircleV((Vector2){r.x + 30, r.y + 74}, 14, JD_NORD10);
     jd_text(ui, initial, r.x + 30 - jd_text_width(ui, initial, 14, 1) / 2, r.y + 67, 14, JD_ON_ACCENT, 1);
-    jd_text_fit(ui, app->account.name ? app->account.name : "", r.x + 52, r.y + 58, r.width - 64, 15, JD_NORD6, 1);
-    jd_text_fit(ui, app->account.address ? app->account.address : "", r.x + 52, r.y + 76, r.width - 64, 12, JD_MUTED, 0);
+    jd_text_fit(ui, app->account.name ? app->account.name : "", r.x + 52, r.y + 58, r.width - 84, 15, JD_NORD6, 1);
+    jd_text_fit(ui, app->account.address ? app->account.address : "", r.x + 52, r.y + 76, r.width - 84, 12, JD_MUTED, 0);
+    /* another account's unread mail, beside the arrow */
+    int elsewhere = 0;
+    for (int i = 0; i < app->nslots; i++)
+        if (i != app->cur) elsewhere += app->slots[i].unread;
+    jd_icon(accounts_menu.open ? "chevron-down" : "chevron-right", who.x + who.width - 22, who.y + 13, 16, JD_NORD4);
+    if (elsewhere) DrawCircleV((Vector2){who.x + who.width - 28, who.y + 12}, 4, JD_NORD8);
+    /* on release: the press that opens it would otherwise count as a click outside it, and shut it */
+    if (hover_who && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+        jd_popup_open(&accounts_menu);
+        accounts_menu.at = (Vector2){who.x, who.y + who.height + 4};
+    }
 
     Rectangle write = {r.x + 12, r.y + 102, r.width - 24, 38};
     int hover_write = CheckCollisionPointRec(GetMousePosition(), write) && free_input;
@@ -314,7 +367,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
     jd_text(ui, "New message", write.x + 40, write.y + 11, 14, JD_ON_ACCENT, 1);
     if (hover_write && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) drawer_done(app), compose_open(app, COMPOSE_NEW, 0);
 
-    float y = r.y + 154, bottom = r.y + r.height - 82;
+    float y = r.y + 154, bottom = r.y + r.height - 118;
     if (app->prefs.tabs_side && app->ntabs > 1) y = tab_rows(app, r, y, 0);
     Rectangle view = {r.x, y, r.width, bottom - 4 - y};
     float content = 0, sel = -1;
@@ -342,7 +395,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
             DrawRectangleRounded(box, 0.25f, 6, ColorAlpha(JD_NORD10, 0.45f));
             if (app->pane == PANE_FOLDERS && !plat_touch()) DrawRectangleRoundedLinesEx(box, 0.25f, 6, 1.5f, JD_NORD8);
         }
-        else if (hover) DrawRectangleRounded(box, 0.25f, 6, JD_NORD3);
+        else if (hover && !plat_touch()) DrawRectangleRounded(box, 0.25f, 6, JD_NORD3);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             app->pane = PANE_FOLDERS;
             select_folder(app, i);
@@ -374,23 +427,26 @@ void sidebar_draw(jd_app *app, Rectangle r)
     DrawRectangle((int)r.x + 12, (int)bottom, (int)r.width - 24, 1, JD_NORD2);
     struct {
         const char *icon, *label;
-    } foot[] = {{"settings", "Settings"}, {"circle-help", "Keys (?)"}};
-    float fx = r.x + 12;
-    for (int k = 0; k < 2; k++) {
+    } foot[] = {{"calendar", "Calendar"}, {"settings", "Settings"}, {"circle-help", "Keys (?)"}};
+    /* the calendar on a line of its own, Settings and Keys under it */
+    float fx = r.x + 12, fy = bottom + 8;
+    for (int k = 0; k < 3; k++) {
+        if (k == 1) fx = r.x + 12, fy += 36;
         float fw = jd_text_width(ui, foot[k].label, 13, 0) + 40;
-        Rectangle b = {fx, bottom + 8, fw, 32};
+        Rectangle b = {fx, fy, fw, 32};
         int hover = CheckCollisionPointRec(GetMousePosition(), b) && free_input;
         if (hover) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
-        jd_icon(foot[k].icon, fx + 10, bottom + 16, 16, hover ? JD_NORD8 : JD_NORD4);
-        jd_text(ui, foot[k].label, fx + 32, bottom + 17, 13, JD_NORD4, 0);
+        jd_icon(foot[k].icon, fx + 10, fy + 8, 16, hover ? JD_NORD8 : JD_NORD4);
+        jd_text(ui, foot[k].label, fx + 32, fy + 9, 13, JD_NORD4, 0);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             drawer_done(app);
-            if (k == 0) settings_open(app);
+            if (k == 0) calendar_open(app);
+            else if (k == 1) settings_open(app);
             else app->help = 1;
         }
         fx += fw + 4;
     }
     char version[96];
     snprintf(version, sizeof version, "jackdaw %s", jd_version);
-    jd_text_fit(ui, version, r.x + 22, bottom + 50, r.width - 34, 12, JD_NORD4, 0);
+    jd_text_fit(ui, version, r.x + 22, fy + 42, r.width - 34, 12, JD_NORD4, 0);
 }

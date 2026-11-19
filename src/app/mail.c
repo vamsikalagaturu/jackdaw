@@ -8,9 +8,26 @@
 #include "app.h"
 #include "core/util.h"
 #include "platform.h"
+#include "rlgl.h"
 #include "ui/icons.h"
 
 enum { TAB_H = 34, BAR_H = 28, SPLIT = 5 };
+
+/* The phone's drawer slides; drawer_k is how far it is out (0 to 1). What it slides over as it opens and the drawer
+   itself as it closes cannot be drawn live (the page would take the taps, and by then the sidebar draws as the rail),
+   so drawer_shot holds the screen of the frame it opened or closed in. */
+static float drawer_k;
+static Texture2D drawer_shot;
+
+static void drawer_capture(void)
+{
+    if (drawer_shot.id) UnloadTexture(drawer_shot);
+    /* the frame's pending draws first: the screen is read as it stands */
+    rlDrawRenderBatchActive();
+    Image im = LoadImageFromScreen();
+    drawer_shot = LoadTextureFromImage(im);
+    UnloadImage(im);
+}
 
 void notify_user(jd_app *app, const char *fmt, ...)
 {
@@ -27,7 +44,8 @@ void save_prefs(jd_app *app)
     app->prefs.sidebar_width = (int)app->side_w;
     app->prefs.list_width = (int)app->list_w;
     app->prefs.list_height = (int)app->list_h;
-    jd_settings_save(app->have_account ? &app->account : NULL, &app->prefs);
+    settings_write(app);
+    share_changed(app);
 }
 
 static void unload_fonts(jd_ui *ui)
@@ -95,12 +113,33 @@ void apply_prefs(jd_app *app)
     }
 }
 
+void mail_view_reset(jd_app *app)
+{
+    reader_close(app);
+    jd_folder_rows_free(app->folders, app->nfolders);
+    jd_thread_rows_free(app->rows, app->nrows);
+    app->folders = NULL;
+    app->rows = NULL;
+    app->nfolders = app->folder = app->nrows = app->row = 0;
+    free(app->status), free(app->error), free(app->query), free(app->server_hits), free(app->filter_from);
+    app->status = app->error = app->query = app->filter_from = NULL;
+    app->server_hits = NULL;
+    app->nserver_hits = 0;
+    free(app->picked);
+    app->picked = NULL;
+    app->npicked = 0;
+    app->list_scroll = app->side_scroll = 0;
+    free(app->dialog.ids);
+    app->dialog = (jd_dialog){0};
+}
+
 void mail_reload(jd_app *app)
 {
     if (!app->view) return;
     int64_t keep = app->nfolders ? app->folders[app->folder].id : 0;
     jd_folder_rows_free(app->folders, app->nfolders);
     app->folders = jd_store_folders(app->view, &app->nfolders);
+    share_check(app);
     app->folder = 0;
     for (int i = 0; i < app->nfolders; i++)
         if (app->folders[i].id == keep) app->folder = i;
@@ -414,7 +453,8 @@ jd_mode current_mode(jd_app *app)
     jd_tab *t = &app->tabs[app->tab];
     if (app->searching || (app->dialog.kind == DLG_PROMPT || app->dialog.kind == DLG_PICK_FOLDER) ||
         (t->kind == TAB_COMPOSE && compose_inserting(t->compose)) || (t->kind == TAB_SETTINGS && app->settings_focus >= 0) ||
-        (t->kind == TAB_FILTERS && app->filters.state == 1) || app->show_form)
+        (t->kind == TAB_FILTERS && app->filters.state == 1) || (t->kind == TAB_CALENDAR && calendar_typing()) ||
+        app->show_form)
         return MODE_INSERT;
     return app->visual || reader_visual() || (t->kind == TAB_COMPOSE && compose_visual(t->compose)) ? MODE_VISUAL
                                                                                                    : MODE_NORMAL;
@@ -427,14 +467,15 @@ static void footer(jd_app *app, float sw, float sh)
     float y = sh - BAR_H;
     DrawRectangleV((Vector2){0, y}, (Vector2){sw, BAR_H}, JD_NORD1);
     static const char *names[] = {"NORMAL", "VISUAL", "INSERT"};
-    Color colors[] = {JD_NORD10, (Color){0xb4, 0x8e, 0xad, 0xff}, (Color){0x8f, 0xa8, 0x76, 0xff}};
+    /* the theme's accent, magenta and green, with the text buttons on the accent use */
+    Color colors[] = {JD_NORD10, JD_PURPLE, JD_GREEN};
     jd_mode m = current_mode(app);
     float x = 12;
     /* the mode and the pane with the keys mean nothing on a touch screen */
     if (!plat_touch()) {
         float mw = jd_text_width(ui, names[m], 12, 1) + 20;
         DrawRectangleV((Vector2){0, y}, (Vector2){mw, BAR_H}, colors[m]);
-        jd_text(ui, names[m], 10, y + 8, 12, (Color){0xff, 0xff, 0xff, 0xff}, 1);
+        jd_text(ui, names[m], 10, y + 8, 12, JD_ON_ACCENT, 1);
         x = mw + 12;
     }
     /* which pane has the keys, beside the mode */
@@ -444,7 +485,7 @@ static void footer(jd_app *app, float sw, float sh)
         jd_text(ui, pane, x, y + 7, 14, JD_NORD8, 1);
         x += jd_text_width(ui, pane, 14, 1) + 16;
     }
-    const char *chord = app->pending_g ? "g  (g top, i Inbox, s Sent, d Drafts, a Archive, t Trash, j Junk)"
+    const char *chord = app->pending_g ? "g  (g top, i Inbox, s Sent, d Drafts, a Archive, t Trash, j Junk, c Calendar)"
                         : app->pending_d ? "d  (d again deletes)"
                         : reader_caret() ? "Caret: h j k l w b move, v starts selecting, Esc leaves"
                         : reader_visual() ? "y copies, v or Esc stops selecting"
@@ -455,9 +496,13 @@ static void footer(jd_app *app, float sw, float sh)
         x += jd_text_width(ui, chord, 14, 1) + 16;
     }
     int noting = app->notice[0] && GetTime() < app->notice_until;
-    const char *line = app->error ? app->error : app->status ? app->status : noting ? app->notice : "Up to date";
-    jd_icon(app->error ? "triangle-alert" : app->status ? "refresh-cw" : noting ? "check" : "circle-check", x, y + 6, 15,
-            app->error ? JD_NORD13 : noting ? JD_NORD8 : JD_NORD4);
+    /* the calendar's tab shows its own worker */
+    int cal = app->tabs[app->tab].kind == TAB_CALENDAR;
+    const char *error = cal ? calendar_error() : app->error, *status = cal ? calendar_status() : app->status;
+    const char *line = noting && cal ? app->notice : error ? error : status ? status : noting ? app->notice
+                       : cal ? (calendar_connected() ? "Calendars up to date" : "No calendar connected") : "Up to date";
+    jd_icon(error && !(noting && cal) ? "triangle-alert" : status ? "refresh-cw" : noting ? "check" : "circle-check", x, y + 6, 15,
+            error && !(noting && cal) ? JD_NORD13 : noting ? JD_NORD8 : JD_NORD4);
     char counts[200] = "";
     if (app->tab == 0 && app->nfolders) {
         const jd_folder_row *f = &app->folders[app->folder];
@@ -468,7 +513,7 @@ static void footer(jd_app *app, float sw, float sh)
         if (!app->query && f->unread) snprintf(counts + n, sizeof counts - (size_t)n, "  ·  %d unread", f->unread);
     }
     float cw = jd_text_width(ui, counts, 14, 0);
-    jd_text_fit(ui, line, x + 22, y + 7, sw - x - 40 - cw - 24, 14, app->error ? JD_NORD13 : JD_NORD4, 0);
+    jd_text_fit(ui, line, x + 22, y + 7, sw - x - 40 - cw - 24, 14, line == error ? JD_NORD13 : JD_NORD4, 0);
     jd_text(ui, counts, sw - cw - 14, y + 7, 14, JD_NORD4, 0);
 }
 
@@ -482,9 +527,11 @@ static void tab_keys(jd_app *app)
         if (conv_keys(app, &t->conv)) {
         } else if (IsKeyPressed(KEY_ESCAPE)) tab_close(app, app->tab);
         else if (IsKeyPressed(KEY_R)) compose_open(app, shift ? COMPOSE_REPLY_ALL : COMPOSE_REPLY, last);
+        else if (IsKeyPressed(KEY_B) && last) message_snooze(app, last);
         else if (IsKeyPressed(KEY_F) && shift) compose_open(app, COMPOSE_FORWARD, last);
     } else if (t->kind == TAB_FILTERS) filters_keys(app);
     else if (t->kind == TAB_SETTINGS) settings_keys(app);
+    else if (t->kind == TAB_CALENDAR) calendar_keys(app);
     else compose_keys(app, t->compose);
 }
 
@@ -492,9 +539,14 @@ void mail_frame(jd_app *app)
 {
     float sw = jd_screen_w(), sh = jd_screen_h();
     pending_tick(app, 0);
+    compose_held_tick(app);
     int shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     int ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-    int free_keys = !app->dialog.kind && !app->menu.open && !app->help;
+    int free_keys = !app->dialog.kind && !app->menu.open && !app->help && !snooze_open_now() && !accounts_menu_open();
+    /* Ctrl+Shift+1..9: that account */
+    if (free_keys && ctrl && shift && current_mode(app) != MODE_INSERT)
+        for (int k = 0; k < 9; k++)
+            if (IsKeyPressed(KEY_ONE + k)) account_switch(app, k);
     if (free_keys && current_mode(app) != MODE_INSERT && IsKeyPressed(KEY_SLASH) && shift) {
         app->help = 1;
         GetCharPressed();
@@ -511,21 +563,32 @@ void mail_frame(jd_app *app)
     float side = app->prefs.sidebar_rail ? 60 : fmaxf(170, fminf(app->side_w ? app->side_w : 230, sw * 0.4f));
     float body_h = sh - top - BAR_H;
     SetMouseCursor(MOUSE_CURSOR_DEFAULT);
-    /* On a phone the full sidebar is a drawer over the page, which is too narrow to share: the page is not drawn
-       behind it (so it takes no taps), and a tap on the dimmed rest closes it, as choosing a folder does. */
-    if (plat_touch() && !app->prefs.sidebar_rail && app->tabs[app->tab].kind == TAB_MAIL) {
-        float dw = sw * 0.8f < 300 ? sw * 0.8f : 300;
+    /* On a phone the full sidebar is a drawer over the page, which is too narrow to share: the page shows behind it
+       as it was when the drawer opened (so it takes no taps), and a tap on the dimmed rest closes it, as choosing a
+       folder does. */
+    const float DRAWER_S = 0.25f;
+    float dw = sw * 0.8f < 300 ? sw * 0.8f : 300;
+    int drawer = plat_touch() && !app->prefs.sidebar_rail && app->tabs[app->tab].kind == TAB_MAIL;
+    drawer_k = drawer ? fminf(1, drawer_k + GetFrameTime() / DRAWER_S) : fmaxf(0, drawer_k - GetFrameTime() / DRAWER_S);
+    float out = 1 - (1 - drawer_k) * (1 - drawer_k) * (1 - drawer_k);
+    if (drawer) {
+        if (drawer_shot.id) {
+            jd_scale_end();
+            DrawTexture(drawer_shot, 0, 0, WHITE);
+            jd_scale_begin();
+        }
+        DrawRectangleRec((Rectangle){0, top, sw, body_h}, ColorAlpha(BLACK, 0.45f * out));
         Rectangle rest = {dw, top, sw - dw, body_h};
-        DrawRectangleRec(rest, ColorAlpha(BLACK, 0.45f));
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), rest)) {
             app->prefs.sidebar_rail = 1;
             save_prefs(app);
         }
-        sidebar_draw(app, (Rectangle){0, top, dw, body_h});
+        sidebar_draw(app, (Rectangle){dw * (out - 1), top, dw, body_h});
         footer(app, sw, sh);
         jd_tooltip_draw(&app->ui);
         menu_draw(app);
         dialog_draw(app);
+        if (app->prefs.sidebar_rail) drawer_capture();
         return;
     }
     /* a phone gives what is open (a message, compose, settings) the whole width; the folders are the list's */
@@ -543,7 +606,7 @@ void mail_frame(jd_app *app)
     jd_tab *t = &app->tabs[app->tab];
     /* a phone has no Esc to close what is open: a back bar does it, to the folder it came from */
     Rectangle actions = {0};
-    if (plat_touch() && (t->kind == TAB_CONV || t->kind == TAB_COMPOSE || t->kind == TAB_FILTERS)) {
+    if (plat_touch() && (t->kind == TAB_CONV || t->kind == TAB_COMPOSE || t->kind == TAB_FILTERS || t->kind == TAB_CALENDAR)) {
         const char *to = app->nfolders ? folder_label(&app->folders[app->folder]) : "Back";
         Rectangle back = {page.x, page.y, page.width, 44};
         int hover = CheckCollisionPointRec(GetMousePosition(), back) && !app->dialog.kind && !app->menu.open;
@@ -618,7 +681,10 @@ void mail_frame(jd_app *app)
         jd_scissor(page.x, page.y, page.width, page.height);
         if (pg.leaving && pg.at >= 0)
             conv_draw(app, &pg.out, (Rectangle){page.x + shift + pg.dir * page.width, page.y, page.width, page.height}, 0);
+        /* a reply or forward from the conversation opens a tab, and tab_add may move the tabs: t is looked up again */
+        t = &app->tabs[pg.tab];
         conv_draw(app, &t->conv, (Rectangle){page.x + shift, page.y, page.width, page.height}, 1);
+        t = &app->tabs[pg.tab];
         if (pg.at == 0 && !drag) pg.at = GetTime();
         /* the next message is named from the list: opening it early would mark it read */
         if (drag && (shift > 1 || shift < -1)) {
@@ -650,12 +716,29 @@ void mail_frame(jd_app *app)
     }
     else if (t->kind == TAB_FILTERS) filters_draw(app, page);
     else if (t->kind == TAB_SETTINGS) settings_draw(app, page);
+    else if (t->kind == TAB_CALENDAR) calendar_draw(app, page);
     else compose_draw(app, t->compose, page);
 
+    if (drawer_k > 0 && drawer_shot.id) {
+        DrawRectangleRec((Rectangle){0, top, sw, body_h}, ColorAlpha(BLACK, 0.45f * out));
+        jd_scissor(0, top, dw * out, body_h);
+        jd_scale_end();
+        DrawTexture(drawer_shot, (int)(dw * (out - 1) * (float)drawer_shot.width / sw), 0, WHITE);
+        jd_scale_begin();
+        jd_scissor_end();
+    } else if (drawer_shot.id) {
+        UnloadTexture(drawer_shot);
+        drawer_shot = (Texture2D){0};
+    }
     footer(app, sw, sh);
     jd_tooltip_draw(&app->ui);
     toast(app, sh);
+    /* above the undo toast when that shows too */
+    compose_held_draw(app, app->pending.ids && app->pending.due >= 0 ? sh - BAR_H - 62 - 4 : sh - BAR_H - 10);
     menu_draw(app);
+    snooze_draw(app);
+    accounts_menu_draw(app);
     dialog_draw(app);
     help_draw(app);
+    if (plat_touch() && !app->prefs.sidebar_rail && app->tabs[app->tab].kind == TAB_MAIL) drawer_capture();
 }

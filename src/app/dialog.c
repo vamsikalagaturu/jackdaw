@@ -41,6 +41,16 @@ static const jd_folder_row *picked(jd_app *app)
     return NULL;
 }
 
+/* a typed folder path as the server names it: inside the personal namespace unless renaming a folder outside it */
+static char *server_name(jd_app *app, const jd_folder_row *renamed, const char *typed)
+{
+    if (renamed && !strcmp(renamed->path, renamed->name)) return jd_strdup(typed);
+    char *prefix = app->view ? jd_store_namespace(app->view) : jd_strdup("");
+    char *out = jd_printf("%s%s", prefix, typed);
+    free(prefix);
+    return out;
+}
+
 static void confirm(jd_app *app)
 {
     jd_dialog *d = &app->dialog;
@@ -55,19 +65,54 @@ static void confirm(jd_app *app)
         compose_discard(app);
         return;
     }
+    if (d->act == ACT_SEND_LATER) {
+        char *typed = jd_strdup(d->field.text);
+        close_dialog(app);
+        compose_schedule_typed(app, typed);
+        free(typed);
+        return;
+    }
+    if (d->act == ACT_DELETE_EVENT) {
+        close_dialog(app);
+        calendar_delete_confirmed(app);
+        return;
+    }
+    if (d->act == ACT_USE_SHARED) {
+        close_dialog(app);
+        share_decided(app, 1);
+        return;
+    }
+    if (d->act == ACT_SNOOZE_AT) {
+        char *typed = jd_strdup(d->field.text);
+        close_dialog(app);
+        snooze_typed(app, typed);
+        free(typed);
+        return;
+    }
     if (!app->sync) {
         close_dialog(app);
         return;
     }
     switch (d->act) {
     case ACT_LOGOUT:
-    case ACT_DISCARD: break;
+    case ACT_DISCARD:
+    case ACT_SEND_LATER:
+    case ACT_DELETE_EVENT:
+    case ACT_USE_SHARED:
+    case ACT_SNOOZE_AT: break;
     case ACT_CREATE_FOLDER:
-        if (d->field.len) jd_sync_create_folder(app->sync, d->field.text);
+        if (d->field.len) {
+            char *name = server_name(app, NULL, d->field.text);
+            jd_sync_create_folder(app->sync, name);
+            free(name);
+        }
         break;
     case ACT_RENAME_FOLDER:
-        if (d->field.len && current && !jd_streq(d->field.text, current->name))
-            jd_sync_rename_folder(app->sync, current->name, d->field.text);
+        if (d->field.len && current && !jd_streq(d->field.text, current->path)) {
+            char *name = server_name(app, current, d->field.text);
+            jd_sync_rename_folder(app->sync, current->name, name);
+            free(name);
+        }
         break;
     case ACT_DELETE_FOLDER:
         if (current) jd_sync_delete_folder(app->sync, current->name);
@@ -181,6 +226,14 @@ void dialog_draw(jd_app *app)
     float x = box.x + 20, y = box.y + 18;
     jd_text_fit(ui, d->title, x, y, w - 40, 16, JD_NORD6, 1);
     y += 34;
+    if (d->kind == DLG_CONFIRM && d->act == ACT_USE_SHARED) {
+        if (jd_button(ui, "Use those", (Rectangle){x, y + 10, 130, 34}, 1)) confirm(app);
+        else if (jd_button(ui, "Keep this device's", (Rectangle){x + 142, y + 10, 170, 34}, 0)) {
+            close_dialog(app);
+            share_decided(app, 0);
+        }
+        return;
+    }
     if (d->kind == DLG_CONFIRM) {
         if (jd_button(ui, d->act == ACT_LOGOUT ? "Log out" : "Delete", (Rectangle){x, y + 10, 110, 34}, 1)) confirm(app);
         else if (jd_button(ui, "Cancel", (Rectangle){x + 122, y + 10, 110, 34}, 0)) close_dialog(app);

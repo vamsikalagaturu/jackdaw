@@ -163,6 +163,24 @@ int jd_imap_list(jd_imap *m, jd_mailbox **out, int *n)
     return JD_IMAP_OK;
 }
 
+int jd_imap_namespace(jd_imap *m, char **prefix, char *delim)
+{
+    *prefix = jd_strdup("");
+    *delim = 0;
+    if (!mailimap_has_namespace(m->s)) return JD_IMAP_OK;
+    struct mailimap_namespace_data *ns = NULL;
+    if (!ok(mailimap_namespace(m->s, &ns))) return JD_IMAP_ERROR;
+    clist *personal = ns && ns->ns_personal ? ns->ns_personal->ns_data_list : NULL;
+    if (personal && clist_begin(personal)) {
+        struct mailimap_namespace_info *info = clist_content(clist_begin(personal));
+        free(*prefix);
+        *prefix = jd_strdup(info->ns_prefix);
+        *delim = info->ns_delimiter;
+    }
+    if (ns) mailimap_namespace_data_free(ns);
+    return JD_IMAP_OK;
+}
+
 void jd_mailboxes_free(jd_mailbox *b, int n)
 {
     for (int i = 0; i < n; i++) free(b[i].name), free(b[i].special_use);
@@ -315,7 +333,12 @@ static void parse_header(const struct mailimap_msg_att *att, jd_header *h)
         case MAILIMAP_MSG_ATT_BODYSTRUCTURE: h->has_attachment = body_has_attachment(st->att_data.att_bodystructure); break;
         case MAILIMAP_MSG_ATT_BODY_SECTION: {
             const struct mailimap_msg_att_body_section *sec = st->att_data.att_body_section;
-            if (sec && sec->sec_body_part) h->refs = jd_mime_references(sec->sec_body_part, sec->sec_length, &h->nrefs);
+            if (!sec || !sec->sec_body_part) break;
+            h->refs = jd_mime_references(sec->sec_body_part, sec->sec_length, &h->nrefs);
+            char *at = jd_mime_field(sec->sec_body_part, sec->sec_length, "X-Send-Later-At");
+            h->send_at = jd_mime_date(at);
+            h->send_uuid = jd_mime_field(sec->sec_body_part, sec->sec_length, "X-Send-Later-Uuid");
+            free(at);
             break;
         }
         case MAILIMAP_MSG_ATT_ENVELOPE: {
@@ -353,6 +376,8 @@ int jd_imap_fetch_headers(jd_imap *m, const uint32_t *uids, int n, jd_header_cb 
     if (m->condstore) mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_modseq());
     clist *hdrs = clist_new();
     clist_append(hdrs, jd_strdup("References"));
+    clist_append(hdrs, jd_strdup("X-Send-Later-At"));
+    clist_append(hdrs, jd_strdup("X-Send-Later-Uuid"));
     struct mailimap_section *sec = mailimap_section_new_header_fields(mailimap_header_list_new(hdrs));
     mailimap_fetch_type_new_fetch_att_list_add(ft, mailimap_fetch_att_new_body_peek_section(sec));
     struct mailimap_set *set = uid_set(uids, n);
@@ -442,6 +467,58 @@ int jd_imap_set_flag(jd_imap *m, const uint32_t *uids, int n, int flag, int on)
     mailimap_set_free(set);
     mailimap_store_att_flags_free(att);
     return ok(r) ? JD_IMAP_OK : JD_IMAP_ERROR;
+}
+
+int jd_imap_set_keyword(jd_imap *m, const uint32_t *uids, int n, const char *keyword, int on, int seen)
+{
+    if (n <= 0) return JD_IMAP_OK;
+    struct mailimap_flag_list *flags = mailimap_flag_list_new_empty();
+    mailimap_flag_list_add(flags, mailimap_flag_new_flag_keyword(jd_strdup(keyword)));
+    struct mailimap_set *set = uid_set(uids, n);
+    struct mailimap_store_att_flags *att = on ? mailimap_store_att_flags_new_add_flags_silent(flags)
+                                              : mailimap_store_att_flags_new_remove_flags_silent(flags);
+    int r = mailimap_uid_store(m->s, set, att);
+    mailimap_store_att_flags_free(att);
+    if (ok(r) && seen) {
+        struct mailimap_flag_list *sf = mailimap_flag_list_new_empty();
+        mailimap_flag_list_add(sf, mailimap_flag_new_seen());
+        att = seen > 0 ? mailimap_store_att_flags_new_add_flags_silent(sf) : mailimap_store_att_flags_new_remove_flags_silent(sf);
+        r = mailimap_uid_store(m->s, set, att);
+        mailimap_store_att_flags_free(att);
+    }
+    mailimap_set_free(set);
+    return ok(r) ? JD_IMAP_OK : JD_IMAP_ERROR;
+}
+
+int jd_imap_claim(jd_imap *m, uint32_t uid, uint64_t modseq, const char *keyword, int *claimed)
+{
+    *claimed = 0;
+    /* by hand: libetpan 1.10.1's mailimap_uid_store_unchangedsince leaves out the space before "(UNCHANGEDSINCE",
+       which servers answer with BAD */
+    char modifier[48] = "";
+    if (modseq) snprintf(modifier, sizeof modifier, " (UNCHANGEDSINCE %llu)", (unsigned long long)modseq);
+    char *cmd = jd_printf("UID STORE %u%s +FLAGS.SILENT (\\Deleted%s%s)", uid, modifier, keyword ? " " : "",
+                          keyword ? keyword : "");
+    int r = mailimap_custom_command(m->s, cmd);
+    free(cmd);
+    /* a server taking no keywords (no \* in PERMANENTFLAGS) refuses the store */
+    if (r == MAILIMAP_ERROR_CUSTOM_COMMAND && keyword) return jd_imap_claim(m, uid, modseq, NULL, claimed);
+    if (!ok(r)) return JD_IMAP_ERROR;
+    if (!modseq) {
+        *claimed = 1;
+        return JD_IMAP_OK;
+    }
+    /* a lost claim is still a tagged OK, with the uid in its [MODIFIED] code */
+    *claimed = 1;
+    clist *exts = m->s->imap_response_info ? m->s->imap_response_info->rsp_extension_list : NULL;
+    for (clistiter *it = exts ? clist_begin(exts) : NULL; it; it = clist_next(it)) {
+        struct mailimap_extension_data *ext = clist_content(it);
+        if (ext->ext_extension && ext->ext_extension->ext_id == MAILIMAP_EXTENSION_CONDSTORE &&
+            ext->ext_type == MAILIMAP_CONDSTORE_TYPE_RESP_TEXT_CODE &&
+            ((struct mailimap_condstore_resptextcode *)ext->ext_data)->cs_type == MAILIMAP_CONDSTORE_RESPTEXTCODE_MODIFIED)
+            *claimed = 0;
+    }
+    return JD_IMAP_OK;
 }
 
 int jd_imap_search_text(jd_imap *m, const char *words, uint32_t **uids, int *n)

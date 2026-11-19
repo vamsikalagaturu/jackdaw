@@ -16,12 +16,12 @@ step "jackdaw ($MODE)"
 if [ "$MODE" = debug ]; then
     BUILD=$ROOT/build-debug
     SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
-    cmake --fresh -S "$REPO" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$RAYLIB_OUT" -DJD_LIBETPAN_DIR="$LIBETPAN_OUT" \
+    cmake --fresh -S "$REPO" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$RAYLIB_OUT" -DJD_LIBETPAN_DIR="$LIBETPAN_OUT" -DJD_LIBICAL_DIR="$LIBICAL_OUT" \
         -DCMAKE_C_FLAGS="$SAN" -DCMAKE_CXX_FLAGS="$SAN" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
 else
     BUILD=$ROOT/build
-    cmake --fresh -S "$REPO" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$RAYLIB_OUT" -DJD_LIBETPAN_DIR="$LIBETPAN_OUT" \
+    cmake --fresh -S "$REPO" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$RAYLIB_OUT" -DJD_LIBETPAN_DIR="$LIBETPAN_OUT" -DJD_LIBICAL_DIR="$LIBICAL_OUT" \
         -DCMAKE_C_FLAGS_RELEASE="$SIZE_CFLAGS -DNDEBUG" -DCMAKE_CXX_FLAGS_RELEASE="$SIZE_CFLAGS -DNDEBUG" \
         -DCMAKE_EXE_LINKER_FLAGS="-Wl,--gc-sections" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON >/dev/null
 fi

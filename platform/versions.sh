@@ -30,6 +30,25 @@ SQLITE_VERSION=3540100
 SQLITE_URL=https://sqlite.org/2026/sqlite-autoconf-$SQLITE_VERSION.tar.gz
 SQLITE_SHA256=926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e
 
+# iCalendar (RFC 5545): parsing, recurrence and time zones of calendar events (MPL-2.0 / LGPL-2.1), static; no
+# .asc upstream, the SHA-256 is of the release download
+LIBICAL_VERSION=4.0.8
+LIBICAL_URL=https://github.com/libical/libical/releases/download/v$LIBICAL_VERSION/libical-$LIBICAL_VERSION.tar.gz
+LIBICAL_SHA256=cd486bb3ece8256c34f1a236e174992c66ecb46b592a65f3f55d24d49eb66a5d
+
+# JSON of Google's OAuth token answers (MIT); two files at a release tag, compiled by CMakeLists.txt
+CJSON_VERSION=1.7.19
+CJSON_URL=https://raw.githubusercontent.com/DaveGamble/cJSON/v$CJSON_VERSION
+CJSON_C_SHA256=298581a04a36c0165da4b0aade235c23088cb2faa58651d720ea2f3706ed0b0d
+CJSON_H_SHA256=25b0145150d500498e4d209cec69c18c42cf818bffcc54690be3b895a2a16dee
+CJSON_LICENSE_SHA256=a36dda207c36db5818729c54e7ad4e8b0c6fba847491ba64f372c1a2037b6d5c
+
+# Android only (Linux links the system's): the XML of CalDAV's WebDAV answers (MIT); the SHA-256 is of the tarball
+# whose signature (Sebastian Pipping, key CB8DE70A90CFBF6C3BF5CC5696262ACFFBD3AEC6) was checked
+EXPAT_VERSION=2.10.0
+EXPAT_URL=https://github.com/libexpat/libexpat/releases/download/R_${EXPAT_VERSION//./_}/expat-$EXPAT_VERSION.tar.gz
+EXPAT_SHA256=5466a341f9c692ef7a958a6881311be597f8e1ce345984cf78414f54793dea4c
+
 # Android only (Linux links the system's): OpenSSL for libetpan and libcurl (3.5 is the LTS line, to April 2030),
 # and libcurl for remote images in mail
 OPENSSL_VERSION=3.5.9
@@ -80,4 +99,22 @@ fetch_sources() {
     fetch_unpacked "$LIBETPAN_URL" "$LIBETPAN_SHA256" "libetpan-$LIBETPAN_VERSION" "$1"
     fetch_unpacked "$LITEHTML_URL" "$LITEHTML_SHA256" "litehtml-$LITEHTML_VERSION" "$1"
     fetch_unpacked "$SQLITE_URL" "$SQLITE_SHA256" "sqlite-$SQLITE_VERSION" "$1"
+    fetch_unpacked "$LIBICAL_URL" "$LIBICAL_SHA256" "libical-$LIBICAL_VERSION" "$1"
+    mkdir -p "$1/thirdparty/cjson-$CJSON_VERSION"
+    fetch "$CJSON_URL/cJSON.c" "$1/thirdparty/cjson-$CJSON_VERSION/cJSON.c" "$CJSON_C_SHA256"
+    fetch "$CJSON_URL/cJSON.h" "$1/thirdparty/cjson-$CJSON_VERSION/cJSON.h" "$CJSON_H_SHA256"
+    fetch "$CJSON_URL/LICENSE" "$1/thirdparty/cjson-$CJSON_VERSION/LICENSE" "$CJSON_LICENSE_SHA256"
+}
+
+# libical $LIBICAL_VERSION, static, into $1 with the CMake arguments that follow (a toolchain for Android): the
+# C library alone, with the system's zoneinfo (VTIMEZONEs in the calendar data cover what that lacks)
+build_libical() {
+    local out=$1 repo=$2
+    shift 2
+    cmake -Wno-author -S "$repo/thirdparty/libical-$LIBICAL_VERSION" -B "$out/libical.build" -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS_RELEASE="$SIZE_CFLAGS -DNDEBUG" -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DCMAKE_INSTALL_PREFIX="$out" -DCMAKE_INSTALL_LIBDIR=lib -DLIBICAL_STATIC=ON -DLIBICAL_CXX_BINDINGS=OFF \
+        -DLIBICAL_JAVA_BINDINGS=OFF -DLIBICAL_GLIB=OFF -DLIBICAL_GOBJECT_INTROSPECTION=OFF -DLIBICAL_BUILD_DOCS=OFF \
+        -DLIBICAL_BUILD_TESTING=OFF -DLIBICAL_BUILD_EXAMPLES=OFF -DCMAKE_DISABLE_FIND_PACKAGE_ICU=ON "$@" >/dev/null
+    cmake --build "$out/libical.build" --target install -j"$JOBS" >/dev/null
 }

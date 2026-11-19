@@ -1,5 +1,6 @@
 #pragma once
 
+typedef struct jd_toml jd_toml;
 typedef enum { JD_SEC_TLS, JD_SEC_STARTTLS } jd_security;
 
 /* the colour roles of the desktop theme's colors.toml, as [theme] in settings.toml names them (ui/theme.c) */
@@ -24,6 +25,18 @@ typedef struct {
     char *match, *action;
 } jd_rule;
 
+/* a calendar account, [[calendar]] in settings.toml */
+typedef struct {
+    int provider;      /* provider = "caldav" (1) | "google" (2) */
+    char *url;         /* url: where CalDAV discovery starts (a server, principal or calendar); unused for Google */
+    char *username;    /* username: the CalDAV login, or the Google address */
+    int check_minutes; /* check_minutes, default 15 */
+} jd_cal_account;
+
+/* what the account's calendars are filed under in the store and its keystore entry: "google:<address>" or
+   "caldav:<username>@<url>"; malloc'd */
+char *jd_cal_account_id(const jd_cal_account *a);
+
 /* everything in settings.toml besides [account] */
 typedef struct {
     int conversations;   /* [view] conversations, default true */
@@ -34,6 +47,7 @@ typedef struct {
     char *font_ui, *font_list, *font_reader, *font_mono; /* [fonts] ui, list, reader, mono: family names, "" = Inter */
     int attachment_list; /* [compose] attachment_list: a numbered list of the attached files in the body */
     int markdown;        /* [compose] markdown: the body is also sent as HTML, rendered from Markdown */
+    int undo_seconds;    /* [compose] undo_seconds: a sent message waits this long for Undo; 0, 5, 10 (default), 20, 30 */
     int mono_plain;      /* [fonts] mono_plain: plain-text mail in the monospace font */
     int sidebar_width, list_width, list_height; /* [view], pixels; 0 = default */
     int light;           /* the theme in use: scheme, with "system" resolved (apply_prefs) */
@@ -53,7 +67,13 @@ typedef struct {
     int update_check;    /* [updates] check: look for a new release once a day, default true */
     int prefetch_days;   /* [sync] prefetch_days, default 30; 0 downloads bodies only when opened */
     int check_minutes;   /* [sync] check_minutes, default 5: all folders; the Inbox waits in IDLE */
+    int share;           /* [sync] settings, default true: the JD_SHARE_* groups shared through the mail account */
     char *signature_new, *signature_reply;      /* [signature] new, reply */
+    jd_cal_account *cals; /* [[calendar]], one per calendar account; an older file's single [calendar] is the first */
+    int ncals;
+    int cal_reminders;   /* reminders (written in every [[calendar]]): notifications for events' alarms, default true */
+    int cal_view;        /* [view] calendar = "agenda" (0) | "day" (1) | "week" (2) | "month" (3); absent -1: the
+                            device's (week on a desktop, agenda on a phone) */
     jd_rule *rules;      /* [[rule]] */
     int nrules;
 } jd_prefs;
@@ -64,10 +84,30 @@ void jd_account_free(jd_account *a);
 void jd_prefs_load(jd_prefs *p);
 void jd_prefs_free(jd_prefs *p);
 void jd_prefs_add_rule(jd_prefs *p, const char *match, const char *action);
+/* the account with the same id is replaced; returns its index */
+int jd_prefs_add_calendar(jd_prefs *p, int provider, const char *url, const char *username, int check_minutes);
+void jd_prefs_remove_calendar(jd_prefs *p, int i);
 int jd_prefs_trusts_images(const jd_prefs *p, const char *address);
 void jd_prefs_trust_images(jd_prefs *p, const char *address, int trust);
 /* writes the whole file; an account without an address leaves [account] out */
-int jd_settings_save(const jd_account *a, const jd_prefs *p);
+/* [[account]], one per mail account, the first first; an older file's single [account] is read as the only one */
+int jd_settings_save(const jd_account *const *accounts, int naccounts, const jd_prefs *p);
+/* every complete account, 0 when there is at least one */
+int jd_accounts_load(jd_account **out, int *n, char *err, int errlen);
+void jd_accounts_free(jd_account *a, int n);
+
+/* The settings an account's jackdaws share ([sync] settings): groups compared and merged each on its own, the
+   newer change winning. Layout, sizes, fonts, push and the sync timers stay per device. */
+enum {
+    JD_SHARE_THEME, JD_SHARE_READING, JD_SHARE_NOTIFY, JD_SHARE_COMPOSE, JD_SHARE_SIGNATURE, JD_SHARE_RULES,
+    JD_SHARE_CALVIEW, JD_SHARE_CALENDARS, JD_SHARE_CHOICES, JD_SHARE_COUNT
+};
+/* the group's key in the copy's [stamps] */
+extern const char *const jd_share_names[JD_SHARE_COUNT];
+/* group g of p as TOML, the same text for the same settings; NULL for JD_SHARE_CHOICES, which the store holds */
+char *jd_share_text(const jd_prefs *p, int g);
+/* group g of a shared copy into p */
+void jd_share_apply(jd_prefs *p, int g, const jd_toml *t);
 const char *jd_settings_path(void);
 
 /* $XDG_DATA_HOME/jackdaw/<address>, created on demand */

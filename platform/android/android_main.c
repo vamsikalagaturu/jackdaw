@@ -179,8 +179,33 @@ static void setup_env(const char *files)
 
 /* Runs on the sync thread: Android stops the frame loop in the background. Attached to the JVM for the call
    only, as a native thread that exits attached aborts the process. */
-static void on_new_mail(const char *from, const char *subject, int64_t id, int count)
+/* The account of settings.toml with this address, and its place in [[account]] (notification tags carry it,
+   notify_tag); the first when address is NULL. 0 when found. */
+static int account_named(const char *address, jd_account *out, int *index)
 {
+    jd_account *all;
+    int n;
+    char err[256];
+    *out = (jd_account){0};
+    if (jd_accounts_load(&all, &n, err, sizeof err) != 0) return -1;
+    int found = -1;
+    for (int i = 0; i < n && found < 0; i++)
+        if (!address || (all[i].address && strcasecmp(all[i].address, address) == 0)) found = i;
+    if (found >= 0) {
+        *out = all[found];
+        all[found] = (jd_account){0};
+        if (index) *index = found;
+    }
+    jd_accounts_free(all, n);
+    return found >= 0 ? 0 : -1;
+}
+
+static void on_new_mail(const char *account, const char *from, const char *subject, int64_t id, int count)
+{
+    jd_account a;
+    int index = 0;
+    if (account_named(account, &a, &index) == 0) jd_account_free(&a);
+    id = notify_tag(index, id);
     jd_prefs p;
     jd_prefs_load(&p);
     int notify = p.notify, focused = p.notify_focused;
@@ -211,25 +236,117 @@ static void on_new_mail(const char *from, const char *subject, int64_t id, int c
     if (attached) (*vm)->DetachCurrentThread(vm);
 }
 
+static void scheduled_note(const char *subject, const char *err, char **title, char **text)
+{
+    const char *what = subject && subject[0] ? subject : "(no subject)";
+    *title = jd_strdup(err ? "Scheduled message not sent" : "Scheduled message sent");
+    *text = err ? jd_printf("%s: %s. It is back in Drafts.", what, err) : jd_strdup(what);
+}
+
+/* as on_new_mail; shown when the app is not on screen, which says it in its own notice */
+static void on_scheduled(const char *subject, const char *err)
+{
+    JavaVM *vm = GetAndroidApp()->activity->vm;
+    JNIEnv *e = NULL;
+    int attached = 0;
+    if ((*vm)->GetEnv(vm, (void **)&e, JNI_VERSION_1_6) != JNI_OK) {
+        if ((*vm)->AttachCurrentThread(vm, &e, NULL) != JNI_OK) return;
+        attached = 1;
+    }
+    char *title, *text;
+    scheduled_note(subject, err, &title, &text);
+    (*e)->PushLocalFrame(e, 8);
+    jobject act = GetAndroidApp()->activity->clazz;
+    jclass c = (*e)->GetObjectClass(e, act);
+    jmethodID m = (*e)->GetMethodID(e, c, "postNewMail",
+                                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+    if (m)
+        (*e)->CallObjectMethod(e, act, m, (*e)->NewStringUTF(e, title), (*e)->NewStringUTF(e, text),
+                               (*e)->NewStringUTF(e, "0"), (*e)->NewStringUTF(e, "0"));
+    if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
+    (*e)->PopLocalFrame(e, NULL);
+    free(title), free(text);
+    if (attached) (*vm)->DetachCurrentThread(vm);
+}
+
 void plat_init(void)
 {
     setup_env(GetAndroidApp()->activity->internalDataPath);
     jd_sync_new_mail_hook = on_new_mail;
+    jd_sync_scheduled_hook = on_scheduled;
+}
+
+/* SendAlarm, at the soonest scheduled draft's time; 0 cancels it */
+void plat_wake_at(int64_t t)
+{
+    static int64_t was = -1;
+    if (t == was) return;
+    was = t;
+    char at[32];
+    snprintf(at, sizeof at, "%lld", (long long)t);
+    free(java("wakeAt", 1, at));
+}
+
+/* ReminderAlarm: the reminders as lines of "at\ttitle\ttext", tabs and newlines in the text made spaces */
+int plat_reminders(int n, const int64_t *at, const char *const *title, const char *const *text)
+{
+    jd_buf spec = {0};
+    for (int i = 0; i < n; i++) {
+        jd_buf_addf(&spec, "%lld\t", (long long)at[i]);
+        for (int k = 0; k < 2; k++) {
+            for (const char *c = k ? text[i] : title[i]; c && *c; c++) jd_buf_add(&spec, *c == '\t' || *c == '\n' ? " " : c, 1);
+            jd_buf_adds(&spec, k ? "\n" : "\t");
+        }
+    }
+    static char *was;
+    const char *now = spec.s ? spec.s : "";
+    if (!was || strcmp(was, now) != 0) {
+        free(java("setReminders", 1, now));
+        free(was);
+        was = jd_strdup(now);
+    }
+    jd_buf_free(&spec);
+    return 1;
+}
+
+/* The soonest scheduled draft's time, 0 when none. One already due, or one waiting in the outbox, was not sent by
+   the check just made: tried again after sync.c's OUTBOX_RETRY. */
+static int64_t next_send(jd_store *view, const char *account_dir)
+{
+    int n = 0;
+    int64_t drafts = jd_store_special(view, "Drafts", NULL), at = 0, retry = jd_now() + 5 * 60;
+    jd_scheduled *due = drafts ? jd_store_scheduled(view, drafts, &n) : NULL;
+    if (n) at = due[0].send_at <= jd_now() ? retry : due[0].send_at;
+    free(due);
+    char *outbox = jd_printf("%s/outbox", account_dir);
+    DIR *d = opendir(outbox);
+    for (struct dirent *e; d && (e = readdir(d));)
+        if (e->d_name[0] != '.' && (!at || retry < at)) at = retry;
+    if (d) closedir(d);
+    free(outbox);
+    return at;
 }
 
 /* ---- the background check (MailJobService) ---- */
 
-JNIEXPORT jstring JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_nativeAccount(JNIEnv *e, jclass cls,
-                                                                                               jstring files)
+/* every account's address, one a line; NULL when there is none */
+JNIEXPORT jstring JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_nativeAccounts(JNIEnv *e, jclass cls,
+                                                                                                jstring files)
 {
     char *dir = jstr(e, files);
     if (!dir) return NULL;
     setup_env(dir);
     free(dir);
-    jd_account a = {0};
+    jd_account *all;
+    int n;
     char err[256];
-    jstring out = jd_account_load(&a, err, sizeof err) == 0 && a.address ? (*e)->NewStringUTF(e, a.address) : NULL;
-    jd_account_free(&a);
+    if (jd_accounts_load(&all, &n, err, sizeof err) != 0) return NULL;
+    jd_buf b = {0};
+    for (int i = 0; i < n; i++)
+        if (all[i].address) jd_buf_addf(&b, "%s%s", b.len ? "\n" : "", all[i].address);
+    jstring out = b.len ? (*e)->NewStringUTF(e, b.s) : NULL;
+    jd_buf_free(&b);
+    jd_accounts_free(all, n);
     return out;
 }
 
@@ -240,19 +357,21 @@ static volatile int push_quit;
 /* Stopped while JackdawActivity.running: one sync at a time, or the first to store a message would leave the
    other nothing new to notify. */
 JNIEXPORT void JNICALL Java_io_github_vamsikalagaturu_jackdaw_PushService_nativePush(JNIEnv *e, jclass cls,
-                                                                                     jstring files, jstring pw)
+                                                                                     jstring files, jstring addr,
+                                                                                     jstring pw)
 {
-    char *dir_files = jstr(e, files), *password = jstr(e, pw);
+    char *dir_files = jstr(e, files), *password = jstr(e, pw), *address = jstr(e, addr);
     jd_account a = {0};
+    int index = 0;
     char err[256];
     push_quit = 0;
     jclass activity = (*e)->FindClass(e, "io/github/vamsikalagaturu/jackdaw/JackdawActivity");
     jfieldID app_running = activity ? (*e)->GetStaticFieldID(e, activity, "running", "Z") : NULL;
     jmethodID posted = (*e)->GetStaticMethodID(e, cls, "posted", "(Ljava/lang/String;Ljava/lang/String;J)V");
     if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
-    if (!dir_files || !password || !app_running || !posted) goto done;
+    if (!dir_files || !password || !address || !app_running || !posted) goto done;
     setup_env(dir_files);
-    if (jd_account_load(&a, err, sizeof err) != 0) goto done;
+    if (account_named(address, &a, &index) != 0) goto done;
     char *dir = jd_account_dir(&a), *db = jd_printf("%s/mail.db", dir);
     jd_store *view = jd_store_open(db, err, sizeof err);
     jd_sync *s = NULL;
@@ -261,8 +380,9 @@ JNIEXPORT void JNICALL Java_io_github_vamsikalagaturu_jackdaw_PushService_native
         int app = (*e)->GetStaticBooleanField(e, activity, app_running);
         if (app && s) jd_sync_stop(s), s = NULL;
         if (!app && !s) {
-            /* the hook calls into the activity, which is gone */
+            /* the hooks call into the activity, which is gone */
             jd_sync_new_mail_hook = NULL;
+            jd_sync_scheduled_hook = NULL;
             s = jd_sync_start(&a, password, dir, db);
         }
         jd_event ev;
@@ -275,7 +395,17 @@ JNIEXPORT void JNICALL Java_io_github_vamsikalagaturu_jackdaw_PushService_native
                                            : jd_printf("%s: %s", ev.text ? ev.text : "", ev.text2 ? ev.text2 : "");
                 (*e)->PushLocalFrame(e, 4);
                 (*e)->CallStaticVoidMethod(e, cls, posted, (*e)->NewStringUTF(e, title), (*e)->NewStringUTF(e, text),
-                                           (jlong)ev.id);
+                                           (jlong)notify_tag(index, ev.id));
+                if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
+                (*e)->PopLocalFrame(e, NULL);
+                free(title), free(text);
+            }
+            if (ev.kind == JD_EV_SCHEDULED) {
+                char *title, *text;
+                scheduled_note(ev.text2, ev.text, &title, &text);
+                (*e)->PushLocalFrame(e, 4);
+                (*e)->CallStaticVoidMethod(e, cls, posted, (*e)->NewStringUTF(e, title), (*e)->NewStringUTF(e, text),
+                                           (jlong)0);
                 if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
                 (*e)->PopLocalFrame(e, NULL);
                 free(title), free(text);
@@ -289,7 +419,7 @@ JNIEXPORT void JNICALL Java_io_github_vamsikalagaturu_jackdaw_PushService_native
     free(dir), free(db);
 done:
     if (password) jd_wipe(password, strlen(password));
-    free(password), free(dir_files);
+    free(password), free(dir_files), free(address);
     jd_account_free(&a);
 }
 
@@ -302,23 +432,28 @@ JNIEXPORT void JNICALL Java_io_github_vamsikalagaturu_jackdaw_PushService_native
 #define CHECK_S 120.0
 
 JNIEXPORT jstring JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_nativeCheck(JNIEnv *e, jclass cls,
-                                                                                             jstring files, jstring pw)
+                                                                                             jstring files, jstring addr,
+                                                                                             jstring pw)
 {
-    char *dir_files = jstr(e, files), *password = jstr(e, pw);
+    char *dir_files = jstr(e, files), *password = jstr(e, pw), *address = jstr(e, addr);
     jstring out = NULL;
     jd_prefs p;
     jd_account a = {0};
+    int index = 0;
     char err[256];
-    if (!dir_files || !password) goto done;
+    if (!dir_files || !password || !address) goto done;
     setup_env(dir_files);
     jd_prefs_load(&p);
     int notify = p.notify;
     jd_prefs_free(&p);
-    if (!notify || jd_account_load(&a, err, sizeof err) != 0) goto done;
+    if (account_named(address, &a, &index) != 0) goto done;
     char *dir = jd_account_dir(&a), *db = jd_printf("%s/mail.db", dir);
     /* opened here first, as the app does, so the schema exists before the worker writes */
     jd_store *view = jd_store_open(db, err, sizeof err);
-    if (view) {
+    /* with notifications off it runs only to send scheduled drafts */
+    if (view && !notify && !next_send(view, dir)) {
+        jd_store_close(view);
+    } else if (view) {
         jd_sync *s = jd_sync_start(&a, password, dir, db);
         jd_buf lines = {0};
         int busy = 0, finished = 0;
@@ -329,17 +464,24 @@ JNIEXPORT jstring JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_
                 if (ev.kind == JD_EV_STATUS && ev.text) busy = 1;
                 else if (ev.kind == JD_EV_STATUS && busy) finished = 1;
                 else if (ev.kind == JD_EV_AUTH || (ev.kind == JD_EV_ERROR && busy)) finished = 1;
-                else if (ev.kind == JD_EV_NEW_MAIL && ev.count > 0) {
+                else if (ev.kind == JD_EV_NEW_MAIL && ev.count > 0 && notify) {
                     /* a tab or line break in a sender or subject would break the lines apart */
                     char *from = jd_strdup(ev.text ? ev.text : ""), *subject = jd_strdup(ev.text2 ? ev.text2 : "");
                     for (char *c = from; *c; c++)
                         if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
                     for (char *c = subject; *c; c++)
                         if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
-                    if (ev.count == 1) jd_buf_addf(&lines, "%lld\t%s\t%s\n", (long long)ev.id, from, subject);
-                    else
-                        jd_buf_addf(&lines, "%lld\t%d new messages\t%s: %s\n", (long long)ev.id, ev.count, from, subject);
+                    long long tag = (long long)notify_tag(index, ev.id);
+                    if (ev.count == 1) jd_buf_addf(&lines, "%lld\t%s\t%s\n", tag, from, subject);
+                    else jd_buf_addf(&lines, "%lld\t%d new messages\t%s: %s\n", tag, ev.count, from, subject);
                     free(from), free(subject);
+                } else if (ev.kind == JD_EV_SCHEDULED) {
+                    char *title, *text;
+                    scheduled_note(ev.text2, ev.text, &title, &text);
+                    for (char *c = text; *c; c++)
+                        if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
+                    jd_buf_addf(&lines, "0\t%s\t%s\n", title, text);
+                    free(title), free(text);
                 }
                 jd_event_free(&ev);
             }
@@ -355,9 +497,35 @@ JNIEXPORT jstring JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_
     free(dir), free(db);
 done:
     if (password) jd_wipe(password, strlen(password));
-    free(password), free(dir_files);
+    free(password), free(dir_files), free(address);
     jd_account_free(&a);
     return out;
+}
+
+/* for SendAlarm after a background check: next_send in epoch seconds, 0 when none */
+JNIEXPORT jlong JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_nativeNextSend(JNIEnv *e, jclass cls,
+                                                                                             jstring files)
+{
+    char *dir_files = jstr(e, files);
+    jd_account *all = NULL;
+    int n = 0;
+    char err[256];
+    int64_t at = 0;
+    if (dir_files) setup_env(dir_files);
+    /* the soonest of every account's */
+    if (dir_files && jd_accounts_load(&all, &n, err, sizeof err) == 0) {
+        for (int i = 0; i < n; i++) {
+            char *dir = jd_account_dir(&all[i]), *db = jd_printf("%s/mail.db", dir);
+            jd_store *view = jd_store_open(db, err, sizeof err);
+            int64_t next = view ? next_send(view, dir) : 0;
+            if (next && (!at || next < at)) at = next;
+            jd_store_close(view);
+            free(dir), free(db);
+        }
+        jd_accounts_free(all, n);
+    }
+    free(dir_files);
+    return (jlong)at;
 }
 
 float plat_density(void) { return GetWindowScaleDPI().x; }

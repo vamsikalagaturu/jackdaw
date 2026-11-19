@@ -30,5 +30,5 @@ target_compile_options(jackdaw PRIVATE -Wall -Wextra -Wno-unused-parameter)
 target_link_options(jackdaw PRIVATE -u ANativeActivity_onCreate -Wl,--no-undefined -Wl,--gc-sections
   -Wl,--wrap=GetCharPressed -Wl,--wrap=GetMouseWheelMove -Wl,--wrap=GetMouseWheelMoveV -Wl,--wrap=SetClipboardText
   -Wl,--wrap=GetClipboardText
-  -Wl,--exclude-libs,libssl.a:libcrypto.a:libcurl.a:libiconv.a:libetpan.a:libjd_sqlite.a:liblitehtml.a:libgumbo.a)
+  -Wl,--exclude-libs,libssl.a:libcrypto.a:libcurl.a:libiconv.a:libetpan.a:libical.a:libexpat.a:libjd_cjson.a:libjd_sqlite.a:liblitehtml.a:libgumbo.a)
 target_link_libraries(jackdaw PRIVATE jdapp raylib android log m)

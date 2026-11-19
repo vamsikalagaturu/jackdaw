@@ -23,6 +23,29 @@ final class Notifier {
     }
 
     static final String PUSH_CHANNEL = "push";
+    static final String REMINDER_CHANNEL = "reminders";
+
+    /* a calendar reminder (ReminderAlarm); a tap opens jackdaw */
+    static void remind(Context ctx, String title, String text) {
+        NotificationManager nm = ctx.getSystemService(NotificationManager.class);
+        if (nm == null || !nm.areNotificationsEnabled()) return;
+        if (nm.getNotificationChannel(REMINDER_CHANNEL) == null) {
+            NotificationChannel ch = new NotificationChannel(REMINDER_CHANNEL, "Calendar reminders", NotificationManager.IMPORTANCE_HIGH);
+            ch.setDescription("Events of your calendars about to start");
+            nm.createNotificationChannel(ch);
+        }
+        Intent open = new Intent(ctx, JackdawActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        PendingIntent tap = PendingIntent.getActivity(ctx, 2, open, PendingIntent.FLAG_IMMUTABLE);
+        Notification n = new Notification.Builder(ctx, REMINDER_CHANNEL)
+                             .setSmallIcon(icon(ctx))
+                             .setContentTitle(title)
+                             .setContentText(text)
+                             .setCategory(Notification.CATEGORY_REMINDER)
+                             .setContentIntent(tap)
+                             .setAutoCancel(true)
+                             .build();
+        nm.notify((title + "\n" + text).hashCode(), n);
+    }
 
     static void channel(Context ctx) {
         NotificationManager nm = ctx.getSystemService(NotificationManager.class);

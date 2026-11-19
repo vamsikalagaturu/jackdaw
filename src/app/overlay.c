@@ -8,7 +8,7 @@
 #include "ui/icons.h"
 
 typedef enum {
-    M_NONE, M_OPEN_TAB, M_REPLY, M_REPLY_ALL, M_FORWARD, M_READ, M_FLAG, M_ARCHIVE, M_MOVE, M_COPY, M_DELETE,
+    M_NONE, M_OPEN_TAB, M_REPLY, M_REPLY_ALL, M_FORWARD, M_READ, M_FLAG, M_ARCHIVE, M_SNOOZE, M_MOVE, M_COPY, M_DELETE,
     M_F_NEW, M_F_RENAME, M_F_DELETE, M_F_ALL_READ, M_SEP
 } menu_item;
 
@@ -22,7 +22,7 @@ static const entry row_menu[] = {
     {M_REPLY, "Reply", "reply", "r"}, {M_REPLY_ALL, "Reply all", "reply-all", "R"},
     {M_FORWARD, "Forward", "forward", "F"}, {M_SEP, NULL, NULL, NULL},
     {M_READ, "Read / unread", "mail-open", "u"}, {M_FLAG, "Flag", "star", "s"},
-    {M_ARCHIVE, "Archive", "archive", "e"}, {M_MOVE, "Move to...", "folder-input", "m"},
+    {M_ARCHIVE, "Archive", "archive", "e"}, {M_SNOOZE, "Snooze...", "bell", "b"}, {M_MOVE, "Move to...", "folder-input", "m"},
     {M_COPY, "Copy to...", "copy", "c"}, {M_DELETE, "Delete", "trash-2", "dd"}, {M_NONE, NULL, NULL, NULL},
 };
 
@@ -44,6 +44,7 @@ static void run(jd_app *app, menu_item item)
     case M_READ: act_toggle_read(app); break;
     case M_FLAG: act_toggle_flag(app); break;
     case M_ARCHIVE: act_archive(app); break;
+    case M_SNOOZE: act_snooze(app); break;
     case M_MOVE: dialog_open(app, DLG_PICK_FOLDER, ACT_MOVE, "Move to", NULL); break;
     case M_COPY: dialog_open(app, DLG_PICK_FOLDER, ACT_COPY, "Copy to", NULL); break;
     case M_DELETE: act_delete(app); break;
@@ -61,17 +62,17 @@ static void run(jd_app *app, menu_item item)
         break;
     case M_F_NEW:
         if (f) {
-            char *prefix = f->delim && strcasecmp(f->name, "INBOX") ? jd_printf("%s%c", f->name, f->delim) : jd_strdup("");
+            char *prefix = f->delim && strcasecmp(f->name, "INBOX") ? jd_printf("%s%c", f->path, f->delim) : jd_strdup("");
             dialog_open(app, DLG_PROMPT, ACT_CREATE_FOLDER, "New folder (full path)", prefix);
             free(prefix);
         }
         break;
     case M_F_RENAME:
-        if (f && strcasecmp(f->name, "INBOX")) dialog_open(app, DLG_PROMPT, ACT_RENAME_FOLDER, "Rename folder (full path)", f->name);
+        if (f && strcasecmp(f->name, "INBOX")) dialog_open(app, DLG_PROMPT, ACT_RENAME_FOLDER, "Rename folder (full path)", f->path);
         break;
     case M_F_DELETE:
         if (f && strcasecmp(f->name, "INBOX")) {
-            char *title = jd_printf("Delete the folder %s and all %d messages in it, on the server?", f->name, f->total);
+            char *title = jd_printf("Delete the folder %s and all %d messages in it, on the server?", f->path, f->total);
             dialog_open(app, DLG_CONFIRM, ACT_DELETE_FOLDER, title, NULL);
             free(title);
         }
@@ -142,12 +143,12 @@ static const char *help_lines[][2] = {
     {"Backspace", "at the start of the search: the last pill back into the text"},
     {"Tab  h  l", "folders / list / reader"},
     {"j  k  gg  G", "move"},
-    {"gi  gs  gd  ga  gt  gj", "go to Inbox, Sent, Drafts, Archive, Trash, Junk"}, {"Enter  Shift+Enter", "open, open in a tab"}, {"x  Shift+j/k  Ctrl+A", "select"},
+    {"gi  gs  gd  ga  gt  gj", "go to Inbox, Sent, Drafts, Archive, Trash, Junk"}, {"gc", "the calendar"}, {"Enter  Shift+Enter", "open, open in a tab"}, {"x  Shift+j/k  Ctrl+A", "select"},
     {"t", "conversations or single messages"}, {"p", "reading pane right, bottom or off"},
     {"fu  ff  fa  fs  fc", "filter: unread, flagged, files, this sender, clear"},
     {"Messages", NULL},
     {"r  R  F", "reply, reply all, forward"}, {"u  s", "read/unread, flag"},
-    {"e  dd  m  c", "archive, delete (d in visual mode, or Delete), move, copy"}, {"z", "undo the last move or delete"},
+    {"e  dd  m  c", "archive, delete (d in visual mode, or Delete), move, copy"}, {"b", "snooze: later today, tomorrow, Monday or a time"}, {"z", "undo the last move or delete"},
     {"Shift+M", "make a rule from the search"}, {"Ctrl+Shift+L  Ctrl+Shift+F", "rules, server filters"},
     {"Reader", NULL},
     {"Space  j  k", "scroll"}, {"o  Shift+P", "expand all, plain text or HTML"}, {"Shift+L", "light or dark mail page"},
@@ -157,6 +158,12 @@ static const char *help_lines[][2] = {
     {"Ctrl+S  Ctrl+P", "save the message as .eml in Downloads, print"},
     {"Folders", NULL},
     {"Space  a  Shift+R  Shift+D", "collapse, new, rename, delete"},
+    {"Calendar", NULL},
+    {"gc", "open the calendar"}, {"1  2  3  4", "day, week, month, agenda (also w m a)"},
+    {"h  l  Shift+h/l  t", "the day before, after (agenda: a week); the period before, after; today"},
+    {"j  k  Enter", "the next, previous event; its details (Enter again edits)"},
+    {"n  e  d  r", "new event, edit, delete, sync now"}, {"/", "search events: title, place, notes"},
+    {"Tab  Ctrl+S  Esc", "in an event: the next field, save, cancel"},
 };
 
 /* a line is shown when the filter is empty, or found in its keys, its description or its section's name */

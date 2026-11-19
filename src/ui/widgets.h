@@ -14,6 +14,8 @@ void jd_ui_use(jd_ui *ui, const jd_fonts *role);
 
 void jd_text(jd_ui *ui, const char *s, float x, float y, float size, Color c, int bold);
 float jd_text_width(jd_ui *ui, const char *s, float size, int bold);
+/* where s's drawn glyphs fall, from the point jd_text draws it at: for centring by the ink, not the line box */
+Rectangle jd_text_ink(jd_ui *ui, const char *s, float size, int bold);
 /* s cut with "..." to fit width */
 void jd_text_fit(jd_ui *ui, const char *s, float x, float y, float width, float size, Color c, int bold);
 
@@ -24,6 +26,7 @@ typedef struct {
     int selecting, anchor; /* a selection from anchor to cursor, while selecting */
     int secret;
     int bare; /* no box of its own: it sits inside one the caller draws */
+    int inert; /* set by the caller for a frame: the mouse belongs to something over the field */
     const char *placeholder;
 } jd_field;
 
@@ -97,6 +100,7 @@ typedef struct {
     int selecting, anchor; /* a selection runs from anchor to cursor while selecting is set */
     int dragging;
     int inert; /* set by the caller for a frame: the mouse belongs to something over the editor */
+    int drawn_cursor; /* the cursor when last drawn focused, else -1: a move since scrolls it into sight */
 } jd_editor;
 
 void jd_editor_set(jd_editor *e, const char *s);

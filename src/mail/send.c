@@ -1,8 +1,10 @@
 #define _GNU_SOURCE
 #include "send.h"
 
+#include <ctype.h>
 #include <fcntl.h>
 #include <libetpan/libetpan.h>
+#include <openssl/evp.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 #include <stdio.h>
@@ -155,17 +157,89 @@ static void quoted_printable(jd_buf *b, const char *s)
     jd_buf_adds(b, "\r\n");
 }
 
-static void date_header(jd_buf *b)
+/* an RFC 5322 date-time field */
+static void date_header(jd_buf *b, const char *field, time_t t)
 {
     static const char *days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
     static const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-    time_t now = time(NULL);
     struct tm tm;
-    localtime_r(&now, &tm);
+    localtime_r(&t, &tm);
     long off = tm.tm_gmtoff / 60;
-    jd_buf_addf(b, "Date: %s, %02d %s %d %02d:%02d:%02d %c%02ld%02ld\r\n", days[tm.tm_wday], tm.tm_mday,
+    jd_buf_addf(b, "%s: %s, %02d %s %d %02d:%02d:%02d %c%02ld%02ld\r\n", field, days[tm.tm_wday], tm.tm_mday,
                 months[tm.tm_mon], tm.tm_year + 1900, tm.tm_hour, tm.tm_min, tm.tm_sec, off < 0 ? '-' : '+',
                 labs(off) / 60, labs(off) % 60);
+}
+
+char *jd_send_later_uuid(const char *address)
+{
+    static const unsigned char url_ns[16] = {0x6b, 0xa7, 0xb8, 0x11, 0x9d, 0xad, 0x11, 0xd1,
+                                             0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8};
+    jd_buf name = {0};
+    jd_buf_add(&name, (const char *)url_ns, sizeof url_ns);
+    jd_buf_adds(&name, "mailto:");
+    for (const char *c = address ? address : ""; *c; c++) {
+        char l = (char)tolower((unsigned char)*c);
+        jd_buf_add(&name, &l, 1);
+    }
+    unsigned char md[EVP_MAX_MD_SIZE];
+    unsigned int mdlen = 0;
+    EVP_Digest(name.s, name.len, md, &mdlen, EVP_sha1(), NULL);
+    jd_buf_free(&name);
+    md[6] = (unsigned char)((md[6] & 0x0f) | 0x50);
+    md[8] = (unsigned char)((md[8] & 0x3f) | 0x80);
+    char out[37];
+    for (int i = 0, o = 0; i < 16; i++) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) out[o++] = '-';
+        snprintf(out + o, 3, "%02x", md[i]);
+        o += 2;
+    }
+    return jd_strdup(out);
+}
+
+char *jd_draft_release(const char *raw, size_t len, int sending, size_t *out_len, char ***rcpts, int *nrcpts,
+                       char *err, int errlen)
+{
+    jd_buf b = {0};
+    if (sending) *rcpts = NULL, *nrcpts = 0;
+    size_t i = 0;
+    int bad = 0;
+    while (i < len && raw[i] != '\r' && raw[i] != '\n' && !bad) {
+        /* a field runs on over the lines that start with white space (RFC 5322 2.2.3) */
+        size_t end = i;
+        do {
+            while (end < len && raw[end] != '\n') end++;
+            if (end < len) end++;
+        } while (end < len && (raw[end] == ' ' || raw[end] == '\t'));
+        const char *f = raw + i;
+        size_t n = end - i;
+        int drop = n >= 13 && strncasecmp(f, "X-Send-Later-", 13) == 0;
+        if (sending) {
+            static const char *lists[] = {"To", "Cc", "Bcc"};
+            for (int k = 0; k < 3; k++) {
+                size_t fl = strlen(lists[k]);
+                if (n <= fl || strncasecmp(f, lists[k], fl) != 0 || f[fl] != ':') continue;
+                char *value = jd_strndup(f + fl + 1, n - fl - 1);
+                for (char *c = value; *c; c++)
+                    if (*c == '\r' || *c == '\n') *c = ' ';
+                bad = address_header(NULL, lists[k], value, rcpts, nrcpts, err, errlen, 0) != 0;
+                free(value);
+                drop |= k == 2;
+            }
+            drop |= n > 5 && strncasecmp(f, "Date:", 5) == 0;
+        }
+        if (!drop) jd_buf_add(&b, f, n);
+        i = end;
+    }
+    if (bad) {
+        jd_rcpts_free(*rcpts, *nrcpts);
+        *rcpts = NULL, *nrcpts = 0;
+        jd_buf_free(&b);
+        return NULL;
+    }
+    if (sending) date_header(&b, "Date", time(NULL));
+    jd_buf_add(&b, raw + i, len - i);
+    *out_len = b.len;
+    return b.s;
 }
 
 /* RFC 2231 filename*=UTF-8''... next to a plain fallback */
@@ -211,7 +285,13 @@ char *jd_message_build(const jd_account *from, const jd_outgoing *o, size_t *len
     jd_buf_adds(&b, "Subject: ");
     encoded_words(&b, o->subject ? o->subject : "");
     jd_buf_adds(&b, "\r\n");
-    date_header(&b);
+    date_header(&b, "Date", time(NULL));
+    if (o->draft && o->send_at) {
+        date_header(&b, "X-Send-Later-At", (time_t)o->send_at);
+        char *uuid = jd_send_later_uuid(from->address);
+        jd_buf_addf(&b, "X-Send-Later-Uuid: %s\r\n", uuid);
+        free(uuid);
+    }
     char *mid = o->message_id ? jd_strdup(o->message_id) : jd_message_id_new(from->address);
     jd_buf_addf(&b, "Message-ID: <%s>\r\n", mid);
     free(mid);
@@ -310,11 +390,13 @@ static void tls_setup(struct mailstream_ssl_context *ctx, void *data)
     X509_VERIFY_PARAM_set1_host(param, host, 0);
 }
 
+/* RFC 5321 4.2.1: a 4yz reply is transient, as is a connection that broke */
 static int smtp_fail(mailsmtp *s, int r, const char *what, char *err, int errlen)
 {
     const char *why = s && s->response ? s->response : mailsmtp_strerror(r);
     snprintf(err, (size_t)errlen, "%s: %s", what, why);
-    return -1;
+    int code = s ? s->response_code : 0;
+    return r == MAILSMTP_ERROR_STREAM || r == MAILSMTP_ERROR_CONNECTION_REFUSED || (code >= 400 && code < 500) ? -2 : -1;
 }
 
 int jd_smtp_send(const jd_account *a, const char *password, char **rcpts, int nrcpts, const char *msg, size_t len,
@@ -333,36 +415,37 @@ int jd_smtp_send(const jd_account *a, const char *password, char **rcpts, int nr
         r = mailsmtp_socket_connect(s, a->smtp.host, (uint16_t)a->smtp.port);
     if (r != MAILSMTP_NO_ERROR) {
         snprintf(err, (size_t)errlen, "cannot reach %s:%d securely (%s)", a->smtp.host, a->smtp.port, mailsmtp_strerror(r));
+        ret = -2;
         goto done;
     }
     if ((r = mailsmtp_init(s)) != MAILSMTP_NO_ERROR) {
-        smtp_fail(s, r, "greeting", err, errlen);
+        ret = smtp_fail(s, r, "greeting", err, errlen);
         goto done;
     }
     if (a->smtp.security == JD_SEC_STARTTLS) {
         if ((r = mailsmtp_socket_starttls_with_callback(s, tls_setup, a->smtp.host)) != MAILSMTP_NO_ERROR ||
             (r = mailsmtp_init(s)) != MAILSMTP_NO_ERROR) {
-            smtp_fail(s, r, "STARTTLS", err, errlen);
+            ret = smtp_fail(s, r, "STARTTLS", err, errlen);
             goto done;
         }
     }
     if ((r = mailsmtp_auth(s, a->username, password)) != MAILSMTP_NO_ERROR) {
-        smtp_fail(s, r, "sign-in refused", err, errlen);
+        ret = smtp_fail(s, r, "sign-in refused", err, errlen);
         goto done;
     }
     if ((r = mailsmtp_mail(s, a->address)) != MAILSMTP_NO_ERROR) {
-        smtp_fail(s, r, "sender refused", err, errlen);
+        ret = smtp_fail(s, r, "sender refused", err, errlen);
         goto done;
     }
     for (int i = 0; i < nrcpts; i++)
         if ((r = mailsmtp_rcpt(s, rcpts[i])) != MAILSMTP_NO_ERROR) {
             char what[300];
             snprintf(what, sizeof what, "recipient %s refused", rcpts[i]);
-            smtp_fail(s, r, what, err, errlen);
+            ret = smtp_fail(s, r, what, err, errlen);
             goto done;
         }
     if ((r = mailsmtp_data(s)) != MAILSMTP_NO_ERROR || (r = mailsmtp_data_message(s, msg, len)) != MAILSMTP_NO_ERROR) {
-        smtp_fail(s, r, "message refused", err, errlen);
+        ret = smtp_fail(s, r, "message refused", err, errlen);
         goto done;
     }
     ret = 0;

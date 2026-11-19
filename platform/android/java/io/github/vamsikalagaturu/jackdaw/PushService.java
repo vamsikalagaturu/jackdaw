@@ -17,7 +17,7 @@ public class PushService extends Service {
     static volatile boolean appVisible;
     static volatile boolean running;
 
-    private static native void nativePush(String files, String password);
+    private static native void nativePush(String files, String account, String password);
     private static native void nativePushStop();
     private static Context context;
     private Thread worker;
@@ -67,9 +67,16 @@ public class PushService extends Service {
             try {
                 System.loadLibrary("jackdaw");
                 String files = getFilesDir().getAbsolutePath();
-                String account = MailJobService.account(files);
-                String password = account == null ? null : JackdawActivity.passwordFor(getFilesDir(), account);
-                if (password != null) nativePush(files, password);
+                /* one IDLE per account, each on a thread of its own, until nativePushStop */
+                java.util.List<Thread> pushes = new java.util.ArrayList<>();
+                for (String account : MailJobService.accounts(files)) {
+                    String password = JackdawActivity.passwordFor(getFilesDir(), account);
+                    if (password == null) continue;
+                    Thread t = new Thread(() -> nativePush(files, account, password), "jackdaw-push-" + account);
+                    t.start();
+                    pushes.add(t);
+                }
+                for (Thread t : pushes) t.join();
             } catch (Throwable e) {
                 /* without an account or a library the service has nothing to do */
             }

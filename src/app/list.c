@@ -35,9 +35,9 @@ static float folder_chips(jd_app *app, const char *folders, float right, float y
     for (char *f = strtok_r(copy, ",", &save); f && n < 8; f = strtok_r(NULL, ",", &save)) names[n++] = f;
     float total = 0, x = right;
     for (int i = n - 1; i >= 0; i--) {
-        const char *label = strcasecmp(names[i], "INBOX") == 0 ? "Inbox" : names[i];
-        const char *leaf = strrchr(label, '/');
-        leaf = leaf ? leaf + 1 : label;
+        const char *leaf = strcasecmp(names[i], "INBOX") == 0 ? "Inbox" : names[i];
+        for (int j = 0; j < app->nfolders; j++)
+            if (!strcmp(app->folders[j].name, names[i])) leaf = folder_label(&app->folders[j]);
         float w = jd_text_width(ui, leaf, 11 * k, 1) + 30;
         x -= w;
         total += w + 4;
@@ -61,6 +61,9 @@ void format_date(int64_t t, char *out, int len)
     localtime_r(&now, &b);
     if (a.tm_year == b.tm_year && a.tm_yday == b.tm_yday) strftime(out, (size_t)len, "%H:%M", &a);
     else if (now - when < 6 * 86400 && when < now) strftime(out, (size_t)len, "%a %H:%M", &a);
+    /* a scheduled draft's time ahead */
+    else if (when > now && when - now < 6 * 86400) strftime(out, (size_t)len, "%a %H:%M", &a);
+    else if (when > now) strftime(out, (size_t)len, "%b %d %H:%M", &a);
     else if (a.tm_year == b.tm_year) strftime(out, (size_t)len, "%b %d", &a);
     else strftime(out, (size_t)len, "%Y-%m-%d", &a);
 }
@@ -369,6 +372,104 @@ static int64_t *one_id(int64_t id)
 }
 
 void message_archive(jd_app *app, int64_t id) { archive_ids(app, one_id(id), 1, 1); }
+
+/* ---- snooze: the messages' times menu, then out of sight until the time chosen ---- */
+
+static jd_popup snooze_pop;
+static int64_t *snooze_ids;
+static int nsnooze;
+
+static void snooze_open(jd_app *app, int64_t *ids, int n)
+{
+    free(snooze_ids);
+    snooze_ids = ids, nsnooze = n;
+    if (!n) return;
+    jd_popup_open(&snooze_pop);
+    /* under the mouse when that asked, else in the middle of the list */
+    if (IsKeyPressed(KEY_B)) snooze_pop.at = (Vector2){jd_screen_w() / 2 - 140, jd_screen_h() / 3};
+    (void)app;
+}
+
+void act_snooze(jd_app *app)
+{
+    int n;
+    int64_t *ids = selection_ids(app, &n);
+    snooze_open(app, ids, n);
+}
+
+void message_snooze(jd_app *app, int64_t id) { snooze_open(app, one_id(id), 1); }
+
+static void snooze_until(jd_app *app, int64_t at)
+{
+    if (!app->sync || !nsnooze) return;
+    jd_sync_snooze(app->sync, snooze_ids, nsnooze, at);
+    char when[48];
+    time_t t = (time_t)at;
+    struct tm tm;
+    localtime_r(&t, &tm);
+    strftime(when, sizeof when, "%a %d %b, %H:%M", &tm);
+    notify_user(app, "Snoozed until %s.", when);
+    free(snooze_ids);
+    snooze_ids = NULL, nsnooze = 0;
+}
+
+void snooze_typed(jd_app *app, const char *text)
+{
+    struct tm tm = {.tm_isdst = -1};
+    if (sscanf(text, "%d-%d-%d %d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min) != 5) {
+        notify_user(app, "Not a time: \"%s\"; write it as 2026-11-20 08:00.", text);
+        return;
+    }
+    tm.tm_year -= 1900, tm.tm_mon -= 1;
+    int64_t at = (int64_t)mktime(&tm);
+    if (at <= jd_now()) {
+        notify_user(app, "Pick a time still to come.");
+        return;
+    }
+    snooze_until(app, at);
+}
+
+void snooze_draw(jd_app *app)
+{
+    if (!snooze_pop.open) return;
+    time_t now = time(NULL);
+    struct tm today;
+    localtime_r(&now, &today);
+    struct tm evening = today, tomorrow = today, monday = today;
+    evening.tm_hour = 18, evening.tm_min = evening.tm_sec = 0, evening.tm_isdst = -1;
+    tomorrow.tm_mday += 1, tomorrow.tm_hour = 8, tomorrow.tm_min = tomorrow.tm_sec = 0, tomorrow.tm_isdst = -1;
+    int to_monday = (8 - today.tm_wday) % 7;
+    monday.tm_mday += to_monday ? to_monday : 7, monday.tm_hour = 8, monday.tm_min = monday.tm_sec = 0;
+    monday.tm_isdst = -1;
+    /* later today: this evening, or three hours on once the evening is near */
+    int64_t later = mktime(&evening);
+    if (later - now < 2 * 3600) later = (now + 3 * 3600) / 3600 * 3600;
+    int64_t at[3] = {later, mktime(&tomorrow), mktime(&monday)};
+    static const char *names[] = {"Later today", "Tomorrow morning", "Monday morning"};
+    char labels[3][80];
+    for (int i = 0; i < 3; i++) {
+        char when[40];
+        time_t t = (time_t)at[i];
+        struct tm tm;
+        localtime_r(&t, &tm);
+        strftime(when, sizeof when, i == 0 ? "%H:%M" : "%a %H:%M", &tm);
+        snprintf(labels[i], sizeof labels[i], "%s (%s)", names[i], when);
+    }
+    jd_popup_item items[] = {{labels[0], "bell", NULL, 0}, {labels[1], "sun", NULL, 0}, {labels[2], "calendar", NULL, 0},
+                             {"Pick a time...", "pencil", NULL, 0}};
+    int i = jd_popup_draw(&app->ui, &snooze_pop, items, 4);
+    if (i >= 0 && i < 3) snooze_until(app, at[i]);
+    else if (i == 3) {
+        char typed[32];
+        strftime(typed, sizeof typed, "%Y-%m-%d %H:%M", &tomorrow);
+        dialog_open(app, DLG_PROMPT, ACT_SNOOZE_AT, "Snooze until (YYYY-MM-DD HH:MM)", typed);
+    }
+}
+
+int snooze_open_now(void)
+{
+    return snooze_pop.open;
+}
 
 void message_delete(jd_app *app, int64_t id, int64_t folder) { delete_ids(app, one_id(id), 1, folder, 1); }
 
@@ -761,6 +862,10 @@ int go_keys(jd_app *app)
             if (app->nrows) move_row(app, 0, 0);
             return 1;
         }
+        if (IsKeyPressed(KEY_C)) {
+            calendar_open(app);
+            return 1;
+        }
         static const struct {
             int key;
             const char *use;
@@ -891,6 +996,7 @@ int list_keys(jd_app *app)
     else if (IsKeyPressed(KEY_U) && !shift) act_toggle_read(app);
     else if (IsKeyPressed(KEY_S) && !shift) act_toggle_flag(app);
     else if (IsKeyPressed(KEY_E) && !shift) act_archive(app);
+    else if (IsKeyPressed(KEY_B) && !shift && !ctrl) act_snooze(app);
     else if ((IsKeyPressed(KEY_D) && !shift) || IsKeyPressed(KEY_DELETE)) act_delete(app);
     else if (IsKeyPressed(KEY_M) && !shift) dialog_open(app, DLG_PICK_FOLDER, ACT_MOVE, "Move to", NULL);
     else if (IsKeyPressed(KEY_C) && !shift && !ctrl) dialog_open(app, DLG_PICK_FOLDER, ACT_COPY, "Copy to", NULL);
@@ -1441,7 +1547,7 @@ void list_draw(jd_app *app, Rectangle r)
             }
             lay.top[i] = yy;
             yy += rh;
-            format_date(app->rows[i].date, lay.date[i], sizeof lay.date[i]);
+            format_date(app->rows[i].send_at ? app->rows[i].send_at : app->rows[i].date, lay.date[i], sizeof lay.date[i]);
         }
         lay.total = yy + 12;
         /* rows came or went above the view: the first row shown keeps its place */
@@ -1566,7 +1672,9 @@ void list_draw(jd_app *app, Rectangle r)
         char count[16] = "";
         const char *date = lay.date[i];
         jd_ui_use(ui, &ui->list);
-        float dw = jd_text_width(ui, date, 12 * k, 0);
+        /* a scheduled draft shows when it goes, after a calendar */
+        float iw = t->send_at ? 18 : 0;
+        float dw = jd_text_width(ui, date, 12 * k, 0) + iw;
         if (t->count > 1) snprintf(count, sizeof count, "%d", t->count);
         float cw = count[0] ? jd_text_width(ui, count, 12 * k, 1) + 12 : 0;
         Color strong = t->unread ? JD_NORD6 : JD_NORD4;
@@ -1578,7 +1686,8 @@ void list_draw(jd_app *app, Rectangle r)
             float sw = (right - tx) * 0.3f;
             jd_text_fit(ui, t->senders, tx, ry + rh / 2 - 8 * k, sw - 10, 14 * k, strong, t->unread > 0);
             float mx = right - dw - chips_w;
-            jd_text(ui, date, mx, ry + rh / 2 - 7 * k, 12 * k, t->unread ? JD_NORD8 : JD_NORD4, t->unread > 0);
+            if (iw) jd_icon("calendar", mx, ry + rh / 2 - 7, 14, JD_NORD8);
+            jd_text(ui, date, mx + iw, ry + rh / 2 - 7 * k, 12 * k, t->unread ? JD_NORD8 : JD_NORD4, t->unread > 0);
             if (chips_w) folder_chips(app, t->folders, right, ry + rh / 2 - 10, 0, k);
             if (t->flagged) jd_icon("star", mx -= 20, ry + rh / 2 - 7, 14, JD_NORD13);
             if (t->has_attachment) jd_icon("paperclip", mx -= 20, ry + rh / 2 - 7, 14, JD_NORD4);
@@ -1586,7 +1695,8 @@ void list_draw(jd_app *app, Rectangle r)
             jd_text_fit(ui, t->subject, tx + sw, ry + rh / 2 - 8 * k, mx - tx - sw - 10, 14 * k, strong, t->unread > 0);
         } else {
             if (show_meta) {
-                jd_text(ui, date, right - dw, ry + 12 * k, 12 * k, t->unread ? JD_NORD8 : JD_NORD4, t->unread > 0);
+                if (iw) jd_icon("calendar", right - dw, ry + 12 * k, 14, JD_NORD8);
+                jd_text(ui, date, right - dw + iw, ry + 12 * k, 12 * k, t->unread ? JD_NORD8 : JD_NORD4, t->unread > 0);
                 if (count[0]) {
                     Rectangle pill = {right - dw - cw - 8, ry + 10 * k, cw, 18 * k};
                     DrawRectangleRounded(pill, 0.5f, 6, JD_NORD2);

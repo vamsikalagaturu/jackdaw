@@ -8,8 +8,9 @@ platform/linux/build.sh [release|debug]
 
 Output: `~/.cache/jackdaw/linux/build{,-debug}/jackdaw`; `debug` adds AddressSanitizer and the tests
 (`ctest --test-dir ~/.cache/jackdaw/linux/build-debug`). Third-party sources are fetched into `thirdparty/`.
-Needs autoconf/automake/libtool (libetpan), OpenSSL, zlib, libcurl, libsystemd, fontconfig; libsecret-1 for the
-keystore.
+Needs autoconf/automake/libtool (libetpan), perl (libical), OpenSSL, zlib, libcurl, expat, libsystemd, fontconfig;
+libsecret-1 for the keystore. libical (calendar data) is built from source, statically, like libetpan; cJSON is
+compiled in.
 
 A build without `JD_RELEASE=1` in the environment is `jackdaw-dev`: it keeps its settings, mail and keyring entries
 apart (`~/.config/jackdaw-dev`, `~/.local/share/jackdaw-dev`), so it never touches an installed release.

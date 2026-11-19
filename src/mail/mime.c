@@ -63,6 +63,26 @@ char **jd_mime_references(const char *headers, size_t len, int *n)
     return out;
 }
 
+char *jd_mime_field(const char *headers, size_t len, const char *name)
+{
+    size_t idx = 0;
+    struct mailimf_fields *fields = NULL;
+    if (!headers || mailimf_fields_parse(headers, len, &idx, &fields) != MAILIMF_NO_ERROR) return NULL;
+    char *out = NULL;
+    for (clistiter *it = clist_begin(fields->fld_list); it && !out; it = clist_next(it)) {
+        struct mailimf_field *f = clist_content(it);
+        if (f->fld_type != MAILIMF_FIELD_OPTIONAL_FIELD || strcasecmp(f->fld_data.fld_optional_field->fld_name, name))
+            continue;
+        const char *v = f->fld_data.fld_optional_field->fld_value;
+        while (*v == ' ' || *v == '\t') v++;
+        size_t n = strlen(v);
+        while (n && isspace((unsigned char)v[n - 1])) n--;
+        out = jd_strndup(v, n);
+    }
+    mailimf_fields_free(fields);
+    return out;
+}
+
 static char *address_list(struct mailimf_address_list *al)
 {
     jd_buf b = {0};
@@ -509,6 +529,56 @@ static struct mailmime *find_html(struct mailmime *mime, int top)
         strcasecmp(ct->ct_subtype, "html") == 0)
         return mime;
     return NULL;
+}
+
+/* text/calendar (RFC 6047 2.4), inline or attached; application/ics, which some senders attach as well, after it */
+static struct mailmime *find_calendar(struct mailmime *mime, int top, int ics)
+{
+    if (mime->mm_type == MAILMIME_MULTIPLE) {
+        for (clistiter *it = clist_begin(mime->mm_data.mm_multipart.mm_mp_list); it; it = clist_next(it)) {
+            struct mailmime *found = find_calendar(clist_content(it), 0, ics);
+            if (found) return found;
+        }
+        return NULL;
+    }
+    if (mime->mm_type == MAILMIME_MESSAGE)
+        return top && mime->mm_data.mm_message.mm_msg_mime ? find_calendar(mime->mm_data.mm_message.mm_msg_mime, 0, ics) : NULL;
+    struct mailmime_content *ct = mime->mm_content_type;
+    if (!ct || !ct->ct_type || ct->ct_type->tp_type != MAILMIME_TYPE_DISCRETE_TYPE || !ct->ct_subtype) return NULL;
+    int type = ct->ct_type->tp_data.tp_discrete_type->dt_type;
+    if (!ics && type == MAILMIME_DISCRETE_TYPE_TEXT && strcasecmp(ct->ct_subtype, "calendar") == 0) return mime;
+    if (ics && type == MAILMIME_DISCRETE_TYPE_APPLICATION && strcasecmp(ct->ct_subtype, "ics") == 0) return mime;
+    return NULL;
+}
+
+static char *part_text(struct mailmime *part)
+{
+    struct mailmime_single_fields fields;
+    mailmime_single_fields_init(&fields, part->mm_mime_fields, part->mm_content_type);
+    size_t dlen;
+    char *decoded = decode_part(part, &dlen);
+    char *utf8 = NULL;
+    size_t ulen;
+    const char *charset = fields.fld_content_charset ? fields.fld_content_charset : "utf-8";
+    if (decoded && charconv_buffer("utf-8", charset, decoded, dlen, &utf8, &ulen) == MAIL_CHARCONV_NO_ERROR) {
+        char *out = jd_strndup(utf8, ulen);
+        charconv_buffer_free(utf8);
+        free(decoded);
+        return out;
+    }
+    return decoded;
+}
+
+char *jd_mime_calendar(const char *raw, size_t len)
+{
+    size_t idx = 0;
+    struct mailmime *mime = NULL;
+    if (mailmime_parse(raw, len, &idx, &mime) != MAILIMF_NO_ERROR) return NULL;
+    struct mailmime *part = find_calendar(mime, 1, 0);
+    if (!part) part = find_calendar(mime, 1, 1);
+    char *out = part ? part_text(part) : NULL;
+    mailmime_free(mime);
+    return out;
 }
 
 char *jd_mime_body_html(const char *raw, size_t len)

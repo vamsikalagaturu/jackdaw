@@ -6,6 +6,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "app.h"
 #include "core/util.h"
@@ -46,8 +47,22 @@ struct jd_compose {
     int visual;  /* visual mode in the body: moving selects */
     int pending; /* the first key of a two-key command (gg, dd, yy) */
     jd_popup menu; /* right click on the body */
+    jd_popup later; /* Send later's times */
+    int64_t send_at; /* scheduled: saved as a draft that a client sends then */
+    int holding;     /* the draft opened here is held back from sending (jd_sync_hold) */
     char error[512];
 };
+
+/* the save that scheduled a message, whose tab is closed by the time the server takes it */
+static int64_t scheduled_serial, scheduled_for;
+
+static void when_label(int64_t t, char *out, size_t n)
+{
+    time_t when = (time_t)t;
+    struct tm tm;
+    localtime_r(&when, &tm);
+    strftime(out, n, "%a %d %b, %H:%M", &tm);
+}
 
 int compose_inserting(struct jd_compose *c)
 {
@@ -85,9 +100,10 @@ const char *compose_title(struct jd_compose *c)
     return c->fields[C_SUBJECT].len ? c->fields[C_SUBJECT].text : "New message";
 }
 
-void compose_free(struct jd_compose *c)
+void compose_free(jd_app *app, struct jd_compose *c)
 {
     if (!c) return;
+    if (c->holding && app->sync) jd_sync_hold(app->sync, c->msgid, 0);
     jd_editor_free(&c->body);
     free(c->msgid), free(c->in_reply_to), free(c->references);
     free(c->quote_html), free(c->attribution), free(c->quote_text);
@@ -399,12 +415,20 @@ void compose_open_draft(jd_app *app, int64_t draft)
     c->show_cc = (h.cc && h.cc[0]) || (h.bcc && h.bcc[0]);
     c->in_reply_to = jd_strdup(h.in_reply_to);
     c->references = jd_strdup(h.references);
+    char *at = jd_mime_field(raw, len, "X-Send-Later-At"), *uuid = jd_mime_field(raw, len, "X-Send-Later-Uuid");
+    char *ours = jd_send_later_uuid(app->account.address);
+    if (uuid && strcasecmp(uuid, ours) == 0) c->send_at = jd_mime_date(at);
+    free(at), free(uuid), free(ours);
     char *msgid, *refs;
     if (jd_store_reply_ids(app->view, draft, &msgid, &refs) == 0) {
         free(c->msgid);
         c->msgid = msgid;
     }
     free(refs);
+    if (c->send_at && c->msgid && app->sync) {
+        jd_sync_hold(app->sync, c->msgid, 1);
+        c->holding = 1;
+    }
     int nf;
     jd_attachment *files = jd_mime_attachments(raw, len, &nf);
     for (int i = 0; files && i < nf; i++) {
@@ -473,7 +497,7 @@ static char *build(jd_app *app, struct jd_compose *c, int draft, size_t *len, ch
         .to = c->fields[C_TO].text, .cc = c->fields[C_CC].text, .bcc = c->fields[C_BCC].text,
         .subject = c->fields[C_SUBJECT].text, .body = c->body.text ? c->body.text : "",
         .in_reply_to = c->in_reply_to, .references = c->references, .message_id = c->msgid,
-        .parts = c->parts, .nparts = c->nparts, .draft = draft,
+        .parts = c->parts, .nparts = c->nparts, .draft = draft, .send_at = draft ? c->send_at : 0,
     };
     /* drafts keep only the Markdown source, which is what reopening one reads back */
     char *html = NULL, *text = NULL;
@@ -495,6 +519,29 @@ static char *build(jd_app *app, struct jd_compose *c, int draft, size_t *len, ch
     return msg;
 }
 
+/* sent messages waiting for Undo (until > 0), or handed to the worker and waiting for its answer (until 0) */
+enum { MAX_HELD = 8 };
+static struct {
+    struct jd_compose *c;
+    double until;
+} held[MAX_HELD];
+static int nheld;
+
+/* to the worker; 0 when it could not go (c->error says why) */
+static int release(jd_app *app, struct jd_compose *c)
+{
+    size_t len;
+    char **rcpts = NULL;
+    int n = 0;
+    char *msg = build(app, c, 0, &len, &rcpts, &n);
+    int ok = msg && n && app->sync;
+    if (ok) jd_sync_send(app->sync, msg, len, rcpts, n, c->msgid, c->replied, c->serial);
+    else if (!c->error[0]) snprintf(c->error, sizeof c->error, "Not sent: no connection.");
+    jd_rcpts_free(rcpts, n);
+    free(msg);
+    return ok;
+}
+
 static void send(jd_app *app, struct jd_compose *c)
 {
     if (c->sending || !app->sync) return;
@@ -506,6 +553,14 @@ static void send(jd_app *app, struct jd_compose *c)
     if (!msg) return;
     if (!n) {
         snprintf(c->error, sizeof c->error, "Add someone to send it to.");
+    } else if (app->prefs.undo_seconds > 0 && nheld < MAX_HELD) {
+        /* out of the tab bar until it goes; Undo brings it back */
+        c->serial = next_serial++;
+        c->sending = 1;
+        for (int t = 0; t < app->ntabs; t++)
+            if (app->tabs[t].kind == TAB_COMPOSE && app->tabs[t].compose == c) tab_detach(app, t);
+        held[nheld++].c = c;
+        held[nheld - 1].until = GetTime() + app->prefs.undo_seconds;
     } else {
         c->serial = next_serial++;
         c->sending = 1;
@@ -515,20 +570,161 @@ static void send(jd_app *app, struct jd_compose *c)
     free(msg);
 }
 
-static void save_draft(jd_app *app, struct jd_compose *c)
+static void unhold(int k)
 {
-    if (!app->sync) return;
+    memmove(held + k, held + k + 1, sizeof *held * (size_t)(nheld - k - 1));
+    nheld--;
+}
+
+/* back in a tab of its own, as it was before Send */
+static void reattach(jd_app *app, struct jd_compose *c)
+{
+    c->sending = 0;
+    tab_add(app, TAB_COMPOSE)->compose = c;
+}
+
+void compose_held_tick(jd_app *app)
+{
+    for (int k = 0; k < nheld; k++)
+        if (held[k].until > 0 && GetTime() >= held[k].until) {
+            held[k].until = 0;
+            if (!release(app, held[k].c)) {
+                struct jd_compose *c = held[k].c;
+                unhold(k--);
+                reattach(app, c);
+            }
+        }
+}
+
+float compose_held_draw(jd_app *app, float y)
+{
+    jd_ui *ui = &app->ui;
+    for (int k = nheld - 1; k >= 0; k--) {
+        if (held[k].until <= 0) continue;
+        int left = (int)(held[k].until - GetTime() + 0.999);
+        const char *subject = held[k].c->fields[C_SUBJECT].len ? held[k].c->fields[C_SUBJECT].text : "(no subject)";
+        char label[600];
+        snprintf(label, sizeof label, "Sending \"%.500s\" in %d s", subject, left < 1 ? 1 : left);
+        float maxw = jd_screen_w() - 200, tw = jd_text_width(ui, label, 14, 0);
+        if (tw > maxw) tw = maxw;
+        Rectangle box = {(jd_screen_w() - tw - 130) / 2, y - 52, tw + 130, 44};
+        DrawRectangleRounded((Rectangle){box.x + 2, box.y + 3, box.width, box.height}, 0.3f, 6, ColorAlpha(BLACK, 0.3f));
+        DrawRectangleRounded(box, 0.3f, 6, JD_NORD3);
+        jd_text_fit(ui, label, box.x + 16, box.y + 14, tw, 14, JD_NORD6, 0);
+        Rectangle undo = {box.x + tw + 30, box.y + 7, 86, 30};
+        int hover = CheckCollisionPointRec(GetMousePosition(), undo) && !app->dialog.kind;
+        DrawRectangleRounded(undo, 0.3f, 6, hover ? JD_NORD2 : JD_NORD3);
+        jd_icon("undo-2", undo.x + 8, undo.y + 7, 16, JD_NORD8);
+        jd_text(ui, "Undo", undo.x + 30, undo.y + 7, 14, JD_NORD8, 1);
+        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            struct jd_compose *c = held[k].c;
+            unhold(k);
+            reattach(app, c);
+            return y;
+        }
+        y = box.y - 6;
+    }
+    return y;
+}
+
+void compose_held_flush(jd_app *app)
+{
+    for (int k = 0; k < nheld; k++)
+        if (held[k].until > 0) held[k].until = 0, release(app, held[k].c);
+}
+
+void compose_held_free(jd_app *app)
+{
+    for (int k = 0; k < nheld; k++) compose_free(app, held[k].c);
+    nheld = 0;
+}
+
+/* 1 when handed to the worker */
+static int save_draft(jd_app *app, struct jd_compose *c)
+{
+    if (!app->sync) return 0;
     size_t len;
     char **rcpts;
     int n;
     char *msg = build(app, c, 1, &len, &rcpts, &n);
-    if (!msg) return;
+    if (!msg) return 0;
     c->serial = next_serial++;
     jd_sync_save_draft(app->sync, msg, len, c->msgid, c->serial);
     jd_rcpts_free(rcpts, n);
     free(msg);
     c->dirty = 0;
     c->body.changed = 0;
+    return 1;
+}
+
+/* saved to Drafts with the time, and its tab closed */
+static void schedule(jd_app *app, struct jd_compose *c, int64_t at)
+{
+    if (c->sending) return;
+    c->error[0] = 0;
+    if (at <= jd_now()) {
+        snprintf(c->error, sizeof c->error, "Pick a time still to come.");
+        return;
+    }
+    if (!c->fields[C_TO].len && !c->fields[C_CC].len && !c->fields[C_BCC].len) {
+        snprintf(c->error, sizeof c->error, "Add someone to send it to.");
+        return;
+    }
+    int64_t before = c->send_at;
+    c->send_at = at;
+    if (!save_draft(app, c)) {
+        c->send_at = before;
+        return;
+    }
+    scheduled_serial = c->serial, scheduled_for = at;
+    for (int t = 0; t < app->ntabs; t++)
+        if (app->tabs[t].kind == TAB_COMPOSE && app->tabs[t].compose == c) {
+            tab_close(app, t);
+            break;
+        }
+}
+
+void compose_schedule_typed(jd_app *app, const char *text)
+{
+    if (app->tab <= 0 || app->tab >= app->ntabs || app->tabs[app->tab].kind != TAB_COMPOSE) return;
+    struct jd_compose *c = app->tabs[app->tab].compose;
+    struct tm tm = {.tm_isdst = -1};
+    if (sscanf(text, "%d-%d-%d %d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min) != 5) {
+        snprintf(c->error, sizeof c->error, "Not a time: \"%s\"; write it as 2026-11-19 08:00.", text);
+        return;
+    }
+    tm.tm_year -= 1900, tm.tm_mon -= 1;
+    schedule(app, c, (int64_t)mktime(&tm));
+}
+
+static void later_menu(jd_app *app, struct jd_compose *c)
+{
+    if (!c->later.open) return;
+    time_t now = time(NULL);
+    struct tm today;
+    localtime_r(&now, &today);
+    struct tm tomorrow = today, monday = today;
+    tomorrow.tm_mday += 1, tomorrow.tm_hour = 8, tomorrow.tm_min = tomorrow.tm_sec = 0, tomorrow.tm_isdst = -1;
+    int to_monday = (8 - today.tm_wday) % 7;
+    monday.tm_mday += to_monday ? to_monday : 7, monday.tm_hour = 8, monday.tm_min = monday.tm_sec = 0;
+    monday.tm_isdst = -1;
+    int64_t at[3] = {(now + 3600) / 60 * 60, mktime(&tomorrow), mktime(&monday)};
+    char labels[3][64], when[48];
+    static const char *names[] = {"In an hour", "Tomorrow morning", "Monday morning"};
+    for (int i = 0; i < 3; i++) {
+        when_label(at[i], when, sizeof when);
+        snprintf(labels[i], sizeof labels[i], "%s (%s)", names[i], when);
+    }
+    jd_popup_item items[] = {{labels[0], "send", NULL, 0}, {labels[1], "calendar", NULL, 0},
+                             {labels[2], "calendar", NULL, 0}, {"Pick a time...", "pencil", NULL, 0}};
+    int i = jd_popup_draw(&app->ui, &c->later, items, 4);
+    if (i >= 0 && i < 3) {
+        schedule(app, c, at[i]);
+    } else if (i == 3) {
+        char typed[32];
+        strftime(typed, sizeof typed, "%Y-%m-%d %H:%M", &tomorrow);
+        dialog_open(app, DLG_PROMPT, ACT_SEND_LATER, "Send at (YYYY-MM-DD HH:MM)", typed);
+    }
 }
 
 static struct jd_compose *by_serial(jd_app *app, int64_t serial, int *tab)
@@ -543,6 +739,22 @@ static struct jd_compose *by_serial(jd_app *app, int64_t serial, int *tab)
 
 void compose_sent(jd_app *app, int64_t serial, const char *error)
 {
+    for (int k = 0; k < nheld; k++) {
+        if (held[k].c->serial != serial) continue;
+        struct jd_compose *c = held[k].c;
+        unhold(k);
+        if (error) {
+            /* back where it can be fixed and sent again */
+            reattach(app, c);
+            snprintf(c->error, sizeof c->error, "Not sent: %s", error);
+            return;
+        }
+        c->dirty = 0;
+        c->body.changed = 0;
+        compose_free(app, c);
+        notify_user(app, "Sent.");
+        return;
+    }
     int tab;
     struct jd_compose *c = by_serial(app, serial, &tab);
     if (!c) return;
@@ -559,7 +771,13 @@ void compose_sent(jd_app *app, int64_t serial, const char *error)
 
 void compose_saved(jd_app *app, int64_t serial, const char *error)
 {
-    notify_user(app, "%s", error ? error : "Draft saved.");
+    char when[48];
+    if (!error && serial == scheduled_serial) {
+        when_label(scheduled_for, when, sizeof when);
+        notify_user(app, "Scheduled for %s.", when);
+    } else {
+        notify_user(app, "%s", error ? error : "Draft saved.");
+    }
 }
 
 void compose_discard(jd_app *app)
@@ -713,6 +931,9 @@ static int list_continue(struct jd_compose *c)
 }
 
 /* the formatting buttons above the body; returns the y below them */
+/* the address suggestions drawn over the fields, body and format bar take the mouse this frame */
+static int on_suggestions;
+
 static float format_bar(jd_app *app, struct jd_compose *c, float x, float y, float w)
 {
     jd_ui *ui = &app->ui;
@@ -735,7 +956,7 @@ static float format_bar(jd_app *app, struct jd_compose *c, float x, float y, flo
             bx += 8;
         }
         Rectangle b = {bx, y, 32, 32};
-        int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind && !app->menu.open;
+        int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind && !app->menu.open && !on_suggestions;
         if (hover) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2), tip = buttons[i].tip, tip_x = bx;
         jd_icon(buttons[i].icon, bx + 8, y + 8, 16, hover ? JD_NORD8 : JD_NORD4);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
@@ -910,7 +1131,7 @@ void compose_keys(jd_app *app, struct jd_compose *c)
 {
     int ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
     int shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-    if (c->menu.open) return;
+    if (c->menu.open || c->later.open) return;
     if (ctrl && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
         send(app, c);
         return;
@@ -1036,24 +1257,35 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
     static const char *labels[] = {"To", "Cc", "Bcc", "Subject"};
     static const char *icons[] = {"user", "users", "eye-off", "type"};
     float label_w = narrow ? 28 : 92, cc_w = narrow ? 64 : 96;
+    /* the suggestions sit under the focused field, over what follows it, which is drawn first */
     float sugg_y = 0;
+    for (int f = 0, fy = (int)y; f <= C_SUBJECT; f++)
+        if (visible(c, f)) {
+            if (f == c->focus) sugg_y = (float)fy + 36;
+            fy += 42;
+        }
+    int show_sugg = c->nsugg && c->focus <= C_BCC && sugg_y > 0;
+    Rectangle sugg_box = {x + label_w, sugg_y, fminf(420, w - label_w), (float)c->nsugg * 30 + 8};
+    on_suggestions = show_sugg && CheckCollisionPointRec(GetMousePosition(), sugg_box) && !app->dialog.kind;
     for (int f = 0; f <= C_SUBJECT; f++) {
         if (!visible(c, f)) continue;
         Color lc = c->focus == f ? JD_NORD8 : JD_NORD4;
         jd_icon(icons[f], x, y + 9, 16, lc);
         if (!narrow) jd_text(ui, labels[f], x + 24, y + 10, 13, lc, 1);
         Rectangle box = {x + label_w, y, w - label_w - (f == C_TO ? cc_w + 8 : 0), 34};
+        c->fields[f].inert = on_suggestions;
         if (jd_field_draw(ui, &c->fields[f], box, c->focus == f)) c->focus = f, c->normal = 0;
         if (f == C_TO && jd_icon_button(ui, c->show_cc ? "chevron-down" : "chevron-right", narrow ? "Cc" : "Cc Bcc",
-                                        (Rectangle){x + w - cc_w, y, cc_w, 34}, 0))
+                                        (Rectangle){x + w - cc_w, y, cc_w, 34}, 0) && !on_suggestions)
             c->show_cc = !c->show_cc;
-        if (f == c->focus) sugg_y = y + 36;
         y += 42;
     }
     if (app->prefs.markdown) y = format_bar(app, c, x, y + 2, w);
     float bottom = r.y + r.height - (narrow ? 56 : 58);
+    if (!plat_touch()) bottom -= 22;
     if (c->nparts) bottom -= 36;
     if (c->error[0]) bottom -= 24;
+    if (c->send_at) bottom -= 40;
     if (c->quote_html && narrow) bottom -= 44;
     Rectangle body = {x, y + 4, w, bottom - y - 4};
     if (c->html_quote) {
@@ -1085,9 +1317,9 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
         jd_scissor_end();
         if (c->quote_h > paper.height) jd_scrollbar(paper, c->quote_h, &c->quote_scroll);
     }
-    c->body.inert = c->menu.open;
+    c->body.inert = c->menu.open || c->later.open || on_suggestions;
     if (jd_editor_draw(ui, &c->body, body, c->focus == C_BODY)) c->focus = C_BODY, c->normal = 0;
-    if (!c->menu.open && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && CheckCollisionPointRec(GetMousePosition(), body) &&
+    if (!c->menu.open && !on_suggestions && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && CheckCollisionPointRec(GetMousePosition(), body) &&
         !app->dialog.kind) {
         c->focus = C_BODY;
         jd_popup_open(&c->menu);
@@ -1122,33 +1354,48 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
         jd_text_fit(ui, c->error, x, y, w, 13, JD_NORD11, 0);
         y += 24;
     }
-    Rectangle bsend = narrow ? (Rectangle){x, y, w - 3 * (48 + 8), 40} : (Rectangle){x, y, 130, 36};
-    Rectangle battach = narrow ? (Rectangle){x + w - 160, y, 48, 40} : (Rectangle){x + 140, y, 110, 36};
-    Rectangle bdraft = narrow ? (Rectangle){x + w - 104, y, 48, 40} : (Rectangle){x + 260, y, 136, 36};
+    if (c->send_at) {
+        char when[48], line[80];
+        when_label(c->send_at, when, sizeof when);
+        if (c->send_at <= jd_now() && c->holding) snprintf(line, sizeof line, "Due; sends when closed");
+        else snprintf(line, sizeof line, "Scheduled for %s", when);
+        jd_icon("calendar", x, y + 8, 16, JD_NORD8);
+        jd_text_fit(ui, line, x + 24, y + 9, w - 24 - 140, 13, JD_NORD4, 0);
+        if (jd_icon_button(ui, "x", "Unschedule", (Rectangle){x + w - 132, y, 132, 32}, 0)) {
+            c->send_at = 0;
+            save_draft(app, c);
+        }
+        y += 40;
+    }
+    Rectangle bsend = narrow ? (Rectangle){x, y, w - 4 * (48 + 8), 40} : (Rectangle){x, y, 130, 36};
+    Rectangle blater = narrow ? (Rectangle){x + w - 216, y, 48, 40} : (Rectangle){x + 140, y, 118, 36};
+    Rectangle battach = narrow ? (Rectangle){x + w - 160, y, 48, 40} : (Rectangle){x + 268, y, 110, 36};
+    Rectangle bdraft = narrow ? (Rectangle){x + w - 104, y, 48, 40} : (Rectangle){x + 388, y, 136, 36};
     Rectangle bdiscard = narrow ? (Rectangle){x + w - 48, y, 48, 40} : (Rectangle){x + w - 116, y, 116, 36};
     if (jd_icon_button(ui, "send", c->sending ? "Sending..." : "Send", bsend, 1)) send(app, c);
+    if (jd_icon_button(ui, "calendar", narrow ? NULL : "Later", blater, 0) && !c->sending) jd_popup_open(&c->later);
     if (jd_icon_button(ui, "paperclip", narrow ? NULL : "Attach", battach, 0) && plat_pick_files("Attach files") != 0)
         snprintf(c->error, sizeof c->error, "No file chooser available; drop files on the window instead.");
     if (jd_icon_button(ui, "file-pen", narrow ? NULL : "Save draft", bdraft, 0)) save_draft(app, c);
     if (jd_icon_button(ui, "trash-2", narrow ? NULL : "Discard", bdiscard, 0) && !c->sending)
         dialog_open(app, DLG_CONFIRM, ACT_DISCARD, "Discard this message? Its saved draft goes too.", NULL);
-    float hint_x = x + 412;
     if (c->quote_html) {
         /* narrow, the row has no room left: the toggle sits above it */
-        Rectangle bq = narrow ? (Rectangle){x, y - 44, 150, 36} : (Rectangle){x + 406, y, 150, 36};
+        Rectangle bq = narrow ? (Rectangle){x, y - 44, 150, 36} : (Rectangle){x + 534, y, 150, 36};
         if (jd_icon_button(ui, "text-quote", c->html_quote ? "Quote: HTML" : "Quote: text", bq, 0))
             quote_toggle(c);
-        hint_x += 156;
     }
     if (!plat_touch())
         jd_text_fit(ui, "Ctrl+Enter sends · Ctrl+S saves · Ctrl+Shift+Q quote as HTML or text · Ctrl+W closes",
-                    hint_x, y + 11, x + w - 128 - hint_x, 13, JD_MUTED, 0);
+                    x, y + (narrow ? 40 : 36) + 8, w, 13, JD_MUTED, 0);
 
-    if (c->nsugg && c->focus <= C_BCC && sugg_y > 0) {
-        Rectangle box = {x + label_w, sugg_y, fminf(420, w - label_w), (float)c->nsugg * 30 + 8};
+    if (show_sugg && c->nsugg && c->focus <= C_BCC) {
+        Rectangle box = sugg_box;
         DrawRectangleRounded(box, 0.06f, 6, JD_NORD2);
         for (int i = 0; i < c->nsugg; i++) {
             Rectangle row = {box.x + 4, box.y + 4 + (float)i * 30, box.width - 8, 28};
+            Vector2 moved = GetMouseDelta();
+            if ((moved.x || moved.y) && CheckCollisionPointRec(GetMousePosition(), row)) c->sugg_sel = i;
             if (i == c->sugg_sel) DrawRectangleRounded(row, 0.2f, 6, JD_NORD3);
             char line[400];
             if (c->sugg[i].name) snprintf(line, sizeof line, "%s  <%s>", c->sugg[i].name, c->sugg[i].addr);
@@ -1161,4 +1408,5 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
         }
     }
     body_menu(app, c);
+    later_menu(app, c);
 }

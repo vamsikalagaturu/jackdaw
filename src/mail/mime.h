@@ -8,12 +8,17 @@ char *jd_mime_header(const char *raw);
 int64_t jd_mime_date(const char *raw);
 /* "<id>" to "id" */
 char *jd_mime_msgid(const char *raw);
+/* the value of the first field called name (a non-standard one, such as X-Send-Later-At) in a header block, or in a
+   whole message's headers; trimmed, NULL when absent */
+char *jd_mime_field(const char *headers, size_t len, const char *name);
 /* the msg-ids of a References header field block, in order */
 char **jd_mime_references(const char *headers, size_t len, int *n);
 /* the text of a raw RFC 5322 message for the search index: text/plain parts, else text/html without markup */
 char *jd_mime_body_text(const char *raw, size_t len);
 /* the first text/html part, decoded to UTF-8; NULL when the message has none */
 char *jd_mime_body_html(const char *raw, size_t len);
+/* the iCalendar object an invitation or its answer carries (RFC 6047), UTF-8; NULL when the message has none */
+char *jd_mime_calendar(const char *raw, size_t len);
 
 /* the headers a draft is reopened with; address lists come back as "Name <addr>, ..." */
 typedef struct {

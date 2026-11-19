@@ -23,6 +23,8 @@ typedef struct {
     char **refs;
     int nrefs;
     int has_attachment;
+    int64_t send_at; /* X-Send-Later-At, for a draft scheduled by this account's clients; else 0 */
+    char *send_uuid; /* X-Send-Later-Uuid */
 } jd_header;
 
 void jd_header_free(jd_header *h);
@@ -79,14 +81,40 @@ char *jd_body_path(const char *account_dir, int64_t folder, uint32_t uidvalidity
 typedef struct {
     int64_t id;
     char *name, *special_use;
+    char *path; /* name without the personal namespace's prefix ("INBOX.Orders" is "Orders"); else name */
     char delim;
     int collapsed;
     int total, unread;
 } jd_folder_row;
 
+/* the personal namespace's prefix (jd_imap_namespace), as last heard from the server; "" when none */
+void jd_store_set_namespace(jd_store *s, const char *prefix, char delim);
+char *jd_store_namespace(jd_store *s);
+
 void jd_folder_set_collapsed(jd_store *s, int64_t folder, int collapsed);
 
-/* Inbox first, then the special-use folders, then the rest by name */
+/* The settings shared between the account's jackdaws are one message in this folder under the personal namespace,
+   kept out of the folder list and of searches */
+#define JD_SETTINGS_FOLDER "jackdaw"
+/* its id, 0 when the server has none yet; name (malloc'd) is its full name either way */
+int64_t jd_store_settings_folder(jd_store *s, char **name);
+
+/* Snoozed mail waits in this folder under the personal namespace, each message with a keyword
+   JD_SNOOZE_KEYWORD<unix time> saying when it goes back to the Inbox */
+#define JD_SNOOZED_FOLDER "Snoozed"
+#define JD_SNOOZE_KEYWORD "$Snoozed-"
+/* its id, 0 when the server has none yet; name (malloc'd) is its full name either way */
+int64_t jd_store_snoozed_folder(jd_store *s, char **name);
+typedef struct {
+    int64_t id, at;
+    uint32_t uid;
+    char *keyword;
+} jd_snoozed;
+/* the folder's snoozed messages, soonest first */
+jd_snoozed *jd_store_snoozed(jd_store *s, int64_t folder, int *n);
+void jd_snoozed_free(jd_snoozed *z, int n);
+
+/* Inbox first, then the special-use folders (the settings folder left out), then the rest by name */
 jd_folder_row *jd_store_folders(jd_store *s, int *n);
 void jd_folder_rows_free(jd_folder_row *rows, int n);
 
@@ -119,6 +147,7 @@ typedef struct {
     char *snippet, *sender_addr; /* of the newest message */
     char *folders;               /* the folders the matching messages are in, comma-separated */
     int64_t date;
+    int64_t send_at; /* of the newest message: a scheduled draft's time, else 0 */
     int count, unread, flagged, has_attachment;
 } jd_thread_row;
 
@@ -129,6 +158,15 @@ int64_t jd_store_folder_by_name(jd_store *s, const char *name);
 int64_t jd_store_special(jd_store *s, const char *use, char **name);
 /* messages in folder with this Message-ID */
 int64_t *jd_store_by_msgid(jd_store *s, int64_t folder, const char *msgid, int *n);
+/* the scheduled drafts in folder not yet claimed (\Deleted), soonest first */
+typedef struct {
+    int64_t id, send_at;
+    uint32_t uid;
+    uint64_t modseq;
+} jd_scheduled;
+jd_scheduled *jd_store_scheduled(jd_store *s, int64_t folder, int *n);
+/* a message's keywords, space-separated ("" for none); NULL when the folder has no message uid */
+char *jd_store_keywords(jd_store *s, int64_t folder, uint32_t uid);
 /* Message-ID and References of a message, for replying; refs space-separated */
 int jd_store_reply_ids(jd_store *s, int64_t id, char **msgid, char **refs);
 
@@ -158,3 +196,58 @@ void jd_message_rows_free(jd_message_row *rows, int n);
 
 void jd_store_set_flag(jd_store *s, int64_t id, int flag, int on);
 void jd_message_delete_id(jd_store *s, int64_t id);
+
+/* Calendars of the account's [calendar] server (schema 8), and their events as the server holds them: one iCalendar
+   object per resource (href), with the fields the views and searches need taken out of it (cal/ical.h). */
+typedef struct {
+    int64_t id;
+    char *href, *name, *color; /* href: the collection's absolute URL; color "#rrggbb", NULL when unset */
+    char *sync_token, *ctag;   /* RFC 6578 and getctag: where the last look left off */
+    int readonly, enabled;     /* enabled: chosen to be synced (and shown) */
+    char *account;             /* jd_cal_account_id of its account; NULL for one kept before schema 9 */
+    int shown;                 /* a synced calendar can be hidden from the views, its events kept */
+    /* color above is the one in use: user_color, chosen in jackdaw (NULL: none), else server_color */
+    char *user_color, *server_color;
+} jd_calendar_row;
+jd_calendar_row *jd_store_calendars(jd_store *s, int *n);
+void jd_calendar_rows_free(jd_calendar_row *r, int n);
+/* added (not enabled), or renamed and recoloured (its events and enabled kept), filed under account; returns its id */
+int64_t jd_store_calendar_put(jd_store *s, const char *account, const char *href, const char *name, const char *color,
+                              int readonly);
+void jd_store_calendar_state(jd_store *s, int64_t id, const char *sync_token, const char *ctag);
+/* chosen to be synced, or not: then its events and sync state go */
+void jd_store_calendar_enable(jd_store *s, int64_t id, int on);
+void jd_store_calendar_show(jd_store *s, int64_t id, int on);
+/* a colour of the user's ("#rrggbb") over the server's; NULL goes back to the server's */
+void jd_store_calendar_recolor(jd_store *s, int64_t id, const char *color);
+/* the calendars and events of the store at path (an earlier jackdaw's mail.db) added to s, then gone from there;
+   how many calendars came */
+int jd_store_calendars_import(jd_store *s, const char *path);
+/* account's calendars (and those filed under no account) whose href is not among hrefs go, with their events;
+   account NULL: every calendar's */
+void jd_store_calendars_keep(jd_store *s, const char *account, char **hrefs, int n);
+
+/* dtstart, dtend: Unix seconds (cal/ical.h); a recurring event's dtend is its first occurrence's */
+typedef struct {
+    int64_t id, calendar;
+    char *href, *etag, *uid, *ics, *summary, *location;
+    int64_t dtstart, dtend;
+    int all_day, recurring;
+    char *color, *calendar_name; /* of its calendar */
+    int readonly;
+} jd_event_row;
+void jd_store_event_put(jd_store *s, int64_t calendar, const char *href, const char *etag, const char *ics,
+                        const char *uid, const char *summary, const char *location, int64_t dtstart, int64_t dtend,
+                        int all_day, int recurring);
+void jd_store_event_delete(jd_store *s, int64_t calendar, const char *href);
+/* the events of synced and shown calendars that may have an occurrence in [from, to): every recurring one starting
+   before to */
+jd_event_row *jd_store_events(jd_store *s, int64_t from, int64_t to, int *n);
+jd_event_row *jd_store_calendar_events(jd_store *s, int64_t calendar, int *n);
+/* the events of synced and shown calendars whose title, place or iCalendar text holds text, latest first (500 at
+   most) */
+jd_event_row *jd_store_events_search(jd_store *s, const char *text, int *n);
+/* one event, NULL when gone */
+jd_event_row *jd_store_event(jd_store *s, int64_t id);
+jd_event_row *jd_store_event_by_uid(jd_store *s, const char *uid);
+void jd_event_rows_free(jd_event_row *r, int n);
