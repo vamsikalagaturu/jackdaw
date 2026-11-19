@@ -432,6 +432,7 @@ static struct {
     int64_t synced_at; /* when it last went idle without a failure, 0 before */
     int asked;         /* a sync asked for by hand is under way: its end is told */
     int refused;       /* the server refused the sign-in: the worker stopped, a sync starts it again */
+    int unsigned_;     /* no password or sign-in on this device (an account another jackdaw shared): Sign in */
 } acc[MAX_ACCOUNTS];
 static int nacc;
 
@@ -502,10 +503,11 @@ static void start_one(jd_app *app, int i, const char *db)
     char *secret = plat_secret_load(key);
     if (!secret) secret = old_secret(app, a, i == 0);
     free(key);
+    acc[i].unsigned_ = !secret;
     if (!secret) {
-        /* also an account another jackdaw shared: adding it again here (the same address) signs this device in */
-        snprintf(acc[i].error, sizeof acc[i].error, "%s", a->provider == 2 ? "Not signed in on this device: add it again below to sign in."
-                                                                            : "No password on this device: add it again below with its password.");
+        /* also an account another jackdaw shared: its card's Sign in signs this device in */
+        snprintf(acc[i].error, sizeof acc[i].error, "%s", a->provider == 2 ? "Not signed in on this device: Sign in from Settings > Calendar."
+                                                                            : "No password on this device: Sign in from Settings > Calendar.");
         return;
     }
     char *id = jd_cal_account_id(a);
@@ -1840,7 +1842,10 @@ static void empty_note(jd_app *app, Rectangle r, float y)
     const char *why = app->prefs.ncals ? (calendar_error() ? calendar_error() : "No events here.")
                                               : "No calendar set up yet: Settings, Calendar connects a CalDAV server or Google.";
     jd_text_fit(&app->ui, why, r.x + 16, y, r.width - 32, 14, calendar_error() ? JD_NORD13 : JD_MUTED, 0);
-    if (!app->prefs.ncals && jd_button(&app->ui, "Open Settings", (Rectangle){r.x + 16, y + 30, 140, 34}, 1))
+    /* nothing set up, or an account still to sign in here: where to do it */
+    int unsigned_ = 0;
+    for (int i = 0; i < nacc; i++) unsigned_ |= acc[i].unsigned_;
+    if ((!app->prefs.ncals || unsigned_) && jd_button(&app->ui, "Open Settings", (Rectangle){r.x + 16, y + 30, 140, 34}, 1))
         settings_show_calendar(app);
 }
 
@@ -2707,9 +2712,29 @@ static float account_card(jd_app *app, int a, float x, float y, float w, int *fo
     else if (running) snprintf(status, sizeof status, "Looking for its calendars...");
     else snprintf(status, sizeof status, "Not connected");
     jd_text_fit(ui, status, tx, y + 60, tw, 13, sc, 0);
-    Rectangle rm = stack ? (Rectangle){tx, y + 90, 170, 34} : (Rectangle){x + w - 174, y + (h - 34) / 2, 158, 34};
+    int sign = a < nacc && acc[a].unsigned_;
+    /* narrow: the buttons on a row of their own across the card, halves of it when there are two */
+    float half = (w - 32 - 8) / 2;
+    Rectangle rm = stack ? (sign ? (Rectangle){x + 16 + half + 8, y + 90, half, 34} : (Rectangle){tx, y + 90, 170, 34})
+                 : (Rectangle){x + w - 174, sign ? y + h - 34 - 10 : y + (h - 34) / 2, 158, 34};
+    /* signed in elsewhere only: Google's sign-in in the browser, or the form with the password still to type */
+    Rectangle si = stack ? (Rectangle){x + 16, y + 90, half, 34} : (Rectangle){x + w - 174, y + 10, 158, 34};
+    if (sign && jd_button(ui, "Sign in", si, 1) && !app->dialog.kind) {
+        fill_settings(app);
+        adding = 1;
+        cf_provider = ac->provider;
+        if (ac->provider == 2) {
+            jd_field_set(&cf[3], ac->username);
+            google_sign_in(app);
+        } else {
+            jd_field_set(&cf[0], ac->url);
+            jd_field_set(&cf[1], ac->username);
+            if (focus) *focus = CF_PASSWORD;
+            snprintf(settings_note, sizeof settings_note, "Type the password of %s, then Save and connect.", ac->username ? ac->username : "it");
+        }
+    }
     /* the only way an account goes: its sign-in from the keystore, its calendars and events from here */
-    if (jd_icon_button(ui, "trash-2", "Remove account", rm, 0) && !app->dialog.kind) {
+    if (jd_icon_button(ui, "trash-2", stack && sign ? "Remove" : "Remove account", rm, 0) && !app->dialog.kind) {
         forget_account(app, a);
         jd_prefs_remove_calendar(&app->prefs, a);
         save_prefs(app);
