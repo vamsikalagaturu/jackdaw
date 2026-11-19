@@ -195,7 +195,8 @@ void dialog_draw(jd_app *app)
     if (d->kind == DLG_RULES) {
         float sw = jd_screen_w(), sh = jd_screen_h();
         DrawRectangleV((Vector2){0, 0}, (Vector2){sw, sh}, (Color){0x2e, 0x34, 0x40, 0xb0});
-        Rectangle box = {(sw - 720) / 2.0f, sh * 0.15f, 720, 420};
+        float rw = sw - 32 < 720 ? sw - 32 : 720;
+        Rectangle box = {(sw - rw) / 2.0f, sh * 0.15f, rw, 420};
         DrawRectangleRounded(box, 0.04f, 8, JD_NORD1);
         jd_text(ui, "Rules", box.x + 20, box.y + 18, 16, JD_NORD6, 1);
         rules_draw(app, box);
@@ -220,7 +221,8 @@ void dialog_draw(jd_app *app)
 
     float sw = jd_screen_w(), sh = jd_screen_h();
     DrawRectangleV((Vector2){0, 0}, (Vector2){sw, sh}, (Color){0x2e, 0x34, 0x40, 0xb0});
-    float w = 520, h = d->kind == DLG_PICK_FOLDER ? 420 : d->kind == DLG_PROMPT ? 150 : 130;
+    /* a phone's screen is narrower than the box */
+    float w = sw - 32 < 520 ? sw - 32 : 520, h = d->kind == DLG_PICK_FOLDER ? 420 : d->kind == DLG_PROMPT ? 150 : 130;
     Rectangle box = {(sw - w) / 2, sh * 0.2f, w, h};
     DrawRectangleRounded(box, 0.04f, 8, JD_NORD1);
     float x = box.x + 20, y = box.y + 18;
