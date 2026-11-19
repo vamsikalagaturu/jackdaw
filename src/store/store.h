@@ -81,10 +81,15 @@ char *jd_body_path(const char *account_dir, int64_t folder, uint32_t uidvalidity
 typedef struct {
     int64_t id;
     char *name, *special_use;
+    char *path; /* name without the personal namespace's prefix ("INBOX.Orders" is "Orders"); else name */
     char delim;
     int collapsed;
     int total, unread;
 } jd_folder_row;
+
+/* the personal namespace's prefix (jd_imap_namespace), as last heard from the server; "" when none */
+void jd_store_set_namespace(jd_store *s, const char *prefix, char delim);
+char *jd_store_namespace(jd_store *s);
 
 void jd_folder_set_collapsed(jd_store *s, int64_t folder, int collapsed);
 

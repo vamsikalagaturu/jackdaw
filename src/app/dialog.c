@@ -41,6 +41,16 @@ static const jd_folder_row *picked(jd_app *app)
     return NULL;
 }
 
+/* a typed folder path as the server names it: inside the personal namespace unless renaming a folder outside it */
+static char *server_name(jd_app *app, const jd_folder_row *renamed, const char *typed)
+{
+    if (renamed && !strcmp(renamed->path, renamed->name)) return jd_strdup(typed);
+    char *prefix = app->view ? jd_store_namespace(app->view) : jd_strdup("");
+    char *out = jd_printf("%s%s", prefix, typed);
+    free(prefix);
+    return out;
+}
+
 static void confirm(jd_app *app)
 {
     jd_dialog *d = &app->dialog;
@@ -71,11 +81,18 @@ static void confirm(jd_app *app)
     case ACT_DISCARD:
     case ACT_SEND_LATER: break;
     case ACT_CREATE_FOLDER:
-        if (d->field.len) jd_sync_create_folder(app->sync, d->field.text);
+        if (d->field.len) {
+            char *name = server_name(app, NULL, d->field.text);
+            jd_sync_create_folder(app->sync, name);
+            free(name);
+        }
         break;
     case ACT_RENAME_FOLDER:
-        if (d->field.len && current && !jd_streq(d->field.text, current->name))
-            jd_sync_rename_folder(app->sync, current->name, d->field.text);
+        if (d->field.len && current && !jd_streq(d->field.text, current->path)) {
+            char *name = server_name(app, current, d->field.text);
+            jd_sync_rename_folder(app->sync, current->name, name);
+            free(name);
+        }
         break;
     case ACT_DELETE_FOLDER:
         if (current) jd_sync_delete_folder(app->sync, current->name);

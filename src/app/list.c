@@ -35,9 +35,9 @@ static float folder_chips(jd_app *app, const char *folders, float right, float y
     for (char *f = strtok_r(copy, ",", &save); f && n < 8; f = strtok_r(NULL, ",", &save)) names[n++] = f;
     float total = 0, x = right;
     for (int i = n - 1; i >= 0; i--) {
-        const char *label = strcasecmp(names[i], "INBOX") == 0 ? "Inbox" : names[i];
-        const char *leaf = strrchr(label, '/');
-        leaf = leaf ? leaf + 1 : label;
+        const char *leaf = strcasecmp(names[i], "INBOX") == 0 ? "Inbox" : names[i];
+        for (int j = 0; j < app->nfolders; j++)
+            if (!strcmp(app->folders[j].name, names[i])) leaf = folder_label(&app->folders[j]);
         float w = jd_text_width(ui, leaf, 11 * k, 1) + 30;
         x -= w;
         total += w + 4;

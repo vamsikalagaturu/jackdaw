@@ -26,6 +26,9 @@ typedef struct {
 
 int jd_imap_list(jd_imap *m, jd_mailbox **out, int *n);
 void jd_mailboxes_free(jd_mailbox *b, int n);
+/* The first personal namespace (RFC 2342): prefix "INBOX." on servers that keep every folder under INBOX, ""
+   when there is none or the server has no NAMESPACE */
+int jd_imap_namespace(jd_imap *m, char **prefix, char *delim);
 
 typedef struct {
     uint32_t uidvalidity, uidnext, exists;

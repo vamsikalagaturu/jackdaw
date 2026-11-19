@@ -163,6 +163,24 @@ int jd_imap_list(jd_imap *m, jd_mailbox **out, int *n)
     return JD_IMAP_OK;
 }
 
+int jd_imap_namespace(jd_imap *m, char **prefix, char *delim)
+{
+    *prefix = jd_strdup("");
+    *delim = 0;
+    if (!mailimap_has_namespace(m->s)) return JD_IMAP_OK;
+    struct mailimap_namespace_data *ns = NULL;
+    if (!ok(mailimap_namespace(m->s, &ns))) return JD_IMAP_ERROR;
+    clist *personal = ns && ns->ns_personal ? ns->ns_personal->ns_data_list : NULL;
+    if (personal && clist_begin(personal)) {
+        struct mailimap_namespace_info *info = clist_content(clist_begin(personal));
+        free(*prefix);
+        *prefix = jd_strdup(info->ns_prefix);
+        *delim = info->ns_delimiter;
+    }
+    if (ns) mailimap_namespace_data_free(ns);
+    return JD_IMAP_OK;
+}
+
 void jd_mailboxes_free(jd_mailbox *b, int n)
 {
     for (int i = 0; i < n; i++) free(b[i].name), free(b[i].special_use);

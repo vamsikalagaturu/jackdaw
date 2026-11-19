@@ -815,6 +815,9 @@ static int list_continue(struct jd_compose *c)
 }
 
 /* the formatting buttons above the body; returns the y below them */
+/* the address suggestions drawn over the fields, body and format bar take the mouse this frame */
+static int on_suggestions;
+
 static float format_bar(jd_app *app, struct jd_compose *c, float x, float y, float w)
 {
     jd_ui *ui = &app->ui;
@@ -837,7 +840,7 @@ static float format_bar(jd_app *app, struct jd_compose *c, float x, float y, flo
             bx += 8;
         }
         Rectangle b = {bx, y, 32, 32};
-        int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind && !app->menu.open;
+        int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind && !app->menu.open && !on_suggestions;
         if (hover) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2), tip = buttons[i].tip, tip_x = bx;
         jd_icon(buttons[i].icon, bx + 8, y + 8, 16, hover ? JD_NORD8 : JD_NORD4);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
@@ -1138,22 +1141,32 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
     static const char *labels[] = {"To", "Cc", "Bcc", "Subject"};
     static const char *icons[] = {"user", "users", "eye-off", "type"};
     float label_w = narrow ? 28 : 92, cc_w = narrow ? 64 : 96;
+    /* the suggestions sit under the focused field, over what follows it, which is drawn first */
     float sugg_y = 0;
+    for (int f = 0, fy = (int)y; f <= C_SUBJECT; f++)
+        if (visible(c, f)) {
+            if (f == c->focus) sugg_y = (float)fy + 36;
+            fy += 42;
+        }
+    int show_sugg = c->nsugg && c->focus <= C_BCC && sugg_y > 0;
+    Rectangle sugg_box = {x + label_w, sugg_y, fminf(420, w - label_w), (float)c->nsugg * 30 + 8};
+    on_suggestions = show_sugg && CheckCollisionPointRec(GetMousePosition(), sugg_box) && !app->dialog.kind;
     for (int f = 0; f <= C_SUBJECT; f++) {
         if (!visible(c, f)) continue;
         Color lc = c->focus == f ? JD_NORD8 : JD_NORD4;
         jd_icon(icons[f], x, y + 9, 16, lc);
         if (!narrow) jd_text(ui, labels[f], x + 24, y + 10, 13, lc, 1);
         Rectangle box = {x + label_w, y, w - label_w - (f == C_TO ? cc_w + 8 : 0), 34};
+        c->fields[f].inert = on_suggestions;
         if (jd_field_draw(ui, &c->fields[f], box, c->focus == f)) c->focus = f, c->normal = 0;
         if (f == C_TO && jd_icon_button(ui, c->show_cc ? "chevron-down" : "chevron-right", narrow ? "Cc" : "Cc Bcc",
-                                        (Rectangle){x + w - cc_w, y, cc_w, 34}, 0))
+                                        (Rectangle){x + w - cc_w, y, cc_w, 34}, 0) && !on_suggestions)
             c->show_cc = !c->show_cc;
-        if (f == c->focus) sugg_y = y + 36;
         y += 42;
     }
     if (app->prefs.markdown) y = format_bar(app, c, x, y + 2, w);
     float bottom = r.y + r.height - (narrow ? 56 : 58);
+    if (!plat_touch()) bottom -= 22;
     if (c->nparts) bottom -= 36;
     if (c->error[0]) bottom -= 24;
     if (c->send_at) bottom -= 40;
@@ -1188,9 +1201,9 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
         jd_scissor_end();
         if (c->quote_h > paper.height) jd_scrollbar(paper, c->quote_h, &c->quote_scroll);
     }
-    c->body.inert = c->menu.open || c->later.open;
+    c->body.inert = c->menu.open || c->later.open || on_suggestions;
     if (jd_editor_draw(ui, &c->body, body, c->focus == C_BODY)) c->focus = C_BODY, c->normal = 0;
-    if (!c->menu.open && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && CheckCollisionPointRec(GetMousePosition(), body) &&
+    if (!c->menu.open && !on_suggestions && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && CheckCollisionPointRec(GetMousePosition(), body) &&
         !app->dialog.kind) {
         c->focus = C_BODY;
         jd_popup_open(&c->menu);
@@ -1250,23 +1263,23 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
     if (jd_icon_button(ui, "file-pen", narrow ? NULL : "Save draft", bdraft, 0)) save_draft(app, c);
     if (jd_icon_button(ui, "trash-2", narrow ? NULL : "Discard", bdiscard, 0) && !c->sending)
         dialog_open(app, DLG_CONFIRM, ACT_DISCARD, "Discard this message? Its saved draft goes too.", NULL);
-    float hint_x = x + 540;
     if (c->quote_html) {
         /* narrow, the row has no room left: the toggle sits above it */
         Rectangle bq = narrow ? (Rectangle){x, y - 44, 150, 36} : (Rectangle){x + 534, y, 150, 36};
         if (jd_icon_button(ui, "text-quote", c->html_quote ? "Quote: HTML" : "Quote: text", bq, 0))
             quote_toggle(c);
-        hint_x += 156;
     }
     if (!plat_touch())
         jd_text_fit(ui, "Ctrl+Enter sends · Ctrl+S saves · Ctrl+Shift+Q quote as HTML or text · Ctrl+W closes",
-                    hint_x, y + 11, x + w - 128 - hint_x, 13, JD_MUTED, 0);
+                    x, y + (narrow ? 40 : 36) + 8, w, 13, JD_MUTED, 0);
 
-    if (c->nsugg && c->focus <= C_BCC && sugg_y > 0) {
-        Rectangle box = {x + label_w, sugg_y, fminf(420, w - label_w), (float)c->nsugg * 30 + 8};
+    if (show_sugg && c->nsugg && c->focus <= C_BCC) {
+        Rectangle box = sugg_box;
         DrawRectangleRounded(box, 0.06f, 6, JD_NORD2);
         for (int i = 0; i < c->nsugg; i++) {
             Rectangle row = {box.x + 4, box.y + 4 + (float)i * 30, box.width - 8, 28};
+            Vector2 moved = GetMouseDelta();
+            if ((moved.x || moved.y) && CheckCollisionPointRec(GetMousePosition(), row)) c->sugg_sel = i;
             if (i == c->sugg_sel) DrawRectangleRounded(row, 0.2f, 6, JD_NORD3);
             char line[400];
             if (c->sugg[i].name) snprintf(line, sizeof line, "%s  <%s>", c->sugg[i].name, c->sugg[i].addr);

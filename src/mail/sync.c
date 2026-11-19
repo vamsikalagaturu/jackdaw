@@ -449,9 +449,17 @@ static int sync_all(jd_sync *s)
     status(s, "Listing folders", NULL);
     jd_mailbox *boxes;
     int n;
-    if (jd_imap_list(s->imap, &boxes, &n) != JD_IMAP_OK) return JD_IMAP_ERROR;
+    char *prefix = NULL, delim = 0;
+    /* a server refusing NAMESPACE keeps the prefix heard before */
+    int have_ns = jd_imap_namespace(s->imap, &prefix, &delim) == JD_IMAP_OK;
+    if (jd_imap_list(s->imap, &boxes, &n) != JD_IMAP_OK) {
+        free(prefix);
+        return JD_IMAP_ERROR;
+    }
     int64_t *ids = jd_alloc(sizeof *ids * (size_t)(n + 1));
     jd_store_begin(s->store);
+    if (have_ns) jd_store_set_namespace(s->store, prefix, delim);
+    free(prefix);
     jd_folders_mark_absent(s->store);
     for (int i = 0; i < n; i++) {
         if (boxes[i].noselect) continue;

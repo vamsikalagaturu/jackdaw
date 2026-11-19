@@ -175,6 +175,12 @@ jd_store *jd_store_open(const char *path, char *err, int errlen)
             exec(s, "ALTER TABLE messages ADD COLUMN send_at INTEGER NOT NULL DEFAULT 0; PRAGMA user_version = 6;");
         exec(s, "COMMIT");
     }
+    if (run(prep(s, "PRAGMA user_version")) == 6) {
+        exec(s, "BEGIN IMMEDIATE");
+        if (run(prep(s, "PRAGMA user_version")) == 6)
+            exec(s, "CREATE TABLE account_ns(prefix TEXT NOT NULL, delim TEXT); PRAGMA user_version = 7;");
+        exec(s, "COMMIT");
+    }
     return s;
 bad:
     snprintf(err, (size_t)errlen, "%s: %s", path, s->db ? sqlite3_errmsg(s->db) : "cannot open");
@@ -226,6 +232,24 @@ int64_t jd_folder_upsert(jd_store *s, const char *name, char delim, const char *
     bind_text(st, 2, delim ? d : NULL);
     bind_text(st, 3, special_use);
     return run(st);
+}
+
+void jd_store_set_namespace(jd_store *s, const char *prefix, char delim)
+{
+    char d[2] = {delim, 0};
+    exec(s, "DELETE FROM account_ns");
+    sqlite3_stmt *st = prep(s, "INSERT INTO account_ns(prefix, delim) VALUES(?, ?)");
+    bind_text(st, 1, prefix ? prefix : "");
+    bind_text(st, 2, delim ? d : NULL);
+    run(st);
+}
+
+char *jd_store_namespace(jd_store *s)
+{
+    sqlite3_stmt *st = prep(s, "SELECT prefix FROM account_ns LIMIT 1");
+    char *out = st && sqlite3_step(st) == SQLITE_ROW ? jd_strdup((const char *)sqlite3_column_text(st, 0)) : NULL;
+    sqlite3_finalize(st);
+    return out ? out : jd_strdup("");
 }
 
 void jd_folders_sweep_absent(jd_store *s)
@@ -603,12 +627,17 @@ jd_folder_row *jd_store_folders(jd_store *s, int *n)
     jd_folder_row *rows = NULL;
     int cap = 0;
     *n = 0;
+    char *prefix = jd_store_namespace(s);
+    size_t plen = strlen(prefix);
     while (st && sqlite3_step(st) == SQLITE_ROW) {
         if (*n == cap) rows = jd_realloc(rows, sizeof *rows * (size_t)(cap = cap ? cap * 2 : 16));
         const char *d = (const char *)sqlite3_column_text(st, 3);
+        const char *name = (const char *)sqlite3_column_text(st, 1);
+        int inside = plen && strncmp(name, prefix, plen) == 0 && name[plen];
         rows[(*n)++] = (jd_folder_row){
             .id = sqlite3_column_int64(st, 0),
-            .name = jd_strdup((const char *)sqlite3_column_text(st, 1)),
+            .name = jd_strdup(name),
+            .path = jd_strdup(inside ? name + plen : name),
             .special_use = jd_strdup((const char *)sqlite3_column_text(st, 2)),
             .delim = d ? d[0] : 0,
             .collapsed = sqlite3_column_int(st, 4),
@@ -617,6 +646,7 @@ jd_folder_row *jd_store_folders(jd_store *s, int *n)
         };
     }
     sqlite3_finalize(st);
+    free(prefix);
     return rows;
 }
 
@@ -630,7 +660,7 @@ void jd_folder_set_collapsed(jd_store *s, int64_t folder, int collapsed)
 
 void jd_folder_rows_free(jd_folder_row *rows, int n)
 {
-    for (int i = 0; i < n; i++) free(rows[i].name), free(rows[i].special_use);
+    for (int i = 0; i < n; i++) free(rows[i].name), free(rows[i].path), free(rows[i].special_use);
     free(rows);
 }
 

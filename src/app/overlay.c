@@ -61,17 +61,17 @@ static void run(jd_app *app, menu_item item)
         break;
     case M_F_NEW:
         if (f) {
-            char *prefix = f->delim && strcasecmp(f->name, "INBOX") ? jd_printf("%s%c", f->name, f->delim) : jd_strdup("");
+            char *prefix = f->delim && strcasecmp(f->name, "INBOX") ? jd_printf("%s%c", f->path, f->delim) : jd_strdup("");
             dialog_open(app, DLG_PROMPT, ACT_CREATE_FOLDER, "New folder (full path)", prefix);
             free(prefix);
         }
         break;
     case M_F_RENAME:
-        if (f && strcasecmp(f->name, "INBOX")) dialog_open(app, DLG_PROMPT, ACT_RENAME_FOLDER, "Rename folder (full path)", f->name);
+        if (f && strcasecmp(f->name, "INBOX")) dialog_open(app, DLG_PROMPT, ACT_RENAME_FOLDER, "Rename folder (full path)", f->path);
         break;
     case M_F_DELETE:
         if (f && strcasecmp(f->name, "INBOX")) {
-            char *title = jd_printf("Delete the folder %s and all %d messages in it, on the server?", f->name, f->total);
+            char *title = jd_printf("Delete the folder %s and all %d messages in it, on the server?", f->path, f->total);
             dialog_open(app, DLG_CONFIRM, ACT_DELETE_FOLDER, title, NULL);
             free(title);
         }

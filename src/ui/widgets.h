@@ -24,6 +24,7 @@ typedef struct {
     int selecting, anchor; /* a selection from anchor to cursor, while selecting */
     int secret;
     int bare; /* no box of its own: it sits inside one the caller draws */
+    int inert; /* set by the caller for a frame: the mouse belongs to something over the field */
     const char *placeholder;
 } jd_field;
 
@@ -97,6 +98,7 @@ typedef struct {
     int selecting, anchor; /* a selection runs from anchor to cursor while selecting is set */
     int dragging;
     int inert; /* set by the caller for a frame: the mouse belongs to something over the editor */
+    int drawn_cursor; /* the cursor when last drawn focused, else -1: a move since scrolls it into sight */
 } jd_editor;
 
 void jd_editor_set(jd_editor *e, const char *s);

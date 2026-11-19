@@ -278,7 +278,7 @@ int jd_field_draw(jd_ui *ui, jd_field *f, Rectangle r, int focused)
     if (focused && (int)(GetTime() * 2) % 2 == 0)
         DrawRectangle((int)(r.x + pad + cx - shift), (int)ty, 1, (int)size + 2, JD_NORD8);
     jd_scissor_end();
-    int over = CheckCollisionPointRec(GetMousePosition(), r) &&
+    int over = !f->inert && CheckCollisionPointRec(GetMousePosition(), r) &&
                !(field_menu.pop.open && CheckCollisionPointRec(GetMousePosition(), field_menu.pop.box));
     if (f == field_menu.f) field_menu.seen = 1;
     /* a phone's long press arrives as a right click */
@@ -643,11 +643,13 @@ int jd_editor_draw(jd_ui *ui, jd_editor *e, Rectangle r, int focused)
     }
     int cl = line_of(e, e->cursor);
     float cy = (float)cl * ED_LINE;
-    if (focused) {
+    /* only once the cursor moved or the focus came, so the wheel can scroll away from it */
+    if (focused && e->cursor != e->drawn_cursor) {
         if (cy < e->scroll) e->scroll = cy;
         if (cy + ED_LINE > e->scroll + r.height - 2 * pad) e->scroll = cy + ED_LINE - (r.height - 2 * pad);
-        jd_follow_field(e, (Rectangle){r.x, r.y + pad + cy - e->scroll, r.width, ED_LINE});
     }
+    e->drawn_cursor = focused ? e->cursor : -1;
+    if (focused) jd_follow_field(e, (Rectangle){r.x, r.y + pad + cy - e->scroll, r.width, ED_LINE});
     int hover = CheckCollisionPointRec(GetMousePosition(), r);
     if (hover) {
         e->scroll -= jd_wheel_y(ED_LINE * 3);

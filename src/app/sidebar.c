@@ -13,8 +13,8 @@
 const char *folder_label(const jd_folder_row *f)
 {
     if (strcasecmp(f->name, "INBOX") == 0) return "Inbox";
-    const char *leaf = f->delim ? strrchr(f->name, f->delim) : NULL;
-    return leaf ? leaf + 1 : f->name;
+    const char *leaf = f->delim ? strrchr(f->path, f->delim) : NULL;
+    return leaf ? leaf + 1 : f->path;
 }
 
 static const char *folder_icon(const jd_folder_row *f)
@@ -32,15 +32,15 @@ static const char *folder_icon(const jd_folder_row *f)
 static int depth_of(const jd_folder_row *f)
 {
     int d = 0;
-    for (const char *c = f->name; f->delim && *c; c++) d += *c == f->delim;
+    for (const char *c = f->path; f->delim && *c; c++) d += *c == f->delim;
     return d;
 }
 
-/* a child's name is its parent's, the delimiter, then more */
+/* a child's path is its parent's, the delimiter, then more */
 static int is_under(const jd_folder_row *child, const jd_folder_row *parent)
 {
-    size_t n = strlen(parent->name);
-    return parent->delim && strncmp(child->name, parent->name, n) == 0 && child->name[n] == parent->delim;
+    size_t n = strlen(parent->path);
+    return parent->delim && strncmp(child->path, parent->path, n) == 0 && child->path[n] == parent->delim;
 }
 
 static int has_children(jd_app *app, int i)
@@ -119,13 +119,13 @@ int sidebar_keys(jd_app *app)
     else if (IsKeyPressed(KEY_K) || IsKeyPressed(KEY_UP)) step(app, -1);
     else if (IsKeyPressed(KEY_SPACE) && has_children(app, app->folder)) toggle_collapsed(app, app->folder);
     else if (IsKeyPressed(KEY_A) && !shift) {
-        char *prefix = f->delim && !jd_streq(f->name, "INBOX") ? jd_printf("%s%c", f->name, f->delim) : jd_strdup("");
+        char *prefix = f->delim && !jd_streq(f->name, "INBOX") ? jd_printf("%s%c", f->path, f->delim) : jd_strdup("");
         dialog_open(app, DLG_PROMPT, ACT_CREATE_FOLDER, "New folder (full path)", prefix);
         free(prefix);
     } else if (IsKeyPressed(KEY_R) && shift && !jd_streq(f->name, "INBOX")) {
-        dialog_open(app, DLG_PROMPT, ACT_RENAME_FOLDER, "Rename folder (full path)", f->name);
+        dialog_open(app, DLG_PROMPT, ACT_RENAME_FOLDER, "Rename folder (full path)", f->path);
     } else if (IsKeyPressed(KEY_D) && shift && !jd_streq(f->name, "INBOX")) {
-        char *title = jd_printf("Delete the folder %s and all %d messages in it, on the server?", f->name, f->total);
+        char *title = jd_printf("Delete the folder %s and all %d messages in it, on the server?", f->path, f->total);
         dialog_open(app, DLG_CONFIRM, ACT_DELETE_FOLDER, title, NULL);
         free(title);
     } else {
