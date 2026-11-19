@@ -21,6 +21,8 @@ typedef enum {
     JD_EV_SAVED,    /* id: the draft save's serial; text: why it failed, NULL when saved */
     JD_EV_SIEVE,    /* the server's script: text the script, text2 its name; count -1 and text the reason on failure */
     JD_EV_SIEVE_SAVED, /* text: why the server refused the script, NULL when stored and active */
+    JD_EV_SCHEDULED,   /* a scheduled draft's time came: text2 its subject; text why it was not sent (it is back in
+                          Drafts, unscheduled), NULL when sent */
 } jd_event_kind;
 
 typedef struct {
@@ -39,6 +41,8 @@ int jd_sync_poll(jd_sync *s, jd_event *ev);
 /* called on the worker's thread, besides JD_EV_NEW_MAIL, for a platform whose event loop stops in the
    background; NULL by default */
 extern void (*jd_sync_new_mail_hook)(const char *from, const char *subject, int64_t id, int count);
+/* the same for JD_EV_SCHEDULED: err NULL when sent */
+extern void (*jd_sync_scheduled_hook)(const char *subject, const char *err);
 void jd_event_free(jd_event *ev);
 
 void jd_sync_fetch_body(jd_sync *s, int64_t message_id);
@@ -59,5 +63,8 @@ void jd_sync_send(jd_sync *s, const char *msg, size_t len, char **rcpts, int nrc
                   int64_t replied_to, int64_t serial);
 void jd_sync_sieve_get(jd_sync *s);
 void jd_sync_sieve_put(jd_sync *s, const char *name, const char *script);
-/* stores msg in Drafts and removes the older drafts with msgid; answered with JD_EV_SAVED */
+/* stores msg in Drafts and removes the older drafts with msgid; answered with JD_EV_SAVED. A draft with
+   X-Send-Later-* fields (jd_outgoing.send_at) is sent at its time by the worker that finds it due first. */
 void jd_sync_save_draft(jd_sync *s, const char *msg, size_t len, const char *msgid, int64_t serial);
+/* while held, a scheduled draft with msgid (open in compose) is not sent, though due; once per hold */
+void jd_sync_hold(jd_sync *s, const char *msgid, int on);

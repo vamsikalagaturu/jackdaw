@@ -342,7 +342,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
             DrawRectangleRounded(box, 0.25f, 6, ColorAlpha(JD_NORD10, 0.45f));
             if (app->pane == PANE_FOLDERS && !plat_touch()) DrawRectangleRoundedLinesEx(box, 0.25f, 6, 1.5f, JD_NORD8);
         }
-        else if (hover) DrawRectangleRounded(box, 0.25f, 6, JD_NORD3);
+        else if (hover && !plat_touch()) DrawRectangleRounded(box, 0.25f, 6, JD_NORD3);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             app->pane = PANE_FOLDERS;
             select_folder(app, i);

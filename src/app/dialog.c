@@ -55,13 +55,21 @@ static void confirm(jd_app *app)
         compose_discard(app);
         return;
     }
+    if (d->act == ACT_SEND_LATER) {
+        char *typed = jd_strdup(d->field.text);
+        close_dialog(app);
+        compose_schedule_typed(app, typed);
+        free(typed);
+        return;
+    }
     if (!app->sync) {
         close_dialog(app);
         return;
     }
     switch (d->act) {
     case ACT_LOGOUT:
-    case ACT_DISCARD: break;
+    case ACT_DISCARD:
+    case ACT_SEND_LATER: break;
     case ACT_CREATE_FOLDER:
         if (d->field.len) jd_sync_create_folder(app->sync, d->field.text);
         break;

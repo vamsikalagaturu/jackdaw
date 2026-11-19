@@ -63,6 +63,26 @@ char **jd_mime_references(const char *headers, size_t len, int *n)
     return out;
 }
 
+char *jd_mime_field(const char *headers, size_t len, const char *name)
+{
+    size_t idx = 0;
+    struct mailimf_fields *fields = NULL;
+    if (!headers || mailimf_fields_parse(headers, len, &idx, &fields) != MAILIMF_NO_ERROR) return NULL;
+    char *out = NULL;
+    for (clistiter *it = clist_begin(fields->fld_list); it && !out; it = clist_next(it)) {
+        struct mailimf_field *f = clist_content(it);
+        if (f->fld_type != MAILIMF_FIELD_OPTIONAL_FIELD || strcasecmp(f->fld_data.fld_optional_field->fld_name, name))
+            continue;
+        const char *v = f->fld_data.fld_optional_field->fld_value;
+        while (*v == ' ' || *v == '\t') v++;
+        size_t n = strlen(v);
+        while (n && isspace((unsigned char)v[n - 1])) n--;
+        out = jd_strndup(v, n);
+    }
+    mailimf_fields_free(fields);
+    return out;
+}
+
 static char *address_list(struct mailimf_address_list *al)
 {
     jd_buf b = {0};

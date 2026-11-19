@@ -61,6 +61,9 @@ void format_date(int64_t t, char *out, int len)
     localtime_r(&now, &b);
     if (a.tm_year == b.tm_year && a.tm_yday == b.tm_yday) strftime(out, (size_t)len, "%H:%M", &a);
     else if (now - when < 6 * 86400 && when < now) strftime(out, (size_t)len, "%a %H:%M", &a);
+    /* a scheduled draft's time ahead */
+    else if (when > now && when - now < 6 * 86400) strftime(out, (size_t)len, "%a %H:%M", &a);
+    else if (when > now) strftime(out, (size_t)len, "%b %d %H:%M", &a);
     else if (a.tm_year == b.tm_year) strftime(out, (size_t)len, "%b %d", &a);
     else strftime(out, (size_t)len, "%Y-%m-%d", &a);
 }
@@ -1441,7 +1444,7 @@ void list_draw(jd_app *app, Rectangle r)
             }
             lay.top[i] = yy;
             yy += rh;
-            format_date(app->rows[i].date, lay.date[i], sizeof lay.date[i]);
+            format_date(app->rows[i].send_at ? app->rows[i].send_at : app->rows[i].date, lay.date[i], sizeof lay.date[i]);
         }
         lay.total = yy + 12;
         /* rows came or went above the view: the first row shown keeps its place */
@@ -1566,7 +1569,9 @@ void list_draw(jd_app *app, Rectangle r)
         char count[16] = "";
         const char *date = lay.date[i];
         jd_ui_use(ui, &ui->list);
-        float dw = jd_text_width(ui, date, 12 * k, 0);
+        /* a scheduled draft shows when it goes, after a calendar */
+        float iw = t->send_at ? 18 : 0;
+        float dw = jd_text_width(ui, date, 12 * k, 0) + iw;
         if (t->count > 1) snprintf(count, sizeof count, "%d", t->count);
         float cw = count[0] ? jd_text_width(ui, count, 12 * k, 1) + 12 : 0;
         Color strong = t->unread ? JD_NORD6 : JD_NORD4;
@@ -1578,7 +1583,8 @@ void list_draw(jd_app *app, Rectangle r)
             float sw = (right - tx) * 0.3f;
             jd_text_fit(ui, t->senders, tx, ry + rh / 2 - 8 * k, sw - 10, 14 * k, strong, t->unread > 0);
             float mx = right - dw - chips_w;
-            jd_text(ui, date, mx, ry + rh / 2 - 7 * k, 12 * k, t->unread ? JD_NORD8 : JD_NORD4, t->unread > 0);
+            if (iw) jd_icon("calendar", mx, ry + rh / 2 - 7, 14, JD_NORD8);
+            jd_text(ui, date, mx + iw, ry + rh / 2 - 7 * k, 12 * k, t->unread ? JD_NORD8 : JD_NORD4, t->unread > 0);
             if (chips_w) folder_chips(app, t->folders, right, ry + rh / 2 - 10, 0, k);
             if (t->flagged) jd_icon("star", mx -= 20, ry + rh / 2 - 7, 14, JD_NORD13);
             if (t->has_attachment) jd_icon("paperclip", mx -= 20, ry + rh / 2 - 7, 14, JD_NORD4);
@@ -1586,7 +1592,8 @@ void list_draw(jd_app *app, Rectangle r)
             jd_text_fit(ui, t->subject, tx + sw, ry + rh / 2 - 8 * k, mx - tx - sw - 10, 14 * k, strong, t->unread > 0);
         } else {
             if (show_meta) {
-                jd_text(ui, date, right - dw, ry + 12 * k, 12 * k, t->unread ? JD_NORD8 : JD_NORD4, t->unread > 0);
+                if (iw) jd_icon("calendar", right - dw, ry + 12 * k, 14, JD_NORD8);
+                jd_text(ui, date, right - dw + iw, ry + 12 * k, 12 * k, t->unread ? JD_NORD8 : JD_NORD4, t->unread > 0);
                 if (count[0]) {
                     Rectangle pill = {right - dw - cw - 8, ry + 10 * k, cw, 18 * k};
                     DrawRectangleRounded(pill, 0.5f, 6, JD_NORD2);

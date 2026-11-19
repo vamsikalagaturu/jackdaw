@@ -10,6 +10,16 @@
 #include "raylib.h"
 #include "ui/icons.h"
 
+/* the phone may sleep, or freeze the app, past a scheduled draft's time */
+static void arm_scheduled(jd_app *app)
+{
+    int n = 0;
+    int64_t drafts = app->view ? jd_store_special(app->view, "Drafts", NULL) : 0;
+    jd_scheduled *due = drafts ? jd_store_scheduled(app->view, drafts, &n) : NULL;
+    plat_wake_at(n ? due[0].send_at : 0);
+    free(due);
+}
+
 void app_connect(jd_app *app)
 {
     free(app->dir);
@@ -28,6 +38,7 @@ void app_connect(jd_app *app)
         app->fetcher = jd_fetcher_start(images);
         free(images);
         mail_reload(app);
+        arm_scheduled(app);
     }
     free(db);
 }
@@ -105,6 +116,10 @@ static void handle_events(jd_app *app)
         case JD_EV_SIEVE_SAVED:
             filters_saved(app, ev.text);
             break;
+        case JD_EV_SCHEDULED:
+            if (ev.text) notify_user(app, "Scheduled message not sent: %s; it is in Drafts.", ev.text);
+            else notify_user(app, "Sent: %s", ev.text2 && ev.text2[0] ? ev.text2 : "(no subject)");
+            break;
         case JD_EV_NEW_MAIL:
             changed = 1;
             if (app->prefs.notify && (app->prefs.notify_focused || !IsWindowFocused())) {
@@ -121,7 +136,10 @@ static void handle_events(jd_app *app)
         }
         jd_event_free(&ev);
     }
-    if (changed) mail_reload(app);
+    if (changed) {
+        mail_reload(app);
+        arm_scheduled(app);
+    }
 }
 
 int main(int argc, char **argv)

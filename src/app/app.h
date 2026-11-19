@@ -15,7 +15,7 @@ enum { PANE_FOLDERS, PANE_LIST, PANE_READER };
 typedef enum { DLG_NONE, DLG_PROMPT, DLG_CONFIRM, DLG_PICK_FOLDER, DLG_RULES } dialog_kind;
 typedef enum {
     ACT_NONE, ACT_CREATE_FOLDER, ACT_RENAME_FOLDER, ACT_DELETE_FOLDER, ACT_MOVE, ACT_COPY, ACT_DESTROY, ACT_ADD_RULE, ACT_LOGOUT,
-    ACT_DISCARD
+    ACT_DISCARD, ACT_SEND_LATER
 } action;
 
 typedef struct {
@@ -334,7 +334,9 @@ const char *compose_title(struct jd_compose *c);
 int compose_may_close(jd_app *app, struct jd_compose *c, int tab);
 /* the open tab's message thrown away: no draft kept, the saved ones of it removed from Drafts */
 void compose_discard(jd_app *app);
-void compose_free(struct jd_compose *c);
+/* the open tab's message scheduled for a typed local time, "2026-11-19 08:00" */
+void compose_schedule_typed(jd_app *app, const char *text);
+void compose_free(jd_app *app, struct jd_compose *c);
 void compose_sent(jd_app *app, int64_t serial, const char *error);
 void compose_saved(jd_app *app, int64_t serial, const char *error);
 void compose_attach_paths(jd_app *app, struct jd_compose *c, char **paths, int n);

@@ -98,6 +98,16 @@ public class JackdawActivity extends NativeActivity {
         super.onStop();
     }
 
+    /* plat_wake_at; at in epoch seconds, "0" for none */
+    public String wakeAt(String at) {
+        try {
+            SendAlarm.set(this, Long.parseLong(at));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        return "1";
+    }
+
     /* plat_push; on is "1" or "0" */
     public String setPush(String on) {
         PushService.set(this, "1".equals(on));

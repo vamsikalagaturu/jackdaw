@@ -169,6 +169,12 @@ jd_store *jd_store_open(const char *path, char *err, int errlen)
         }
         exec(s, "COMMIT");
     }
+    if (run(prep(s, "PRAGMA user_version")) == 5) {
+        exec(s, "BEGIN IMMEDIATE");
+        if (run(prep(s, "PRAGMA user_version")) == 5)
+            exec(s, "ALTER TABLE messages ADD COLUMN send_at INTEGER NOT NULL DEFAULT 0; PRAGMA user_version = 6;");
+        exec(s, "COMMIT");
+    }
     return s;
 bad:
     snprintf(err, (size_t)errlen, "%s: %s", path, s->db ? sqlite3_errmsg(s->db) : "cannot open");
@@ -195,7 +201,7 @@ int jd_store_commit(jd_store *s)
 
 void jd_header_free(jd_header *h)
 {
-    free(h->keywords), free(h->msgid), free(h->in_reply_to), free(h->subject);
+    free(h->keywords), free(h->msgid), free(h->in_reply_to), free(h->subject), free(h->send_uuid);
     for (int r = 0; r < JD_ROLE_COUNT; r++) {
         for (int i = 0; i < h->naddrs[r]; i++) free(h->addrs[r][i].name), free(h->addrs[r][i].addr);
         free(h->addrs[r]);
@@ -400,8 +406,8 @@ int64_t jd_message_put(jd_store *s, int64_t folder, const jd_header *h, int *is_
         return id;
     }
     sqlite3_stmt *st = prep(s, "INSERT INTO messages(folder_id, uid, modseq, flags, keywords, internaldate, date, size,"
-                               " msgid, in_reply_to, subject, has_attachment)"
-                               " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id");
+                               " msgid, in_reply_to, subject, has_attachment, send_at)"
+                               " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id");
     sqlite3_bind_int64(st, 1, folder);
     sqlite3_bind_int64(st, 2, h->uid);
     sqlite3_bind_int64(st, 3, (int64_t)h->modseq);
@@ -414,6 +420,7 @@ int64_t jd_message_put(jd_store *s, int64_t folder, const jd_header *h, int *is_
     bind_text(st, 10, h->in_reply_to);
     bind_text(st, 11, h->subject);
     sqlite3_bind_int(st, 12, h->has_attachment);
+    sqlite3_bind_int64(st, 13, h->send_at);
     id = run(st);
     if (!id) return 0;
 
@@ -822,12 +829,13 @@ jd_thread_row *jd_store_list(jd_store *s, const jd_list_query *q, int *n)
     sqlite3_finalize(st);
     for (int i = 0; i < *n; i++) {
         st = prep(s, "SELECT m.subject, m.snippet, (SELECT addr FROM addresses WHERE message_id = m.id AND role = 0"
-                     " ORDER BY position LIMIT 1) FROM messages m WHERE m.id = ?");
+                     " ORDER BY position LIMIT 1), m.send_at FROM messages m WHERE m.id = ?");
         sqlite3_bind_int64(st, 1, rows[i].latest);
         if (sqlite3_step(st) == SQLITE_ROW) {
             rows[i].subject = col_dup(st, 0);
             rows[i].snippet = col_dup(st, 1);
             rows[i].sender_addr = col_dup(st, 2);
+            rows[i].send_at = sqlite3_column_int64(st, 3);
         }
         sqlite3_finalize(st);
         if (!rows[i].subject || !rows[i].subject[0]) free(rows[i].subject), rows[i].subject = jd_strdup("(no subject)");
@@ -869,6 +877,33 @@ int64_t *jd_store_by_msgid(jd_store *s, int64_t folder, const char *msgid, int *
         out = jd_realloc(out, sizeof *out * (size_t)(*n + 1));
         out[(*n)++] = sqlite3_column_int64(st, 0);
     }
+    sqlite3_finalize(st);
+    return out;
+}
+
+jd_scheduled *jd_store_scheduled(jd_store *s, int64_t folder, int *n)
+{
+    sqlite3_stmt *st = prep(s, "SELECT id, send_at, uid, modseq FROM messages WHERE folder_id = ? AND send_at > 0"
+                               " AND flags & 8 = 0 ORDER BY send_at");
+    sqlite3_bind_int64(st, 1, folder);
+    jd_scheduled *out = NULL;
+    *n = 0;
+    while (st && sqlite3_step(st) == SQLITE_ROW) {
+        out = jd_realloc(out, sizeof *out * (size_t)(*n + 1));
+        out[(*n)++] = (jd_scheduled){.id = sqlite3_column_int64(st, 0), .send_at = sqlite3_column_int64(st, 1),
+                                     .uid = (uint32_t)sqlite3_column_int64(st, 2),
+                                     .modseq = (uint64_t)sqlite3_column_int64(st, 3)};
+    }
+    sqlite3_finalize(st);
+    return out;
+}
+
+char *jd_store_keywords(jd_store *s, int64_t folder, uint32_t uid)
+{
+    sqlite3_stmt *st = prep(s, "SELECT coalesce(keywords, '') FROM messages WHERE folder_id = ? AND uid = ?");
+    sqlite3_bind_int64(st, 1, folder);
+    sqlite3_bind_int64(st, 2, uid);
+    char *out = st && sqlite3_step(st) == SQLITE_ROW ? col_dup(st, 0) : NULL;
     sqlite3_finalize(st);
     return out;
 }

@@ -23,6 +23,8 @@ typedef struct {
     char **refs;
     int nrefs;
     int has_attachment;
+    int64_t send_at; /* X-Send-Later-At, for a draft scheduled by this account's clients; else 0 */
+    char *send_uuid; /* X-Send-Later-Uuid */
 } jd_header;
 
 void jd_header_free(jd_header *h);
@@ -119,6 +121,7 @@ typedef struct {
     char *snippet, *sender_addr; /* of the newest message */
     char *folders;               /* the folders the matching messages are in, comma-separated */
     int64_t date;
+    int64_t send_at; /* of the newest message: a scheduled draft's time, else 0 */
     int count, unread, flagged, has_attachment;
 } jd_thread_row;
 
@@ -129,6 +132,15 @@ int64_t jd_store_folder_by_name(jd_store *s, const char *name);
 int64_t jd_store_special(jd_store *s, const char *use, char **name);
 /* messages in folder with this Message-ID */
 int64_t *jd_store_by_msgid(jd_store *s, int64_t folder, const char *msgid, int *n);
+/* the scheduled drafts in folder not yet claimed (\Deleted), soonest first */
+typedef struct {
+    int64_t id, send_at;
+    uint32_t uid;
+    uint64_t modseq;
+} jd_scheduled;
+jd_scheduled *jd_store_scheduled(jd_store *s, int64_t folder, int *n);
+/* a message's keywords, space-separated ("" for none); NULL when the folder has no message uid */
+char *jd_store_keywords(jd_store *s, int64_t folder, uint32_t uid);
 /* Message-ID and References of a message, for replying; refs space-separated */
 int jd_store_reply_ids(jd_store *s, int64_t id, char **msgid, char **refs);
 

@@ -12,6 +12,8 @@
 #include <strings.h>
 #include <unistd.h>
 
+#include <openssl/rand.h>
+
 #include "core/util.h"
 #include "mail/imap.h"
 #include "mail/mime.h"
@@ -29,6 +31,7 @@ enum {
     BACKOFF_MIN = 15,
     BACKOFF_MAX = 300,
     OP_ATTEMPTS = 3,
+    OUTBOX_RETRY = 5 * 60,
 };
 
 typedef enum {
@@ -68,6 +71,7 @@ typedef struct {
 struct jd_sync {
     jd_account account;
     char *password, *dir, *db_path;
+    char *send_later_uuid;
     pthread_t thread;
     int wake[2];
 
@@ -85,6 +89,9 @@ struct jd_sync {
     int64_t inbox;
     int first_sync_done, want_full;
     int prefetch_days, check_minutes; /* from [sync], read each round */
+    char **held; /* Message-IDs of drafts open in compose, not sent while open; under lock */
+    int nheld;
+    int64_t outbox_at; /* when to look at the outbox again, 0 when it is empty */
 };
 
 static void emit_ev(jd_sync *s, jd_event ev)
@@ -155,6 +162,8 @@ typedef struct {
 static void on_header(void *data, jd_header *h)
 {
     fetch_ctx *c = data;
+    /* another program's schedule (Thunderbird's own uuid) is that program's to send */
+    if (h->send_at && !(h->send_uuid && strcasecmp(h->send_uuid, c->s->send_later_uuid) == 0)) h->send_at = 0;
     int is_new;
     int64_t id = jd_message_put(c->s->store, c->folder, h, &is_new);
     if (!is_new || !c->is_inbox || !id) return;
@@ -253,6 +262,7 @@ static void notify_fresh(jd_sync *s, int64_t inbox, const int64_t *ids, int n)
 }
 
 void (*jd_sync_new_mail_hook)(const char *from, const char *subject, int64_t id, int count);
+void (*jd_sync_scheduled_hook)(const char *subject, const char *err);
 
 /* [[rule]]s in order; a message moved or deleted by one is out of reach of the next */
 static void apply_rules(jd_sync *s, int64_t inbox, const int64_t *fresh, int nfresh)
@@ -663,6 +673,188 @@ static int run_draft(jd_sync *s, op *o)
     return r;
 }
 
+static void on_raw(void *data, uint32_t uid, const char *raw, size_t len)
+{
+    jd_buf_add(data, raw, len);
+}
+
+/* A claimed draft, from its copy in the outbox: path ends in .eml (claimed) or .sent (SMTP took it). SMTP
+   refusing it puts it back in Drafts unscheduled, as no other client would do better; a failure that may pass
+   leaves it for OUTBOX_RETRY. The copy goes once Drafts and Sent are done with, so a crash in between repeats
+   that bookkeeping and never the sending. */
+static int deliver(jd_sync *s, int64_t drafts, const char *drafts_name, uint32_t uidvalidity, uint32_t uid,
+                   const char *path, const char *raw, size_t len)
+{
+    status(s, "Sending scheduled mail", NULL);
+    jd_draft_headers h;
+    jd_mime_draft_headers(raw, len, &h);
+    char err[512] = "";
+    size_t mlen = 0;
+    char **rcpts = NULL;
+    int nrcpts = 0;
+    char *msg = jd_draft_release(raw, len, 1, &mlen, &rcpts, &nrcpts, err, sizeof err);
+    size_t plen = strlen(path);
+    int was_sent = plen > 5 && strcmp(path + plen - 5, ".sent") == 0;
+    int rc = was_sent ? 0 : msg ? jd_smtp_send(&s->account, s->password, rcpts, nrcpts, msg, mlen, err, sizeof err) : -1;
+    int r = JD_IMAP_OK;
+    if (rc == -2) {
+        char *why = jd_printf("Scheduled mail not sent yet (%s). Trying again in a few minutes.", err);
+        emit(s, JD_EV_ERROR, why, NULL, 0, 0);
+        free(why);
+        s->outbox_at = jd_now() + OUTBOX_RETRY;
+        goto done;
+    }
+    char *sent_path = jd_printf("%.*s.sent", (int)(plen - (was_sent ? 5 : 4)), path);
+    if (rc == 0 && !was_sent) rename(path, sent_path);
+    if (rc != 0) {
+        size_t dlen;
+        char *draft = jd_draft_release(raw, len, 0, &dlen, NULL, NULL, NULL, 0);
+        r = jd_imap_append(s->imap, drafts_name, draft, dlen, JD_SEEN | JD_DRAFT);
+        free(draft);
+    }
+    jd_selected sel;
+    if (r == JD_IMAP_OK) r = jd_imap_select(s->imap, drafts_name, &sel);
+    if (r == JD_IMAP_OK && sel.uidvalidity == uidvalidity) jd_imap_expunge(s->imap, &uid, 1);
+    char *sent_name = NULL;
+    int64_t sent_id = rc == 0 ? jd_store_special(s->store, "Sent", &sent_name) : 0;
+    if (r == JD_IMAP_OK && sent_id && msg && !strcasestr(s->account.smtp.host, "gmail.com"))
+        r = jd_imap_append(s->imap, sent_name, msg, mlen, JD_SEEN);
+    if (r == JD_IMAP_OK) unlink(rc == 0 ? sent_path : path);
+    if (r == JD_IMAP_OK) r = sync_folder(s, drafts, drafts_name);
+    if (r == JD_IMAP_OK && sent_id) r = sync_folder(s, sent_id, sent_name);
+    emit(s, JD_EV_SCHEDULED, rc == 0 ? NULL : err, h.subject, 0, 0);
+    if (jd_sync_scheduled_hook) jd_sync_scheduled_hook(h.subject, rc == 0 ? NULL : err);
+    emit(s, JD_EV_CHANGED, NULL, NULL, 0, 0);
+    free(sent_path), free(sent_name);
+    /* after the reconnect, not at the next retry */
+    if (r != JD_IMAP_OK) s->outbox_at = jd_now();
+done:
+    jd_draft_headers_free(&h);
+    jd_rcpts_free(rcpts, nrcpts);
+    free(msg);
+    return r;
+}
+
+/* Fetched, kept in the outbox, then claimed, so one client sends it and a crash at any point leaves a copy that
+   says how far it got. The claim's keyword is what tells this client its own claim after a crash (resume_outbox). */
+static int send_scheduled(jd_sync *s, int64_t drafts, const char *drafts_name, uint32_t uidvalidity,
+                          const jd_scheduled *d)
+{
+    jd_buf raw = {0};
+    int r = jd_imap_fetch_bodies(s->imap, &d->uid, 1, on_raw, &raw);
+    if (r != JD_IMAP_OK || !raw.len) {
+        jd_buf_free(&raw);
+        return r;
+    }
+    unsigned char bytes[8];
+    char token[17];
+    RAND_bytes(bytes, sizeof bytes);
+    for (int i = 0; i < 8; i++) snprintf(token + 2 * i, 3, "%02x", bytes[i]);
+    char *dir = jd_printf("%s/outbox", s->dir);
+    char *path = jd_printf("%s/%u-%u-%s.claim", dir, uidvalidity, d->uid, token);
+    char *eml = jd_printf("%s/%u-%u-%s.eml", dir, uidvalidity, d->uid, token);
+    char *keyword = jd_printf("$JdClaim%s", token);
+    int claimed = 0;
+    if (jd_mkdirs(dir) == 0 && jd_write_file(path, raw.s, raw.len, 0600) == 0)
+        r = jd_imap_claim(s->imap, d->uid, jd_imap_condstore(s->imap) ? d->modseq : 0, keyword, &claimed);
+    else emit(s, JD_EV_ERROR, "Scheduled mail: cannot write to the outbox.", NULL, 0, 0);
+    if (r != JD_IMAP_OK) s->outbox_at = jd_now();
+    if (r == JD_IMAP_OK && !claimed) unlink(path);
+    if (r == JD_IMAP_OK && claimed && rename(path, eml) == 0)
+        r = deliver(s, drafts, drafts_name, uidvalidity, d->uid, eml, raw.s, raw.len);
+    free(dir), free(path), free(eml), free(keyword);
+    jd_buf_free(&raw);
+    return r;
+}
+
+/* Drafts selected. A .claim copy whose claim is not known to have held is this client's only when the draft
+   carries its keyword; otherwise another client has it, or it is gone. */
+static int resume_outbox(jd_sync *s, int64_t drafts, const char *drafts_name, uint32_t uidvalidity)
+{
+    char *dir = jd_printf("%s/outbox", s->dir);
+    DIR *d = opendir(dir);
+    char **names = NULL;
+    int n = 0, r = JD_IMAP_OK;
+    for (struct dirent *e; d && (e = readdir(d));) {
+        names = jd_realloc(names, sizeof *names * (size_t)(n + 1));
+        names[n++] = jd_strdup(e->d_name);
+    }
+    if (d) closedir(d);
+    s->outbox_at = 0;
+    for (int i = 0; i < n; i++) {
+        unsigned uv, uid;
+        char token[17], ext[8];
+        if (r != JD_IMAP_OK || sscanf(names[i], "%u-%u-%16[0-9a-f].%7s", &uv, &uid, token, ext) != 4) continue;
+        char *path = jd_printf("%s/%s", dir, names[i]);
+        int ours = strcmp(ext, "eml") == 0 || strcmp(ext, "sent") == 0;
+        if (strcmp(ext, "claim") == 0 && uv == uidvalidity) {
+            char *kw = jd_store_keywords(s->store, drafts, uid), *mine = jd_printf("$JdClaim%s", token);
+            ours = kw && strcasestr(kw, mine);
+            free(kw), free(mine);
+            char *eml = jd_printf("%s/%u-%u-%s.eml", dir, uv, uid, token);
+            if (ours && rename(path, eml) == 0) free(path), path = eml;
+            else free(eml);
+        }
+        size_t len;
+        char *raw = ours ? jd_read_file(path, &len) : NULL;
+        if (raw) r = deliver(s, drafts, drafts_name, uv, uid, path, raw, len);
+        else if (strcmp(ext, "claim") == 0) unlink(path);
+        free(raw), free(path);
+    }
+    for (int i = 0; i < n; i++) free(names[i]);
+    free(names), free(dir);
+    return r;
+}
+
+static int held(jd_sync *s, int64_t drafts, int64_t id)
+{
+    int found = 0;
+    pthread_mutex_lock(&s->lock);
+    for (int i = 0; i < s->nheld && !found; i++) {
+        int n;
+        int64_t *ids = jd_store_by_msgid(s->store, drafts, s->held[i], &n);
+        for (int k = 0; k < n; k++) found |= ids[k] == id;
+        free(ids);
+    }
+    pthread_mutex_unlock(&s->lock);
+    return found;
+}
+
+/* the soonest scheduled draft's time (not one open in compose) or outbox retry, 0 when none */
+static int64_t next_scheduled(jd_sync *s)
+{
+    int64_t drafts = jd_store_special(s->store, "Drafts", NULL), at = s->outbox_at;
+    int n = 0;
+    jd_scheduled *due = drafts ? jd_store_scheduled(s->store, drafts, &n) : NULL;
+    for (int i = 0; i < n; i++)
+        if (!held(s, drafts, due[i].id)) {
+            if (!at || due[i].send_at < at) at = due[i].send_at;
+            break;
+        }
+    free(due);
+    return at;
+}
+
+/* Drafts synced first: another client may have edited, unscheduled or sent one since */
+static int send_due(jd_sync *s)
+{
+    char *name = NULL;
+    int64_t drafts = jd_store_special(s->store, "Drafts", &name);
+    jd_selected sel;
+    int r = drafts ? sync_folder(s, drafts, name) : JD_IMAP_OK, n = 0;
+    if (r == JD_IMAP_OK && drafts) r = jd_imap_select(s->imap, name, &sel);
+    if (r == JD_IMAP_OK && drafts) r = resume_outbox(s, drafts, name, sel.uidvalidity);
+    jd_scheduled *due = r == JD_IMAP_OK && drafts ? jd_store_scheduled(s->store, drafts, &n) : NULL;
+    int64_t now = jd_now();
+    for (int i = 0; i < n && r == JD_IMAP_OK && due[i].send_at <= now && !quitting(s); i++) {
+        if (held(s, drafts, due[i].id)) continue;
+        r = jd_imap_select(s->imap, name, &sel);
+        if (r == JD_IMAP_OK) r = send_scheduled(s, drafts, name, sel.uidvalidity, &due[i]);
+    }
+    free(due), free(name);
+    return r;
+}
+
 static int run_op(jd_sync *s, op *o)
 {
     jd_selected sel;
@@ -809,6 +1001,11 @@ static void *worker(void *arg)
             r = sync_folder(s, s->inbox, "INBOX");
             next_inbox = now + INBOX_POLL_EVERY;
         }
+        int64_t send_at = next_scheduled(s);
+        if (r == JD_IMAP_OK && send_at && send_at <= jd_now()) {
+            r = send_due(s);
+            send_at = next_scheduled(s);
+        }
         if (r != JD_IMAP_OK) {
             emit(s, JD_EV_ERROR, "Connection lost, reconnecting.", NULL, 0, 0);
             drop_connection(s);
@@ -821,7 +1018,9 @@ static void *worker(void *arg)
         pthread_mutex_unlock(&s->lock);
         if (pending) continue;
         now = jd_now();
-        int until = (int)((next_full < next_inbox ? next_full : next_inbox) - now);
+        int64_t wake_at = next_full < next_inbox ? next_full : next_inbox;
+        if (send_at && send_at < wake_at) wake_at = send_at;
+        int until = (int)(wake_at - now);
         if (until < 1) until = 1;
         jd_selected sel;
         jd_folder_state st;
@@ -864,6 +1063,9 @@ jd_sync *jd_sync_start(const jd_account *a, const char *password, const char *ac
     s->password = jd_strdup(password);
     s->dir = jd_strdup(account_dir);
     s->db_path = jd_strdup(db_path);
+    s->send_later_uuid = jd_send_later_uuid(a->address);
+    /* what a crash or a lost connection left in the outbox goes after the first sync */
+    s->outbox_at = 1;
     pthread_mutex_init(&s->lock, NULL);
     if (pipe2(s->wake, O_NONBLOCK | O_CLOEXEC) != 0 || pthread_create(&s->thread, NULL, worker, s) != 0) abort();
     return s;
@@ -886,8 +1088,10 @@ void jd_sync_stop(jd_sync *s)
     }
     for (int i = 0; i < s->nops; i++) op_free(&s->ops[i]);
     free(s->events), free(s->requests), free(s->ops);
+    for (int i = 0; i < s->nheld; i++) free(s->held[i]);
+    free(s->held);
     if (s->password) jd_wipe(s->password, strlen(s->password));
-    free(s->password), free(s->dir), free(s->db_path);
+    free(s->password), free(s->dir), free(s->db_path), free(s->send_later_uuid);
     jd_account_free(&s->account);
     pthread_mutex_destroy(&s->lock);
     free(s);
@@ -899,6 +1103,26 @@ void jd_sync_now(jd_sync *s)
     s->sync_now = 1;
     pthread_mutex_unlock(&s->lock);
     poke(s);
+}
+
+void jd_sync_hold(jd_sync *s, const char *msgid, int on)
+{
+    if (!s || !msgid) return;
+    pthread_mutex_lock(&s->lock);
+    if (on) {
+        s->held = jd_realloc(s->held, sizeof *s->held * (size_t)(s->nheld + 1));
+        s->held[s->nheld++] = jd_strdup(msgid);
+    } else {
+        for (int i = 0; i < s->nheld; i++)
+            if (strcmp(s->held[i], msgid) == 0) {
+                free(s->held[i]);
+                s->held[i] = s->held[--s->nheld];
+                break;
+            }
+    }
+    pthread_mutex_unlock(&s->lock);
+    /* a draft that came due while open goes now */
+    if (!on) poke(s);
 }
 
 static void request_add(jd_sync *s, request rq, const int64_t *ids, int n)

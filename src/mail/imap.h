@@ -36,7 +36,8 @@ int jd_imap_select(jd_imap *m, const char *name, jd_selected *sel);
 /* UID SEARCH ALL, or SINCE the day of since when since > 0; ascending */
 int jd_imap_search(jd_imap *m, int64_t since, uint32_t **uids, int *n);
 typedef void jd_header_cb(void *ctx, jd_header *h);
-/* ENVELOPE, FLAGS, INTERNALDATE, RFC822.SIZE, BODYSTRUCTURE and the References field of the given uids */
+/* ENVELOPE, FLAGS, INTERNALDATE, RFC822.SIZE, BODYSTRUCTURE and the References and X-Send-Later-* fields of the
+   given uids */
 int jd_imap_fetch_headers(jd_imap *m, const uint32_t *uids, int n, jd_header_cb *cb, void *ctx);
 typedef void jd_flags_cb(void *ctx, uint32_t uid, int flags, const char *keywords, uint64_t modseq);
 /* every message's flags, or only those changed since modseq (CONDSTORE, RFC 7162) when modseq > 0 */
@@ -47,6 +48,11 @@ int jd_imap_fetch_bodies(jd_imap *m, const uint32_t *uids, int n, jd_body_cb *cb
 
 /* UID STORE +FLAGS.SILENT or -FLAGS.SILENT of one JD_ flag */
 int jd_imap_set_flag(jd_imap *m, const uint32_t *uids, int n, int flag, int on);
+/* UID STORE +FLAGS.SILENT (\Deleted keyword) of one message of the selected folder, so that only one client acts
+   on it: with modseq > 0 as UNCHANGEDSINCE modseq (RFC 7162 3.1.3), and claimed 0 when the server reports the
+   message modified since; without, unconditional. The keyword tells the claimant its own claim later; it is left
+   out on a server that takes none. */
+int jd_imap_claim(jd_imap *m, uint32_t uid, uint64_t modseq, const char *keyword, int *claimed);
 /* UID SEARCH CHARSET UTF-8 TEXT w1 TEXT w2 ... in the selected folder */
 int jd_imap_search_text(jd_imap *m, const char *words, uint32_t **uids, int *n);
 

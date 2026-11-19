@@ -22,7 +22,7 @@ void tab_close(jd_app *app, int i)
     jd_tab *t = &app->tabs[i];
     if (t->kind == TAB_COMPOSE && !compose_may_close(app, t->compose, i)) return;
     conv_close(&t->conv);
-    compose_free(t->compose);
+    compose_free(app, t->compose);
     memmove(app->tabs + i, app->tabs + i + 1, sizeof *app->tabs * (size_t)(app->ntabs - i - 1));
     app->ntabs--;
     if (app->tab >= i && app->tab > 0) app->tab--;

@@ -8,9 +8,26 @@
 #include "app.h"
 #include "core/util.h"
 #include "platform.h"
+#include "rlgl.h"
 #include "ui/icons.h"
 
 enum { TAB_H = 34, BAR_H = 28, SPLIT = 5 };
+
+/* The phone's drawer slides; drawer_k is how far it is out (0 to 1). What it slides over as it opens and the drawer
+   itself as it closes cannot be drawn live (the page would take the taps, and by then the sidebar draws as the rail),
+   so drawer_shot holds the screen of the frame it opened or closed in. */
+static float drawer_k;
+static Texture2D drawer_shot;
+
+static void drawer_capture(void)
+{
+    if (drawer_shot.id) UnloadTexture(drawer_shot);
+    /* the frame's pending draws first: the screen is read as it stands */
+    rlDrawRenderBatchActive();
+    Image im = LoadImageFromScreen();
+    drawer_shot = LoadTextureFromImage(im);
+    UnloadImage(im);
+}
 
 void notify_user(jd_app *app, const char *fmt, ...)
 {
@@ -511,21 +528,32 @@ void mail_frame(jd_app *app)
     float side = app->prefs.sidebar_rail ? 60 : fmaxf(170, fminf(app->side_w ? app->side_w : 230, sw * 0.4f));
     float body_h = sh - top - BAR_H;
     SetMouseCursor(MOUSE_CURSOR_DEFAULT);
-    /* On a phone the full sidebar is a drawer over the page, which is too narrow to share: the page is not drawn
-       behind it (so it takes no taps), and a tap on the dimmed rest closes it, as choosing a folder does. */
-    if (plat_touch() && !app->prefs.sidebar_rail && app->tabs[app->tab].kind == TAB_MAIL) {
-        float dw = sw * 0.8f < 300 ? sw * 0.8f : 300;
+    /* On a phone the full sidebar is a drawer over the page, which is too narrow to share: the page shows behind it
+       as it was when the drawer opened (so it takes no taps), and a tap on the dimmed rest closes it, as choosing a
+       folder does. */
+    const float DRAWER_S = 0.25f;
+    float dw = sw * 0.8f < 300 ? sw * 0.8f : 300;
+    int drawer = plat_touch() && !app->prefs.sidebar_rail && app->tabs[app->tab].kind == TAB_MAIL;
+    drawer_k = drawer ? fminf(1, drawer_k + GetFrameTime() / DRAWER_S) : fmaxf(0, drawer_k - GetFrameTime() / DRAWER_S);
+    float out = 1 - (1 - drawer_k) * (1 - drawer_k) * (1 - drawer_k);
+    if (drawer) {
+        if (drawer_shot.id) {
+            jd_scale_end();
+            DrawTexture(drawer_shot, 0, 0, WHITE);
+            jd_scale_begin();
+        }
+        DrawRectangleRec((Rectangle){0, top, sw, body_h}, ColorAlpha(BLACK, 0.45f * out));
         Rectangle rest = {dw, top, sw - dw, body_h};
-        DrawRectangleRec(rest, ColorAlpha(BLACK, 0.45f));
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), rest)) {
             app->prefs.sidebar_rail = 1;
             save_prefs(app);
         }
-        sidebar_draw(app, (Rectangle){0, top, dw, body_h});
+        sidebar_draw(app, (Rectangle){dw * (out - 1), top, dw, body_h});
         footer(app, sw, sh);
         jd_tooltip_draw(&app->ui);
         menu_draw(app);
         dialog_draw(app);
+        if (app->prefs.sidebar_rail) drawer_capture();
         return;
     }
     /* a phone gives what is open (a message, compose, settings) the whole width; the folders are the list's */
@@ -618,7 +646,10 @@ void mail_frame(jd_app *app)
         jd_scissor(page.x, page.y, page.width, page.height);
         if (pg.leaving && pg.at >= 0)
             conv_draw(app, &pg.out, (Rectangle){page.x + shift + pg.dir * page.width, page.y, page.width, page.height}, 0);
+        /* a reply or forward from the conversation opens a tab, and tab_add may move the tabs: t is looked up again */
+        t = &app->tabs[pg.tab];
         conv_draw(app, &t->conv, (Rectangle){page.x + shift, page.y, page.width, page.height}, 1);
+        t = &app->tabs[pg.tab];
         if (pg.at == 0 && !drag) pg.at = GetTime();
         /* the next message is named from the list: opening it early would mark it read */
         if (drag && (shift > 1 || shift < -1)) {
@@ -652,10 +683,22 @@ void mail_frame(jd_app *app)
     else if (t->kind == TAB_SETTINGS) settings_draw(app, page);
     else compose_draw(app, t->compose, page);
 
+    if (drawer_k > 0 && drawer_shot.id) {
+        DrawRectangleRec((Rectangle){0, top, sw, body_h}, ColorAlpha(BLACK, 0.45f * out));
+        jd_scissor(0, top, dw * out, body_h);
+        jd_scale_end();
+        DrawTexture(drawer_shot, (int)(dw * (out - 1) * (float)drawer_shot.width / sw), 0, WHITE);
+        jd_scale_begin();
+        jd_scissor_end();
+    } else if (drawer_shot.id) {
+        UnloadTexture(drawer_shot);
+        drawer_shot = (Texture2D){0};
+    }
     footer(app, sw, sh);
     jd_tooltip_draw(&app->ui);
     toast(app, sh);
     menu_draw(app);
     dialog_draw(app);
     help_draw(app);
+    if (plat_touch() && !app->prefs.sidebar_rail && app->tabs[app->tab].kind == TAB_MAIL) drawer_capture();
 }

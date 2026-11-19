@@ -40,6 +40,9 @@ int plat_notify(const char *summary, const char *body, int64_t tag);
 int64_t plat_notify_poll(void);
 /* Android: a foreground service keeps IMAP IDLE open while the app is closed; nothing on a desktop */
 void plat_push(int on);
+/* Android: wakes a check at t (epoch seconds) to send a scheduled draft, 0 for none; nothing on a desktop, where
+   the running worker keeps time itself */
+void plat_wake_at(int64_t t);
 /* Android: hands a downloaded APK to the system's installer (the user confirms); -1 elsewhere */
 int plat_install_package(const char *path);
 void plat_notify_shutdown(void);
