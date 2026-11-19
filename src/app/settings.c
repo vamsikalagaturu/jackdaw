@@ -1,9 +1,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "app.h"
+#include "core/toml.h"
 #include "core/util.h"
+#include "mail/mime.h"
+#include "mail/send.h"
 #include "platform.h"
 #include "ui/icons.h"
 
@@ -545,7 +550,9 @@ static void about(jd_app *app, float x, float y, float w)
     reach(y + 20);
 }
 
-static void sync(jd_app *app, float x, float y, float w)
+static float devices_draw(jd_app *app, float x, float y, float w);
+
+static void sync_section(jd_app *app, float x, float y, float w)
 {
     jd_prefs *p = &app->prefs;
     y = heading(app, x, y, "Sync", "The Inbox updates at once (IMAP IDLE); other folders on a timer.");
@@ -555,6 +562,16 @@ static void sync(jd_app *app, float x, float y, float w)
     cx = label(app, x, &y, "Check other folders", "How often every folder is synced");
     if (stepper(app, cx, y + 6, &p->check_minutes, 1, 1, 120, " min")) changed(app);
     y = divider(x, y + row_h, w);
+    cx = label(app, x, &y, "Share settings with my other jackdaws",
+               "Shared: theme, reading, notifications, compose, signatures, rules and calendars, through the folder "
+               "\"jackdaw\" on the mail server.\n"
+               "Per device: layout, sizes, fonts, push and sync timers; passwords and sign-ins never leave it.");
+    if (jd_switch(&app->ui, cx, y + 10, p->share)) {
+        p->share = !p->share;
+        changed(app);
+    }
+    y = divider(x, y + row_h, w);
+    if (p->share) y = devices_draw(app, x, y, w);
     if (jd_button(&app->ui, "Sync now", (Rectangle){x, y, 130, 34}, 1) && app->sync) jd_sync_now(app->sync);
 }
 
@@ -667,10 +684,26 @@ static void calendar(jd_app *app, float x, float y, float w)
     y = calendar_settings(app, x, y, w, &focus);
     if (focus != app->settings_focus) app->settings_focus = focus;
     reach(y + 20);
-    if (!app->prefs.cal_provider) return;
+    if (!app->prefs.ncals) return;
     y = divider(x, y, w);
-    float cx = label(app, x, &y, "Check every", "How often the calendars are read again; changes made here go at once");
-    if (stepper(app, cx, y + 6, &app->prefs.cal_check_minutes, 5, 5, 240, " min")) {
+    /* [view] calendar: the segments in the order shown, and the views they are (jd_prefs.cal_view) */
+    static const char *const views[] = {"Day", "Week", "Month", "Agenda"};
+    static const int view_of[] = {1, 2, 3, 0};
+    int cv = app->prefs.cal_view >= 0 ? app->prefs.cal_view : plat_touch() ? 0 : 2, cur = 0;
+    for (int i = 0; i < 4; i++)
+        if (view_of[i] == cv) cur = i;
+    float cx = label(app, x, &y, "Opens in", "The view the calendar shows when it opens");
+    int v = jd_segmented(&app->ui, cx, y + 6, views, 4, cur);
+    if (v != cur) {
+        app->prefs.cal_view = view_of[v];
+        save_prefs(app);
+    }
+    y = divider(x, y + row_h, w);
+    cx = label(app, x, &y, "Check every", "How often the calendars are read again; changes made here go at once");
+    /* one setting for every account */
+    int minutes = app->prefs.cals[0].check_minutes;
+    if (stepper(app, cx, y + 6, &minutes, 5, 5, 240, " min")) {
+        for (int i = 0; i < app->prefs.ncals; i++) app->prefs.cals[i].check_minutes = minutes;
         save_prefs(app);
         calendar_start(app);
     }
@@ -773,7 +806,7 @@ void settings_draw(jd_app *app, Rectangle r)
     case S_READING: reading(app, x, top, w); break;
     case S_COMPOSE: compose(app, x, top, w); break;
     case S_NOTIFY: notifications(app, x, top, w); break;
-    case S_SYNC: sync(app, x, top, w); break;
+    case S_SYNC: sync_section(app, x, top, w); break;
     case S_CALENDAR: calendar(app, x, top, w); break;
     case S_RULES: rules(app, x, top, w); break;
     case S_FILTERS: server_filters(app, x, top, w); break;
@@ -790,4 +823,472 @@ void settings_draw(jd_app *app, Rectangle r)
     last_height = bottom + app->settings_scroll - content.y + 20;
     jd_follow_end(&app->settings_scroll, content);
     jd_scrollbar(content, last_height, &app->settings_scroll);
+}
+
+/* ---- shared with the account's other jackdaws ([sync] settings) ----
+
+   The server holds one copy (jd_sync_put_settings): each JD_SHARE_* group with the time it last changed. The
+   account folder's shared-settings.toml holds the copy last agreed with, and the time of each change made here
+   that no server copy has yet (pending), so an edit made offline survives a restart. A group changed on both sides
+   goes to the newer change. The copy also lists the devices sharing it ([[device]]), each writing itself in when
+   absent or a day old. */
+
+enum { SEEN_EVERY = 24 * 3600 };
+
+typedef struct {
+    char *id, *name;
+    int64_t seen; /* when it last wrote the copy */
+} share_device;
+
+static struct {
+    char *dir;       /* the account's, whose base is loaded; NULL: none loaded */
+    jd_store *view;  /* and the store it was loaded with: a new one (signed in again) loads it again */
+    int have_base;   /* agreed with a server copy, or chose to begin from this device's */
+    char *agreed[JD_SHARE_COUNT];
+    int64_t stamp[JD_SHARE_COUNT];
+    int64_t pending[JD_SHARE_COUNT];
+    jd_toml *agreed_t;
+    char *local[JD_SHARE_COUNT]; /* the groups here, as last looked at */
+    uint32_t merged_uid;          /* the server copy last merged (0 none) */
+    uint32_t pushed_for;          /* a copy is on its way, merged with this server copy (UINT32_MAX: none) */
+    int64_t fetching;             /* the copy whose body was asked for */
+    int asking, asked;            /* the first look, with a server copy and no base: which to begin from */
+    char *me;                     /* this device's id, kept in the base */
+    share_device *devices;        /* as the copy last merged lists them */
+    int ndevices;
+    int devices_dirty;            /* one was forgotten here: the copy is written again without it */
+} sh = {.pushed_for = UINT32_MAX};
+
+static void devices_free(void)
+{
+    for (int i = 0; i < sh.ndevices; i++) free(sh.devices[i].id), free(sh.devices[i].name);
+    free(sh.devices);
+    sh.devices = NULL, sh.ndevices = 0;
+}
+
+static void devices_read(const jd_toml *t)
+{
+    devices_free();
+    int n = jd_toml_count(t, "device");
+    sh.devices = jd_alloc(sizeof *sh.devices * (size_t)(n + 1));
+    for (int i = 0; i < n; i++) {
+        char table[32];
+        snprintf(table, sizeof table, "device.%d", i);
+        const char *id = jd_toml_str(t, table, "id");
+        long long seen = 0;
+        jd_toml_int(t, table, "seen", &seen);
+        if (id) sh.devices[sh.ndevices++] = (share_device){jd_strdup(id), jd_strdup(jd_toml_str(t, table, "name")), seen};
+    }
+}
+
+static share_device *device_me(void)
+{
+    for (int i = 0; i < sh.ndevices; i++)
+        if (jd_streq(sh.devices[i].id, sh.me)) return &sh.devices[i];
+    return NULL;
+}
+
+/* this device missing from the copy, or written there more than a day ago */
+static int me_stale(void)
+{
+    share_device *d = device_me();
+    return !d || jd_now() - d->seen > SEEN_EVERY;
+}
+
+static char *device_name(void)
+{
+#ifdef __ANDROID__
+    return jd_strdup("Android");
+#else
+    char host[256] = "";
+    if (gethostname(host, sizeof host - 1) != 0 || !host[0]) return jd_strdup("Computer");
+    return jd_strdup(host);
+#endif
+}
+
+static char *new_device_id(void)
+{
+    unsigned char r[16] = {0};
+    FILE *f = fopen("/dev/urandom", "rb");
+    size_t got = f ? fread(r, 1, sizeof r, f) : 0;
+    if (f) fclose(f);
+    if (got != sizeof r) {
+        int64_t seed[2] = {jd_now(), (int64_t)getpid()};
+        memcpy(r, seed, sizeof r);
+    }
+    char hex[33];
+    for (int i = 0; i < 16; i++) snprintf(hex + 2 * i, 3, "%02x", r[i]);
+    return jd_strdup(hex);
+}
+
+static char *base_path(jd_app *app)
+{
+    return jd_printf("%s/shared-settings.toml", app->dir);
+}
+
+static char *copy_text(jd_app *app, const jd_toml *t, int g)
+{
+    if (g == JD_SHARE_CHOICES) return calendar_choices_text(app, t, NULL);
+    jd_prefs p = {0};
+    jd_share_apply(&p, g, t);
+    char *s = jd_share_text(&p, g);
+    jd_prefs_free(&p);
+    return s;
+}
+
+static char *local_text(jd_app *app, int g)
+{
+    if (g == JD_SHARE_CHOICES) return calendar_choices_text(app, NULL, sh.agreed_t);
+    return jd_share_text(&app->prefs, g);
+}
+
+static int64_t stamp_of(const jd_toml *t, const char *table, int g)
+{
+    long long v;
+    return t && jd_toml_int(t, table, jd_share_names[g], &v) == 0 ? (int64_t)v : 0;
+}
+
+/* The server's copy (base 0) or the base: stamps and the groups' texts (both left out of a base not agreed yet),
+   the base's pending changes and this device's id, and the devices, this one written in as of now in a copy */
+static char *copy_doc(int base, int64_t *stamps, char **texts)
+{
+    jd_buf b = {0};
+    jd_buf_adds(&b, "# jackdaw: the settings shared by this account's jackdaws (Settings > Sync)\n");
+    if (base) {
+        jd_buf_adds(&b, "\n[this_device]\nid = ");
+        jd_toml_quote(&b, sh.me);
+        jd_buf_adds(&b, "\n");
+    }
+    if (stamps) {
+        jd_buf_adds(&b, "\n[stamps]\n");
+        for (int g = 0; g < JD_SHARE_COUNT; g++) jd_buf_addf(&b, "%s = %lld\n", jd_share_names[g], (long long)stamps[g]);
+    }
+    if (base && stamps) {
+        jd_buf_adds(&b, "\n[pending]\n");
+        for (int g = 0; g < JD_SHARE_COUNT; g++)
+            if (sh.pending[g]) jd_buf_addf(&b, "%s = %lld\n", jd_share_names[g], (long long)sh.pending[g]);
+    }
+    for (int g = 0; stamps && g < JD_SHARE_COUNT; g++) jd_buf_adds(&b, texts[g] ? texts[g] : "");
+    int me_listed = 0;
+    for (int i = 0; i <= sh.ndevices; i++) {
+        share_device me = {sh.me, NULL, 0};
+        const share_device *d = i < sh.ndevices ? &sh.devices[i] : &me;
+        if (i == sh.ndevices && me_listed) break;
+        int mine = jd_streq(d->id, sh.me);
+        me_listed |= mine;
+        char *name = mine ? device_name() : jd_strdup(d->name ? d->name : "");
+        jd_buf_adds(&b, "\n[[device]]\nid = ");
+        jd_toml_quote(&b, d->id);
+        jd_buf_adds(&b, "\nname = ");
+        jd_toml_quote(&b, name);
+        jd_buf_addf(&b, "\nseen = %lld\n", (long long)(mine && !base ? jd_now() : d->seen));
+        free(name);
+    }
+    return b.s;
+}
+
+static void save_base(jd_app *app)
+{
+    char *doc = copy_doc(1, sh.have_base ? sh.stamp : NULL, sh.agreed);
+    char *path = base_path(app);
+    jd_write_file(path, doc, strlen(doc), 0600);
+    free(path), free(doc);
+}
+
+static void set_text(char **slot, char *text)
+{
+    free(*slot);
+    *slot = text;
+}
+
+static void forget_base(void)
+{
+    for (int g = 0; g < JD_SHARE_COUNT; g++) free(sh.agreed[g]), free(sh.local[g]);
+    jd_toml_free(sh.agreed_t);
+    free(sh.dir), free(sh.me);
+    devices_free();
+    sh = (typeof(sh)){.pushed_for = UINT32_MAX};
+}
+
+static void load_base(jd_app *app)
+{
+    if (sh.dir && jd_streq(sh.dir, app->dir) && sh.view == app->view) return;
+    forget_base();
+    sh.dir = jd_strdup(app->dir);
+    sh.view = app->view;
+    char *path = base_path(app);
+    jd_toml *t = jd_toml_load(path, NULL, 0);
+    free(path);
+    long long v;
+    if (t && jd_toml_int(t, "stamps", jd_share_names[0], &v) == 0) {
+        sh.have_base = 1;
+        for (int g = 0; g < JD_SHARE_COUNT; g++) {
+            sh.stamp[g] = stamp_of(t, "stamps", g);
+            sh.pending[g] = stamp_of(t, "pending", g);
+            sh.agreed[g] = copy_text(app, t, g);
+        }
+    }
+    sh.me = jd_strdup(t ? jd_toml_str(t, "this_device", "id") : NULL);
+    if (t) devices_read(t);
+    int fresh = !sh.me;
+    if (fresh) sh.me = new_device_id();
+    if (sh.have_base) sh.agreed_t = t;
+    else jd_toml_free(t);
+    if (fresh) save_base(app);
+    /* changed while jackdaw was closed (by hand in settings.toml): as of the file's last write */
+    struct stat st;
+    int64_t written = stat(jd_settings_path(), &st) == 0 ? (int64_t)st.st_mtime : jd_now();
+    for (int g = 0; g < JD_SHARE_COUNT; g++) {
+        sh.local[g] = local_text(app, g);
+        if (sh.have_base && !sh.pending[g] && strcmp(sh.local[g], sh.agreed[g]) != 0) sh.pending[g] = written;
+    }
+}
+
+static int share_on(jd_app *app)
+{
+    return app->prefs.share && app->have_account && app->view && app->dir;
+}
+
+/* the server copy's text, NULL when not here yet (asked for) or there is none (*uid 0) */
+static char *server_copy(jd_app *app, uint32_t *uid)
+{
+    *uid = 0;
+    int64_t folder = jd_store_settings_folder(app->view, NULL);
+    if (!folder) return NULL;
+    int n;
+    uint32_t *uids = jd_folder_uids(app->view, folder, &n);
+    if (n) *uid = uids[n - 1];
+    free(uids);
+    if (!*uid) return NULL;
+    jd_folder_state st;
+    int64_t id = jd_message_id(app->view, folder, *uid);
+    char *raw = NULL;
+    size_t len = 0;
+    if (id && jd_folder_state_get(app->view, folder, &st) == 0) {
+        char *path = jd_body_path(app->dir, folder, st.uidvalidity, *uid);
+        raw = jd_read_file(path, &len);
+        free(path);
+    }
+    if (!raw) {
+        if (id && sh.fetching != id && app->sync) jd_sync_fetch_body(app->sync, id), sh.fetching = id;
+        return NULL;
+    }
+    char *text = jd_mime_body_text(raw, len);
+    free(raw);
+    return text;
+}
+
+static void push(jd_app *app, uint32_t merged_with)
+{
+    if (!app->sync || sh.pushed_for == merged_with) return;
+    int64_t stamps[JD_SHARE_COUNT];
+    for (int g = 0; g < JD_SHARE_COUNT; g++) stamps[g] = sh.pending[g] ? sh.pending[g] : sh.stamp[g];
+    char *doc = copy_doc(0, stamps, sh.local);
+    char err[200], **rcpts = NULL;
+    int nrcpts = 0;
+    size_t len;
+    char *msg = jd_message_build(&app->account,
+                                 &(jd_outgoing){.to = app->account.address, .subject = "jackdaw settings", .body = doc},
+                                 &len, &rcpts, &nrcpts, err, sizeof err);
+    jd_rcpts_free(rcpts, nrcpts);
+    if (msg) {
+        jd_sync_put_settings(app->sync, msg, len, merged_with);
+        sh.pushed_for = merged_with;
+    }
+    free(msg), free(doc);
+}
+
+void share_check(jd_app *app)
+{
+    if (!share_on(app)) return;
+    load_base(app);
+    uint32_t uid;
+    char *text = server_copy(app, &uid);
+    if (!text && uid) return; /* on its way */
+    int pending = 0;
+    for (int g = 0; g < JD_SHARE_COUNT; g++) pending |= sh.pending[g] != 0;
+    if (uid == sh.merged_uid && sh.have_base && !pending && !sh.devices_dirty && (!me_stale() || sh.pushed_for == uid)) {
+        free(text);
+        return;
+    }
+    jd_toml *rt = text ? jd_toml_parse(text, NULL, 0) : NULL;
+    free(text);
+    if (!sh.have_base) {
+        /* this device's first look: its own copy came back (it shared first), or another jackdaw's is there */
+        int mine = rt != NULL;
+        for (int g = 0; rt && g < JD_SHARE_COUNT && mine; g++) {
+            char *theirs = copy_text(app, rt, g);
+            mine = strcmp(theirs, sh.local[g]) == 0;
+            free(theirs);
+        }
+        if (rt && !mine) {
+            if (!sh.asked && !app->dialog.kind) {
+                sh.asked = sh.asking = 1;
+                dialog_open(app, DLG_CONFIRM, ACT_USE_SHARED,
+                            "Use the settings your other jackdaw shares?", NULL);
+            }
+            jd_toml_free(rt);
+            return;
+        }
+        if (!rt) {
+            /* offered as the first copy; the server takes it only while it has none (else it is asked above) */
+            for (int g = 0; g < JD_SHARE_COUNT; g++) sh.pending[g] = jd_now();
+            push(app, 0);
+            return;
+        }
+        sh.have_base = 1;
+        for (int g = 0; g < JD_SHARE_COUNT; g++) set_text(&sh.agreed[g], jd_strdup(""));
+    }
+    int prefs_changed = 0;
+    for (int g = 0; rt && g < JD_SHARE_COUNT; g++) {
+        char *theirs = copy_text(app, rt, g);
+        int64_t when = stamp_of(rt, "stamps", g);
+        int take = 0;
+        if (sh.pending[g]) {
+            if (strcmp(theirs, sh.local[g]) == 0) sh.pending[g] = 0;          /* this device's change is in */
+            else if (when > sh.pending[g]) take = 1, sh.pending[g] = 0;       /* a later change there */
+        } else if (strcmp(theirs, sh.local[g]) != 0) {
+            take = 1;
+        }
+        if (!sh.pending[g]) sh.stamp[g] = when, set_text(&sh.agreed[g], jd_strdup(theirs));
+        if (take) {
+            if (g == JD_SHARE_CHOICES) calendar_choices_apply(app, rt);
+            else if (g == JD_SHARE_CALENDARS) calendar_accounts_apply(app, rt), prefs_changed = 1;
+            else jd_share_apply(&app->prefs, g, rt), prefs_changed = 1;
+            set_text(&sh.local[g], local_text(app, g));
+        }
+        free(theirs);
+    }
+    if (prefs_changed) {
+        apply_prefs(app);
+        jd_settings_save(&app->account, &app->prefs);
+    }
+    /* a forgotten device stays out until it writes itself in again */
+    if (rt && (uid != sh.merged_uid || !sh.devices_dirty)) devices_read(rt), sh.devices_dirty = 0;
+    jd_toml_free(sh.agreed_t);
+    sh.agreed_t = rt ? rt : NULL;
+    sh.merged_uid = uid;
+    save_base(app);
+    pending = 0;
+    for (int g = 0; g < JD_SHARE_COUNT; g++) pending |= sh.pending[g] != 0;
+    if (pending || me_stale() || sh.devices_dirty) push(app, uid);
+}
+
+/* "now", "12 min ago", "5 h ago", "3 days ago" */
+static void ago(int64_t when, char *out, size_t n)
+{
+    int64_t d = jd_now() - when;
+    if (!when) snprintf(out, n, "not yet");
+    else if (d < 120) snprintf(out, n, "now");
+    else if (d < 3600) snprintf(out, n, "%lld min ago", (long long)(d / 60));
+    else if (d < 2 * 86400) snprintf(out, n, "%lld h ago", (long long)(d / 3600));
+    else snprintf(out, n, "%lld days ago", (long long)(d / 86400));
+}
+
+/* Settings > Sync: the devices the copy lists, each with when it last wrote it; the y below */
+static float devices_draw(jd_app *app, float x, float y, float w)
+{
+    if (!share_on(app)) return y;
+    load_base(app);
+    jd_ui *ui = &app->ui;
+    int others = 0;
+    for (int i = 0; i < sh.ndevices; i++) others += !jd_streq(sh.devices[i].id, sh.me);
+    char head[80];
+    snprintf(head, sizeof head, others ? "In sync on %d devices" : "Only this device so far", others + 1);
+    jd_text(ui, head, x, y + 4, 15, JD_NORD6, 1);
+    jd_text(ui, "Each device writes itself in when it shares, at least once a day.", x, y + 26, 13, JD_MUTED, 0);
+    y += 56;
+    int listed_me = 0;
+    for (int i = 0; i <= sh.ndevices; i++) {
+        if (i == sh.ndevices && listed_me) break;
+        share_device me = {sh.me, NULL, 0};
+        const share_device *d = i < sh.ndevices ? &sh.devices[i] : &me;
+        int mine = jd_streq(d->id, sh.me);
+        listed_me |= mine;
+        char *host = mine ? device_name() : NULL;
+        char when[48], line[400];
+        ago(d->seen, when, sizeof when);
+        const char *name = mine ? host : d->name && d->name[0] ? d->name : "A device";
+        snprintf(line, sizeof line, "%s%s", name, mine ? "  (this device)" : "");
+        Rectangle row = {x, y, w, 40};
+        DrawRectangleRounded(row, 0.2f, 6, JD_NORD1);
+        jd_text_fit(ui, line, x + 14, y + 11, w - 14 - 240, 14, JD_NORD6, mine);
+        snprintf(line, sizeof line, "Last shared %s", when);
+        jd_text_fit(ui, line, x + w - 230, y + 12, mine ? 220 : 130, 13, JD_MUTED, 0);
+        free(host);
+        if (!mine && jd_button(ui, "Forget", (Rectangle){x + w - 86, y + 5, 78, 30}, 0) && !app->dialog.kind) {
+            char *id = jd_strdup(d->id);
+            share_forget_device(app, id);
+            free(id);
+            break;
+        }
+        y += 46;
+    }
+    reach(y);
+    return y + 8;
+}
+
+void share_forget_device(jd_app *app, const char *id)
+{
+    if (!share_on(app) || jd_streq(id, sh.me)) return;
+    for (int i = 0; i < sh.ndevices; i++)
+        if (jd_streq(sh.devices[i].id, id)) {
+            free(sh.devices[i].id), free(sh.devices[i].name);
+            memmove(sh.devices + i, sh.devices + i + 1, sizeof *sh.devices * (size_t)(sh.ndevices - i - 1));
+            sh.ndevices--;
+            break;
+        }
+    sh.devices_dirty = 1;
+    sh.pushed_for = UINT32_MAX;
+    save_base(app);
+    share_check(app);
+}
+
+void share_changed(jd_app *app)
+{
+    if (!share_on(app)) return;
+    load_base(app);
+    int any = 0;
+    for (int g = 0; g < JD_SHARE_COUNT; g++) {
+        char *now = local_text(app, g);
+        if (strcmp(now, sh.local[g]) != 0) {
+            any = 1;
+            sh.pending[g] = sh.have_base && strcmp(now, sh.agreed[g]) == 0 ? 0 : jd_now();
+        }
+        set_text(&sh.local[g], now);
+    }
+    if (!any) return;
+    sh.pushed_for = UINT32_MAX;
+    save_base(app);
+    share_check(app);
+}
+
+void share_calendars_found(jd_app *app)
+{
+    if (!share_on(app)) return;
+    load_base(app);
+    if (!sh.agreed_t || sh.pending[JD_SHARE_CHOICES]) return;
+    char *now = local_text(app, JD_SHARE_CHOICES);
+    if (strcmp(now, sh.agreed[JD_SHARE_CHOICES]) != 0) {
+        calendar_choices_apply(app, sh.agreed_t);
+        free(now);
+        now = local_text(app, JD_SHARE_CHOICES);
+    }
+    set_text(&sh.local[JD_SHARE_CHOICES], now);
+}
+
+/* the first look's answer: 1 the other jackdaw's settings, 0 this device's */
+void share_decided(jd_app *app, int theirs)
+{
+    sh.asking = 0;
+    if (!share_on(app)) return;
+    load_base(app);
+    sh.have_base = 1;
+    for (int g = 0; g < JD_SHARE_COUNT; g++) {
+        set_text(&sh.agreed[g], jd_strdup(""));
+        sh.stamp[g] = 0;
+        sh.pending[g] = theirs ? 0 : jd_now();
+    }
+    sh.merged_uid = 0;
+    share_check(app);
 }

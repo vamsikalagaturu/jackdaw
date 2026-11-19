@@ -36,7 +36,7 @@ enum {
 
 typedef enum {
     OP_FLAG, OP_MOVE, OP_COPY, OP_DESTROY, OP_BODY, OP_SEARCH, OP_CREATE, OP_RENAME, OP_DELETE_FOLDER, OP_SEND, OP_DRAFT,
-    OP_SIEVE_GET, OP_SIEVE_PUT
+    OP_SIEVE_GET, OP_SIEVE_PUT, OP_SETTINGS
 } op_kind;
 
 /* A request from the UI, by message ids; the worker turns it into ops. */
@@ -558,6 +558,7 @@ static void apply_requests(jd_sync *s)
         case OP_DRAFT:
         case OP_SIEVE_GET:
         case OP_SIEVE_PUT:
+        case OP_SETTINGS:
             push_op(s, (op){.kind = rq->kind, .a = rq->a, .b = rq->b, .serial = rq->serial, .len = rq->len,
                             .rcpts = rq->rcpts, .nrcpts = rq->nrcpts, .replied = rq->replied});
             rq->a = rq->b = NULL;
@@ -677,6 +678,57 @@ static int run_draft(jd_sync *s, op *o)
     if (r == JD_IMAP_OK) r = sync_folder(s, id, drafts);
     free(drafts);
     emit(s, JD_EV_SAVED, r == JD_IMAP_OK ? NULL : "The server did not take the draft.", NULL, o->serial, 0);
+    emit(s, JD_EV_CHANGED, NULL, NULL, 0, 0);
+    return r;
+}
+
+/* the settings folder's newest copy, after a look at the server: 0 when it has none (made when missing and make) */
+static int settings_newest(jd_sync *s, const char *name, int make, int64_t *folder, uint32_t *uid)
+{
+    jd_mailbox *boxes;
+    int nb, there = 0;
+    *uid = 0;
+    int r = jd_imap_list(s->imap, &boxes, &nb);
+    if (r != JD_IMAP_OK) return r;
+    for (int i = 0; i < nb; i++) there |= strcmp(boxes[i].name, name) == 0;
+    jd_mailboxes_free(boxes, nb);
+    if (!there && !make) return JD_IMAP_OK;
+    if (!there && (r = jd_imap_create(s->imap, name)) != JD_IMAP_OK) return r;
+    *folder = jd_store_folder_by_name(s->store, name);
+    if (!*folder) {
+        jd_store_begin(s->store);
+        *folder = jd_folder_upsert(s->store, name, 0, NULL);
+        jd_store_commit(s->store);
+    }
+    if ((r = sync_folder(s, *folder, name)) != JD_IMAP_OK) return r;
+    int n;
+    uint32_t *uids = jd_folder_uids(s->store, *folder, &n);
+    if (n) *uid = uids[n - 1];
+    free(uids);
+    return JD_IMAP_OK;
+}
+
+/* Stored only when the server's newest copy is still the one the UI merged with (o->replied, its UID; 0 none):
+   else another jackdaw stored first and the UI merges again (JD_EV_CHANGED). The folder then keeps this copy alone. */
+static int run_settings(jd_sync *s, op *o)
+{
+    char *name;
+    jd_store_settings_folder(s->store, &name);
+    status(s, "Sharing the settings", NULL);
+    int64_t folder = 0;
+    uint32_t newest;
+    int r = settings_newest(s, name, 1, &folder, &newest);
+    if (r == JD_IMAP_OK && newest == (uint32_t)o->replied) {
+        r = jd_imap_append(s->imap, name, o->a, o->len, JD_SEEN);
+        if (r == JD_IMAP_OK) r = sync_folder(s, folder, name);
+        int n = 0;
+        uint32_t *uids = r == JD_IMAP_OK ? jd_folder_uids(s->store, folder, &n) : NULL;
+        jd_selected sel;
+        if (n > 1 && jd_imap_select(s->imap, name, &sel) == JD_IMAP_OK) r = jd_imap_expunge(s->imap, uids, n - 1);
+        if (r == JD_IMAP_OK && n > 1) r = sync_folder(s, folder, name);
+        free(uids);
+    }
+    free(name);
     emit(s, JD_EV_CHANGED, NULL, NULL, 0, 0);
     return r;
 }
@@ -886,6 +938,7 @@ static int run_op(jd_sync *s, op *o)
     case OP_DELETE_FOLDER: s->want_full = 1; return jd_imap_delete(s->imap, o->a);
     case OP_SEND: return run_send(s, o);
     case OP_DRAFT: return run_draft(s, o);
+    case OP_SETTINGS: return run_settings(s, o);
     case OP_SIEVE_GET:
     case OP_SIEVE_PUT: {
         /* its own connection, answered either way: a missing ManageSieve is not a reason to reconnect IMAP */
@@ -911,7 +964,7 @@ static const char *op_name(op_kind k)
     static const char *names[] = {"changing flags", "moving mail", "copying mail", "deleting mail",
                                   "downloading a message", "searching the server", "creating the folder",
                                   "renaming the folder", "deleting the folder", "sending", "saving the draft",
-                                  "reading filters", "saving filters"};
+                                  "reading filters", "saving filters", "sharing the settings"};
     return names[k];
 }
 
@@ -1196,6 +1249,11 @@ void jd_sync_sieve_get(jd_sync *s)
 void jd_sync_sieve_put(jd_sync *s, const char *name, const char *script)
 {
     request_add(s, (request){.kind = OP_SIEVE_PUT, .a = jd_strdup(script), .b = jd_strdup(name)}, NULL, 0);
+}
+
+void jd_sync_put_settings(jd_sync *s, const char *msg, size_t len, uint32_t merged_with)
+{
+    request_add(s, (request){.kind = OP_SETTINGS, .a = jd_strndup(msg, len), .len = len, .replied = merged_with}, NULL, 0);
 }
 
 void jd_sync_create_folder(jd_sync *s, const char *name)

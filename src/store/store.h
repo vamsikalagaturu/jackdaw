@@ -93,7 +93,13 @@ char *jd_store_namespace(jd_store *s);
 
 void jd_folder_set_collapsed(jd_store *s, int64_t folder, int collapsed);
 
-/* Inbox first, then the special-use folders, then the rest by name */
+/* The settings shared between the account's jackdaws are one message in this folder under the personal namespace,
+   kept out of the folder list and of searches */
+#define JD_SETTINGS_FOLDER "jackdaw"
+/* its id, 0 when the server has none yet; name (malloc'd) is its full name either way */
+int64_t jd_store_settings_folder(jd_store *s, char **name);
+
+/* Inbox first, then the special-use folders (the settings folder left out), then the rest by name */
 jd_folder_row *jd_store_folders(jd_store *s, int *n);
 void jd_folder_rows_free(jd_folder_row *rows, int n);
 
@@ -182,16 +188,26 @@ typedef struct {
     int64_t id;
     char *href, *name, *color; /* href: the collection's absolute URL; color "#rrggbb", NULL when unset */
     char *sync_token, *ctag;   /* RFC 6578 and getctag: where the last look left off */
-    int readonly, enabled;     /* enabled: shown in the views */
+    int readonly, enabled;     /* enabled: chosen to be synced (and shown) */
+    char *account;             /* jd_cal_account_id of its account; NULL for one kept before schema 9 */
+    int shown;                 /* a synced calendar can be hidden from the views, its events kept */
+    /* color above is the one in use: user_color, chosen in jackdaw (NULL: none), else server_color */
+    char *user_color, *server_color;
 } jd_calendar_row;
 jd_calendar_row *jd_store_calendars(jd_store *s, int *n);
 void jd_calendar_rows_free(jd_calendar_row *r, int n);
-/* added, or renamed and recoloured (its events and enabled kept); returns its id */
-int64_t jd_store_calendar_put(jd_store *s, const char *href, const char *name, const char *color, int readonly);
+/* added (not enabled), or renamed and recoloured (its events and enabled kept), filed under account; returns its id */
+int64_t jd_store_calendar_put(jd_store *s, const char *account, const char *href, const char *name, const char *color,
+                              int readonly);
 void jd_store_calendar_state(jd_store *s, int64_t id, const char *sync_token, const char *ctag);
+/* chosen to be synced, or not: then its events and sync state go */
 void jd_store_calendar_enable(jd_store *s, int64_t id, int on);
-/* the calendars whose href is not among hrefs go, with their events */
-void jd_store_calendars_keep(jd_store *s, char **hrefs, int n);
+void jd_store_calendar_show(jd_store *s, int64_t id, int on);
+/* a colour of the user's ("#rrggbb") over the server's; NULL goes back to the server's */
+void jd_store_calendar_recolor(jd_store *s, int64_t id, const char *color);
+/* account's calendars (and those filed under no account) whose href is not among hrefs go, with their events;
+   account NULL: every calendar's */
+void jd_store_calendars_keep(jd_store *s, const char *account, char **hrefs, int n);
 
 /* dtstart, dtend: Unix seconds (cal/ical.h); a recurring event's dtend is its first occurrence's */
 typedef struct {
@@ -206,7 +222,8 @@ void jd_store_event_put(jd_store *s, int64_t calendar, const char *href, const c
                         const char *uid, const char *summary, const char *location, int64_t dtstart, int64_t dtend,
                         int all_day, int recurring);
 void jd_store_event_delete(jd_store *s, int64_t calendar, const char *href);
-/* the events of shown calendars that may have an occurrence in [from, to): every recurring one starting before to */
+/* the events of synced and shown calendars that may have an occurrence in [from, to): every recurring one starting
+   before to */
 jd_event_row *jd_store_events(jd_store *s, int64_t from, int64_t to, int *n);
 jd_event_row *jd_store_calendar_events(jd_store *s, int64_t calendar, int *n);
 /* one event, NULL when gone */

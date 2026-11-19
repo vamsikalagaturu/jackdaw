@@ -45,6 +45,7 @@ void save_prefs(jd_app *app)
     app->prefs.list_width = (int)app->list_w;
     app->prefs.list_height = (int)app->list_h;
     jd_settings_save(app->have_account ? &app->account : NULL, &app->prefs);
+    share_changed(app);
 }
 
 static void unload_fonts(jd_ui *ui)
@@ -118,6 +119,7 @@ void mail_reload(jd_app *app)
     int64_t keep = app->nfolders ? app->folders[app->folder].id : 0;
     jd_folder_rows_free(app->folders, app->nfolders);
     app->folders = jd_store_folders(app->view, &app->nfolders);
+    share_check(app);
     app->folder = 0;
     for (int i = 0; i < app->nfolders; i++)
         if (app->folders[i].id == keep) app->folder = i;
@@ -445,14 +447,15 @@ static void footer(jd_app *app, float sw, float sh)
     float y = sh - BAR_H;
     DrawRectangleV((Vector2){0, y}, (Vector2){sw, BAR_H}, JD_NORD1);
     static const char *names[] = {"NORMAL", "VISUAL", "INSERT"};
-    Color colors[] = {JD_NORD10, (Color){0xb4, 0x8e, 0xad, 0xff}, (Color){0x8f, 0xa8, 0x76, 0xff}};
+    /* the theme's accent, magenta and green, with the text buttons on the accent use */
+    Color colors[] = {JD_NORD10, JD_PURPLE, JD_GREEN};
     jd_mode m = current_mode(app);
     float x = 12;
     /* the mode and the pane with the keys mean nothing on a touch screen */
     if (!plat_touch()) {
         float mw = jd_text_width(ui, names[m], 12, 1) + 20;
         DrawRectangleV((Vector2){0, y}, (Vector2){mw, BAR_H}, colors[m]);
-        jd_text(ui, names[m], 10, y + 8, 12, (Color){0xff, 0xff, 0xff, 0xff}, 1);
+        jd_text(ui, names[m], 10, y + 8, 12, JD_ON_ACCENT, 1);
         x = mw + 12;
     }
     /* which pane has the keys, beside the mode */
@@ -477,7 +480,7 @@ static void footer(jd_app *app, float sw, float sh)
     int cal = app->tabs[app->tab].kind == TAB_CALENDAR;
     const char *error = cal ? calendar_error() : app->error, *status = cal ? calendar_status() : app->status;
     const char *line = noting && cal ? app->notice : error ? error : status ? status : noting ? app->notice
-                       : cal ? (app->calsync ? "Calendars up to date" : "No calendar connected") : "Up to date";
+                       : cal ? (calendar_connected() ? "Calendars up to date" : "No calendar connected") : "Up to date";
     jd_icon(error && !(noting && cal) ? "triangle-alert" : status ? "refresh-cw" : noting ? "check" : "circle-check", x, y + 6, 15,
             error && !(noting && cal) ? JD_NORD13 : noting ? JD_NORD8 : JD_NORD4);
     char counts[200] = "";

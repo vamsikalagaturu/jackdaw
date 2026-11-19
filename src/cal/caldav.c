@@ -554,21 +554,52 @@ static void items(node *ms, const char *cal, jd_dav_item **out, int *n)
     }
 }
 
+/* RFC 6578 3.6: a truncated answer says 507 for the collection itself; the rest comes for the token it carries */
+static int truncated(node *ms, const char *cal)
+{
+    for (int i = 0; i < ms->nkids; i++) {
+        node *resp = ms->kids[i];
+        if (strcmp(resp->name, NS_DAV "response") != 0) continue;
+        char *href = text_of(child(resp, NS_DAV "href"));
+        char *abs = href ? jd_dav_url(cal, href) : NULL;
+        int self = abs && same_resource(abs, cal);
+        free(href), free(abs);
+        if (self && status_code(child(resp, NS_DAV "status")) == 507) return 1;
+    }
+    return 0;
+}
+
 int jd_dav_sync(jd_dav *d, const char *cal, const char *token, jd_dav_item **out, int *n, char **next)
 {
     *out = NULL, *n = 0, *next = NULL;
-    jd_buf x = {0};
-    jd_buf_adds(&x, "<?xml version=\"1.0\" encoding=\"utf-8\"?><d:sync-collection xmlns:d=\"DAV:\"><d:sync-token>");
-    if (token) xml_escape(&x, token);
-    jd_buf_adds(&x, "</d:sync-token><d:sync-level>1</d:sync-level><d:prop><d:getetag/></d:prop></d:sync-collection>");
-    node *ms = NULL;
-    int r = multistatus(d, "REPORT", cal, "1", x.s, &ms);
-    jd_buf_free(&x);
-    if (r == JD_DAV_ERROR && d->status >= 400 && d->status != 404) return JD_DAV_RESYNC;
-    if (r != JD_DAV_OK) return r;
-    items(ms, cal, out, n);
-    *next = text_of(child(ms, NS_DAV "sync-token"));
-    node_free(ms);
+    char *at = jd_strdup(token);
+    /* a server answers in pages (Google: 250 events each): the pages are asked for until one is not cut short */
+    for (int page = 0; page < 1000; page++) {
+        jd_buf x = {0};
+        jd_buf_adds(&x, "<?xml version=\"1.0\" encoding=\"utf-8\"?><d:sync-collection xmlns:d=\"DAV:\"><d:sync-token>");
+        if (at) xml_escape(&x, at);
+        jd_buf_adds(&x, "</d:sync-token><d:sync-level>1</d:sync-level><d:prop><d:getetag/></d:prop></d:sync-collection>");
+        node *ms = NULL;
+        int r = multistatus(d, "REPORT", cal, "1", x.s, &ms);
+        jd_buf_free(&x);
+        if (r != JD_DAV_OK) {
+            free(at);
+            jd_dav_items_free(*out, *n);
+            *out = NULL, *n = 0;
+            free(*next);
+            *next = NULL;
+            return r == JD_DAV_ERROR && d->status >= 400 && d->status != 404 ? JD_DAV_RESYNC : r;
+        }
+        items(ms, cal, out, n);
+        free(*next);
+        *next = text_of(child(ms, NS_DAV "sync-token"));
+        int more = truncated(ms, cal);
+        node_free(ms);
+        if (!more || !*next || (at && strcmp(*next, at) == 0)) break;
+        free(at);
+        at = jd_strdup(*next);
+    }
+    free(at);
     return JD_DAV_OK;
 }
 

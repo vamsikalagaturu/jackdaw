@@ -158,7 +158,7 @@ static const char *help_lines[][2] = {
     {"Folders", NULL},
     {"Space  a  Shift+R  Shift+D", "collapse, new, rename, delete"},
     {"Calendar", NULL},
-    {"gc", "open the calendar"}, {"a  w  m", "agenda, week, month"},
+    {"gc", "open the calendar"}, {"1  2  3  4", "day, week, month, agenda (also w m a)"},
     {"h  l  Shift+h/l  t", "the day before, after (agenda: a week); the period before, after; today"},
     {"j  k  Enter", "the next, previous event; its details (Enter again edits)"},
     {"n  e  d  r", "new event, edit, delete, sync now"},

@@ -14,6 +14,8 @@ void jd_ui_use(jd_ui *ui, const jd_fonts *role);
 
 void jd_text(jd_ui *ui, const char *s, float x, float y, float size, Color c, int bold);
 float jd_text_width(jd_ui *ui, const char *s, float size, int bold);
+/* where s's drawn glyphs fall, from the point jd_text draws it at: for centring by the ink, not the line box */
+Rectangle jd_text_ink(jd_ui *ui, const char *s, float size, int bold);
 /* s cut with "..." to fit width */
 void jd_text_fit(jd_ui *ui, const char *s, float x, float y, float width, float size, Color c, int bold);
 

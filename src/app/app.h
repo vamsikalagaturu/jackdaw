@@ -15,7 +15,7 @@ enum { PANE_FOLDERS, PANE_LIST, PANE_READER };
 typedef enum { DLG_NONE, DLG_PROMPT, DLG_CONFIRM, DLG_PICK_FOLDER, DLG_RULES } dialog_kind;
 typedef enum {
     ACT_NONE, ACT_CREATE_FOLDER, ACT_RENAME_FOLDER, ACT_DELETE_FOLDER, ACT_MOVE, ACT_COPY, ACT_DESTROY, ACT_ADD_RULE, ACT_LOGOUT,
-    ACT_DISCARD, ACT_SEND_LATER, ACT_DELETE_EVENT
+    ACT_DISCARD, ACT_SEND_LATER, ACT_DELETE_EVENT, ACT_USE_SHARED
 } action;
 
 typedef struct {
@@ -115,7 +115,6 @@ typedef struct {
     char *password;
     char *dir;
     jd_sync *sync;
-    struct jd_calsync *calsync; /* the [calendar] worker, NULL when no calendar is set up or signed in */
     jd_store *view;
 
     jd_field fields[F_COUNT];
@@ -346,7 +345,7 @@ void compose_saved(jd_app *app, int64_t serial, const char *error);
 void compose_attach_paths(jd_app *app, struct jd_compose *c, char **paths, int n);
 void compose_set_to(struct jd_compose *c, const char *mailto);
 
-/* calendar.c: the [calendar] worker started (when set up and its secret is in the keystore) and stopped */
+/* calendar.c: a worker per [[calendar]] account started (its secret in the keystore) and stopped */
 void calendar_start(jd_app *app);
 void calendar_stop(jd_app *app);
 /* every frame: the worker's events, reminders due */
@@ -363,11 +362,30 @@ const char *calendar_error(void);
 void calendar_delete_confirmed(jd_app *app);
 /* a sent mail's outcome: 1 when it was the calendar's answer to an organizer */
 int calendar_sent(jd_app *app, int64_t serial, const char *error);
-/* the keystore entry of the calendar's password or Google sign-in */
-char *calendar_secret_key(jd_app *app);
+/* every calendar account's password or Google sign-in out of the keystore (logging out) */
+void calendar_forget_all(jd_app *app);
+/* a calendar account's worker runs and is signed in */
+int calendar_connected(void);
 /* Settings' Calendar section; returns the y below it */
 float calendar_settings(jd_app *app, float x, float y, float w, int *focus);
 int calendar_settings_keys(jd_app *app);
+/* the shared settings' JD_SHARE_CHOICES: as TOML from a shared copy t, else this store's followed by keep's for the
+   calendars not found here yet; and a copy's onto this store */
+char *calendar_choices_text(jd_app *app, const jd_toml *t, const jd_toml *keep);
+void calendar_choices_apply(jd_app *app, const jd_toml *t);
+/* a shared copy's calendar accounts in place of these, the ones it lacks forgotten here */
+void calendar_accounts_apply(jd_app *app, const jd_toml *t);
+
+/* settings.c: the settings shared with the account's other jackdaws ([sync] settings). share_check merges the
+   server's copy (after the store changed), share_changed after a change made here, share_decided answers the
+   first look's question (1: the other jackdaw's settings, 0: this device's) */
+void share_check(jd_app *app);
+void share_changed(jd_app *app);
+void share_decided(jd_app *app, int theirs);
+/* a device out of the shared copy's list (it writes itself in again when it next shares) */
+void share_forget_device(jd_app *app, const char *id);
+/* a calendar worker filed calendars: the agreed choices onto the ones just found */
+void share_calendars_found(jd_app *app);
 /* an invitation, update, cancellation or answer in a message, with Accept / Maybe / Decline; the y below it */
 float invite_card(jd_app *app, const char *ics, float x, float y, float w, Rectangle clip);
 

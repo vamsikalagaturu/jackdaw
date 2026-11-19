@@ -55,6 +55,10 @@ void jd_sync_destroy(jd_sync *s, const int64_t *ids, int n);
 /* server-side full-text search of every folder, or of folder_name; answered with JD_EV_SEARCH */
 void jd_sync_search(jd_sync *s, const char *words, const char *folder_name, int64_t serial);
 void jd_sync_create_folder(jd_sync *s, const char *name);
+/* stores msg as the shared settings (jd_store_settings_folder, made when missing), replacing the copies there, when
+   the newest there is still merged_with (its UID, 0 for none); else another jackdaw was first and only
+   JD_EV_CHANGED comes, for the UI to merge again */
+void jd_sync_put_settings(jd_sync *s, const char *msg, size_t len, uint32_t merged_with);
 void jd_sync_rename_folder(jd_sync *s, const char *from, const char *to);
 void jd_sync_delete_folder(jd_sync *s, const char *name);
 /* Sends msg over SMTP, then stores a copy in Sent, marks replied_to \Answered (when not 0) and removes drafts

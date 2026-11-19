@@ -29,7 +29,7 @@ typedef struct {
 
 struct jd_calsync {
     jd_cal_provider provider;
-    char *url, *username, *secret, *db_path;
+    char *account, *url, *username, *secret, *db_path; /* account: jd_cal_account_id, what its calendars are filed under */
     int check_minutes;
     pthread_t thread;
     int wake[2];
@@ -180,7 +180,8 @@ static int sync_calendar(jd_calsync *s, const jd_dav_calendar *c, int64_t id, in
         if (rows[i].id == id) token = jd_strdup(rows[i].sync_token), ctag = jd_strdup(rows[i].ctag);
     jd_calendar_rows_free(rows, n);
     int r = JD_DAV_OK;
-    int same = (c->ctag && ctag && strcmp(c->ctag, ctag) == 0) || (!c->ctag && c->sync_token && jd_streq(c->sync_token, token));
+    /* the getctag shortcut only where there is no collection sync, which asks for nothing more when nothing changed */
+    int same = c->sync_token ? jd_streq(c->sync_token, token) : c->ctag && ctag && strcmp(c->ctag, ctag) == 0;
     if (same) goto done;
     jd_dav_item *items = NULL;
     int nitems = 0;
@@ -238,18 +239,25 @@ static int sync_all(jd_calsync *s)
     jd_store_begin(s->store);
     for (int i = 0; i < n; i++) {
         hrefs[i] = cals[i].href;
-        ids[i] = jd_store_calendar_put(s->store, cals[i].href, cals[i].name, cals[i].color, cals[i].readonly);
+        ids[i] = jd_store_calendar_put(s->store, s->account, cals[i].href, cals[i].name, cals[i].color, cals[i].readonly);
     }
-    jd_store_calendars_keep(s->store, hrefs, n);
+    jd_store_calendars_keep(s->store, s->account, hrefs, n);
     jd_store_commit(s->store);
+    int nrows;
+    jd_calendar_row *rows = jd_store_calendars(s->store, &nrows);
     /* names and colours may have changed even when no event did */
     int changed = 1;
     for (int i = 0; i < n && r == JD_DAV_OK && !quitting(s); i++) {
+        int chosen = 0;
+        for (int k = 0; k < nrows; k++)
+            if (rows[k].id == ids[i]) chosen = rows[k].enabled;
+        if (!chosen) continue;
         char *what = jd_printf("Syncing the calendar %s", cals[i].name ? cals[i].name : "");
         emit(s, JD_CAL_EV_STATUS, what, NULL, 0);
         free(what);
         r = sync_calendar(s, &cals[i], ids[i], &changed);
     }
+    jd_calendar_rows_free(rows, nrows);
     free(hrefs), free(ids);
     jd_dav_calendars_free(cals, n);
     if (changed) emit(s, JD_CAL_EV_CHANGED, NULL, NULL, 0);
@@ -396,19 +404,6 @@ static int run_delete(jd_calsync *s, job *j, char *err, int errlen)
     return r;
 }
 
-static int64_t first_writable(jd_calsync *s)
-{
-    int n;
-    jd_calendar_row *rows = jd_store_calendars(s->store, &n);
-    int64_t id = 0;
-    for (int i = 0; i < n && !id; i++)
-        if (!rows[i].readonly && rows[i].enabled) id = rows[i].id;
-    for (int i = 0; i < n && !id; i++)
-        if (!rows[i].readonly) id = rows[i].id;
-    jd_calendar_rows_free(rows, n);
-    return id;
-}
-
 static int run_respond(jd_calsync *s, job *j, char *err, int errlen)
 {
     jd_invite inv;
@@ -418,7 +413,7 @@ static int run_respond(jd_calsync *s, job *j, char *err, int errlen)
     }
     jd_event_row *have = jd_store_event_by_uid(s->store, inv.event.uid);
     int ro = 0;
-    char *target = calendar_href(s, have ? have->calendar : first_writable(s), &ro);
+    char *target = calendar_href(s, have ? have->calendar : j->calendar, &ro);
     if (target) jd_dav_options(s->dav, target);
     free(target);
     int auto_schedule = jd_dav_auto_schedule(s->dav);
@@ -431,9 +426,9 @@ static int run_respond(jd_calsync *s, job *j, char *err, int errlen)
         }
     } else {
         char *kept = jd_itip_keep(j->ics, j->me, j->partstat, !auto_schedule);
-        int64_t calendar = have ? have->calendar : first_writable(s);
+        int64_t calendar = have ? have->calendar : j->calendar;
         if (!calendar) {
-            snprintf(err, (size_t)errlen, "No calendar to keep the event in.");
+            snprintf(err, (size_t)errlen, "No calendar is synced to keep the event in: choose one in Settings, Calendar.");
             r = JD_DAV_ERROR;
         } else if (have) {
             r = write_event(s, calendar, have->href, have->etag, kept, err, errlen);
@@ -477,6 +472,8 @@ static void run_jobs(jd_calsync *s)
         }
         emit(s, JD_CAL_EV_SAVED, r == JD_DAV_OK ? NULL : err[0] ? err : "Not saved.", NULL, j.serial);
         emit(s, JD_CAL_EV_CHANGED, NULL, NULL, 0);
+        /* idle again: the status a save set must not outlive it */
+        emit(s, JD_CAL_EV_STATUS, NULL, NULL, 0);
         job_free(&j);
     }
 }
@@ -536,10 +533,11 @@ static void *worker(void *arg)
     return NULL;
 }
 
-jd_calsync *jd_calsync_start(jd_cal_provider provider, const char *url, const char *username, const char *secret,
-                             int check_minutes, const char *db_path)
+jd_calsync *jd_calsync_start(const char *account, jd_cal_provider provider, const char *url, const char *username,
+                             const char *secret, int check_minutes, const char *db_path)
 {
     jd_calsync *s = jd_alloc(sizeof *s);
+    s->account = jd_strdup(account);
     s->provider = provider;
     s->url = jd_strdup(url);
     s->username = jd_strdup(username);
@@ -564,7 +562,7 @@ void jd_calsync_stop(jd_calsync *s)
     for (int i = 0; i < s->njobs; i++) job_free(&s->jobs[i]);
     free(s->events), free(s->jobs);
     if (s->secret) jd_wipe(s->secret, strlen(s->secret));
-    free(s->url), free(s->username), free(s->secret), free(s->db_path);
+    free(s->account), free(s->url), free(s->username), free(s->secret), free(s->db_path);
     pthread_mutex_destroy(&s->lock);
     free(s);
 }
@@ -614,8 +612,9 @@ void jd_calsync_delete(jd_calsync *s, int64_t event, int64_t serial)
     add_job(s, (job){.kind = JOB_DELETE, .event = event, .serial = serial});
 }
 
-void jd_calsync_respond(jd_calsync *s, const char *ics, const char *me, const char *partstat, int64_t serial)
+void jd_calsync_respond(jd_calsync *s, int64_t calendar, const char *ics, const char *me, const char *partstat,
+                        int64_t serial)
 {
-    add_job(s, (job){.kind = JOB_RESPOND, .ics = jd_strdup(ics), .me = jd_strdup(me), .partstat = jd_strdup(partstat),
-                     .serial = serial});
+    add_job(s, (job){.kind = JOB_RESPOND, .calendar = calendar, .ics = jd_strdup(ics), .me = jd_strdup(me),
+                     .partstat = jd_strdup(partstat), .serial = serial});
 }

@@ -170,11 +170,59 @@ static char *query_param(const char *query, const char *name)
     return NULL;
 }
 
+static void html_escape(jd_buf *b, const char *s)
+{
+    for (; *s; s++) {
+        if (*s == '<') jd_buf_adds(b, "&lt;");
+        else if (*s == '>') jd_buf_adds(b, "&gt;");
+        else if (*s == '&') jd_buf_adds(b, "&amp;");
+        else if (*s == '"') jd_buf_adds(b, "&quot;");
+        else jd_buf_add(b, s, 1);
+    }
+}
+
+/* the browser tab the sign-in ends in: jackdaw's bird and Nord colours (ui/theme.c), light or dark as the browser
+   is; the Lucide bird and check / x icons (assets/icons, ISC) inline */
+static const char page_head[] =
+    "<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\">"
+    "<title>jackdaw</title><style>"
+    ":root{--bg:#2e3440;--card:#3b4252;--line:#434c5e;--fg:#d8dee9;--bright:#eceff4;--muted:#a3abb9;--accent:#88c0d0;"
+    "--ok:#a3be8c;--bad:#bf616a;color-scheme:dark}"
+    "@media(prefers-color-scheme:light){:root{--bg:#eceff4;--card:#fff;--line:#d8dee9;--fg:#434c5e;--bright:#2e3440;"
+    "--muted:#6b7385;--accent:#5e81ac;--ok:#5f8a4a;--bad:#a5424c;color-scheme:light}}"
+    "*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);"
+    "color:var(--fg);font:16px/1.5 Inter,system-ui,-apple-system,'Segoe UI',sans-serif;padding:16px}"
+    ".card{width:100%;max-width:440px;background:var(--card);border:1px solid var(--line);border-radius:16px;"
+    "padding:32px;text-align:center}"
+    ".mark{display:inline-flex;align-items:center;gap:10px;color:var(--accent);font-weight:600;font-size:20px;"
+    "margin-bottom:28px}.mark svg{width:30px;height:30px}"
+    ".state{width:56px;height:56px;border-radius:50%;display:grid;place-items:center;margin:0 auto 16px}"
+    ".state svg{width:28px;height:28px}.ok .state{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}"
+    ".bad .state{background:color-mix(in srgb,var(--bad) 20%,transparent);color:var(--bad)}"
+    "h1{font-size:22px;margin:0 0 8px;color:var(--bright)}p{margin:0 0 8px}.muted{color:var(--muted);font-size:14px}"
+    "</style><body><main class=\"card ";
+
+static const char page_mark[] =
+    "\"><div class=mark>"
+    "<svg viewBox=\"0 0 24 24\" fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round>"
+    "<path d=\"M16 7h.01\"/><path d=\"M3.4 18H12a8 8 0 0 0 8-8V7a4 4 0 0 0-7.28-2.3L2 20\"/><path d=\"m20 7 2 .5-2 .5\"/>"
+    "<path d=\"M10 18v3\"/><path d=\"M14 17.75V21\"/><path d=\"M7 18a6 6 0 0 0 3.84-10.61\"/></svg>jackdaw</div>"
+    "<div class=state><svg viewBox=\"0 0 24 24\" fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round "
+    "stroke-linejoin=round>";
+
 static void reply(int fd, int ok, const char *text)
 {
-    char *page = jd_printf("<!doctype html><meta charset=utf-8><title>jackdaw</title>"
-                           "<body style=\"font:16px sans-serif;margin:3em\"><h2>%s</h2><p>%s</p></body>",
-                           ok ? "Signed in" : "Not signed in", text);
+    jd_buf b = {0};
+    jd_buf_adds(&b, page_head);
+    jd_buf_adds(&b, ok ? "ok" : "bad");
+    jd_buf_adds(&b, page_mark);
+    jd_buf_adds(&b, ok ? "<path d=\"M20 6 9 17l-5-5\"/>" : "<path d=\"M18 6 6 18\"/><path d=\"m6 6 12 12\"/>");
+    jd_buf_adds(&b, "</svg></div>");
+    jd_buf_adds(&b, ok ? "<h1>Signed in to Google Calendar</h1><p>" : "<h1>Not signed in</h1><p>");
+    html_escape(&b, text);
+    jd_buf_adds(&b, ok ? "</p><p class=muted>You can close this tab and go back to jackdaw.</p></main></body></html>"
+                       : "</p><p class=muted>Try again from Settings, Calendar in jackdaw.</p></main></body></html>");
+    char *page = b.s;
     char *head = jd_printf("HTTP/1.1 %s\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: %zu\r\n"
                            "Connection: close\r\n\r\n",
                            ok ? "200 OK" : "400 Bad Request", strlen(page));
@@ -246,7 +294,7 @@ static void *listen_thread(void *arg)
         if (code) ok = exchange(o, code, err, sizeof err) == 0;
         else snprintf(err, sizeof err, "Google: %s", error ? error : "no code");
         if (error && strcmp(error, "access_denied") == 0) snprintf(err, sizeof err, "The access was not allowed.");
-        reply(fd, ok, ok ? "jackdaw can read and change your calendars now. You can close this tab." : err);
+        reply(fd, ok, ok ? "jackdaw can now show and change your calendars." : err);
         close(fd);
         free(state), free(code), free(error);
         finish(o, ok ? JD_OAUTH_DONE : JD_OAUTH_FAILED, ok ? NULL : err);

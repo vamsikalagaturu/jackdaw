@@ -36,6 +36,27 @@ void jd_text(jd_ui *ui, const char *s, float x, float y, float size, Color c, in
     DrawTextEx(font(ui, bold, size), s, (Vector2){snap(x), snap(y)}, size, 0, c);
 }
 
+Rectangle jd_text_ink(jd_ui *ui, const char *s, float size, int bold)
+{
+    size = jd_text_size(size);
+    Font f = font(ui, bold, size);
+    float scale = size / (float)f.baseSize, x = 0;
+    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    for (int i = 0; s[i];) {
+        int n = 0, cp = GetCodepointNext(s + i, &n);
+        i += n > 0 ? n : 1;
+        int g = GetGlyphIndex(f, cp);
+        Rectangle r = f.recs[g];
+        float gx = x + (float)f.glyphs[g].offsetX * scale, gy = (float)f.glyphs[g].offsetY * scale;
+        if (r.width > 0 && r.height > 0) {
+            x0 = fminf(x0, gx), y0 = fminf(y0, gy);
+            x1 = fmaxf(x1, gx + r.width * scale), y1 = fmaxf(y1, gy + r.height * scale);
+        }
+        x += (f.glyphs[g].advanceX ? (float)f.glyphs[g].advanceX : r.width) * scale;
+    }
+    return x1 < x0 ? (Rectangle){0} : (Rectangle){x0, y0, x1 - x0, y1 - y0};
+}
+
 float jd_text_width(jd_ui *ui, const char *s, float size, int bold)
 {
     size = jd_text_size(size);

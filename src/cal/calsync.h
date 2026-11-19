@@ -25,9 +25,10 @@ typedef struct {
     int64_t id;
 } jd_cal_event;
 
-/* secret: the CalDAV password, or Google's refresh token. url: where discovery starts (Google's is fixed). */
-jd_calsync *jd_calsync_start(jd_cal_provider provider, const char *url, const char *username, const char *secret,
-                             int check_minutes, const char *db_path);
+/* One worker per calendar account. account: what its calendars are filed under in the store (jd_cal_account_id).
+   secret: the CalDAV password, or Google's refresh token. url: where discovery starts (Google's is fixed). */
+jd_calsync *jd_calsync_start(const char *account, jd_cal_provider provider, const char *url, const char *username,
+                             const char *secret, int check_minutes, const char *db_path);
 void jd_calsync_stop(jd_calsync *s);
 void jd_calsync_now(jd_calsync *s);
 int jd_calsync_poll(jd_calsync *s, jd_cal_event *ev);
@@ -38,5 +39,6 @@ void jd_cal_event_free(jd_cal_event *ev);
 void jd_calsync_put(jd_calsync *s, int64_t calendar, int64_t event, const char *ics, int64_t serial);
 void jd_calsync_delete(jd_calsync *s, int64_t event, int64_t serial);
 /* an invitation (the iTIP REQUEST's ics) answered as me with partstat: kept in the calendar that holds its UID, else
-   the first writable one (a decline removes it); JD_CAL_EV_REPLY when the server leaves the answer to jackdaw */
-void jd_calsync_respond(jd_calsync *s, const char *ics, const char *me, const char *partstat, int64_t serial);
+   in calendar (a decline removes it); JD_CAL_EV_REPLY when the server leaves the answer to jackdaw */
+void jd_calsync_respond(jd_calsync *s, int64_t calendar, const char *ics, const char *me, const char *partstat,
+                        int64_t serial);

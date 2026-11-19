@@ -77,6 +77,11 @@ static void confirm(jd_app *app)
         calendar_delete_confirmed(app);
         return;
     }
+    if (d->act == ACT_USE_SHARED) {
+        close_dialog(app);
+        share_decided(app, 1);
+        return;
+    }
     if (!app->sync) {
         close_dialog(app);
         return;
@@ -85,7 +90,8 @@ static void confirm(jd_app *app)
     case ACT_LOGOUT:
     case ACT_DISCARD:
     case ACT_SEND_LATER:
-    case ACT_DELETE_EVENT: break;
+    case ACT_DELETE_EVENT:
+    case ACT_USE_SHARED: break;
     case ACT_CREATE_FOLDER:
         if (d->field.len) {
             char *name = server_name(app, NULL, d->field.text);
@@ -212,6 +218,14 @@ void dialog_draw(jd_app *app)
     float x = box.x + 20, y = box.y + 18;
     jd_text_fit(ui, d->title, x, y, w - 40, 16, JD_NORD6, 1);
     y += 34;
+    if (d->kind == DLG_CONFIRM && d->act == ACT_USE_SHARED) {
+        if (jd_button(ui, "Use those", (Rectangle){x, y + 10, 130, 34}, 1)) confirm(app);
+        else if (jd_button(ui, "Keep this device's", (Rectangle){x + 142, y + 10, 170, 34}, 0)) {
+            close_dialog(app);
+            share_decided(app, 0);
+        }
+        return;
+    }
     if (d->kind == DLG_CONFIRM) {
         if (jd_button(ui, d->act == ACT_LOGOUT ? "Log out" : "Delete", (Rectangle){x, y + 10, 110, 34}, 1)) confirm(app);
         else if (jd_button(ui, "Cancel", (Rectangle){x + 122, y + 10, 110, 34}, 0)) close_dialog(app);
