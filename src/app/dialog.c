@@ -82,6 +82,13 @@ static void confirm(jd_app *app)
         share_decided(app, 1);
         return;
     }
+    if (d->act == ACT_SNOOZE_AT) {
+        char *typed = jd_strdup(d->field.text);
+        close_dialog(app);
+        snooze_typed(app, typed);
+        free(typed);
+        return;
+    }
     if (!app->sync) {
         close_dialog(app);
         return;
@@ -91,7 +98,8 @@ static void confirm(jd_app *app)
     case ACT_DISCARD:
     case ACT_SEND_LATER:
     case ACT_DELETE_EVENT:
-    case ACT_USE_SHARED: break;
+    case ACT_USE_SHARED:
+    case ACT_SNOOZE_AT: break;
     case ACT_CREATE_FOLDER:
         if (d->field.len) {
             char *name = server_name(app, NULL, d->field.text);

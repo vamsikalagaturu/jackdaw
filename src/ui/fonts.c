@@ -16,9 +16,35 @@ extern const int jd_font_regular_size, jd_font_semibold_size;
 
 /* Latin, Greek, Cyrillic and common punctuation and symbols */
 static const int ranges[][2] = {
-    {0x20, 0x7e}, {0xa0, 0x24f}, {0x370, 0x3ff}, {0x400, 0x4ff}, {0x2010, 0x2027}, {0x2030, 0x203a}, {0x20ac, 0x20ac},
-    {0x2122, 0x2122}, {0x2190, 0x2193}, {0x2500, 0x257f}, {0xfffd, 0xfffd},
+    {0x20, 0x7e}, {0xa0, 0x24f}, {0x370, 0x3ff}, {0x400, 0x4ff}, {0x2000, 0x203a}, {0x205f, 0x2064},
+    {0x20ac, 0x20ac}, {0x2122, 0x2122}, {0x2190, 0x2193}, {0x2500, 0x257f}, {0xfeff, 0xfeff}, {0xfffd, 0xfffd},
 };
+
+/* Unicode's spaces (Zs) other than U+0020, and its invisible format characters (Cf): mail pads its preview text
+   with them (U+2007, U+FEFF...), and a font without their glyphs had them drawn as raylib's fallback '?' */
+static int is_space(int cp)
+{
+    return (cp >= 0x2000 && cp <= 0x200a) || cp == 0x202f || cp == 0x205f;
+}
+
+static int is_invisible(int cp)
+{
+    return (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x2028 && cp <= 0x202e) || (cp >= 0x2060 && cp <= 0x2064) ||
+           cp == 0xfeff;
+}
+
+/* those glyphs as a space's width without ink, and as nothing */
+static void blank_glyphs(Font *font)
+{
+    int space = GetGlyphIndex(*font, ' ');
+    for (int i = 0; i < font->glyphCount; i++) {
+        int cp = font->glyphs[i].value;
+        if (!is_space(cp) && !is_invisible(cp)) continue;
+        font->glyphs[i].advanceX = is_space(cp) ? font->glyphs[space].advanceX : 0;
+        font->glyphs[i].offsetX = font->glyphs[i].offsetY = 0;
+        font->recs[i].width = font->recs[i].height = 0;
+    }
+}
 
 static int *codepoints(int *n)
 {
@@ -78,6 +104,7 @@ Font jd_font_at(jd_face *f, float size)
     int *cps = codepoints(&n);
     Font font = LoadFontFromMemory(f->ext, f->bytes, f->len, px, cps, n);
     if (!font.texture.id || !font.glyphCount) return GetFontDefault();
+    blank_glyphs(&font);
     SetTextureFilter(font.texture, TEXTURE_FILTER_BILINEAR);
     f->sizes = realloc(f->sizes, sizeof *f->sizes * (size_t)(f->nsizes + 1));
     f->sizes[f->nsizes].px = px;

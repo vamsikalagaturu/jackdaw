@@ -39,7 +39,6 @@ void app_connect(jd_app *app)
         free(images);
         mail_reload(app);
         arm_scheduled(app);
-        calendar_start(app);
     }
     free(db);
 }
@@ -48,25 +47,16 @@ void app_connect(jd_app *app)
 void app_disconnect(jd_app *app)
 {
     while (app->ntabs > 1) tab_close(app, app->ntabs - 1);
-    calendar_stop(app);
+    /* a message waiting for Undo goes now */
+    compose_held_flush(app);
     jd_sync_stop(app->sync);
     app->sync = NULL;
+    compose_held_free(app);
     jd_fetcher_stop(app->fetcher);
     app->fetcher = NULL;
     jd_store_close(app->view);
     app->view = NULL;
-    reader_close(app);
-    jd_folder_rows_free(app->folders, app->nfolders);
-    jd_thread_rows_free(app->rows, app->nrows);
-    app->folders = NULL;
-    app->rows = NULL;
-    app->nfolders = app->folder = app->nrows = app->row = 0;
-    free(app->status), free(app->error), free(app->query), free(app->server_hits), free(app->filter_from);
-    app->status = app->error = app->query = app->filter_from = NULL;
-    app->server_hits = NULL;
-    app->nserver_hits = 0;
-    free(app->dialog.ids);
-    app->dialog = (jd_dialog){0};
+    mail_view_reset(app);
 }
 
 static void handle_events(jd_app *app)
@@ -126,11 +116,11 @@ static void handle_events(jd_app *app)
             changed = 1;
             if (app->prefs.notify && (app->prefs.notify_focused || !IsWindowFocused())) {
                 if (ev.count == 1) {
-                    plat_notify(ev.text, ev.text2, ev.id);
+                    plat_notify(ev.text, ev.text2, notify_tag(app->cur, ev.id));
                 } else {
                     char *summary = jd_printf("%d new messages", ev.count);
                     char *body = jd_printf("%s: %s", ev.text, ev.text2);
-                    plat_notify(summary, body, ev.id);
+                    plat_notify(summary, body, notify_tag(app->cur, ev.id));
                     free(summary), free(body);
                 }
             }
@@ -163,21 +153,19 @@ int main(int argc, char **argv)
     app.ui.touch = plat_touch();
     jd_set_touch(app.ui.touch);
 
-    char err[512];
     int first_run = access(jd_settings_path(), F_OK) != 0;
     jd_prefs_load(&app.prefs);
     /* a phone starts with the room a phone has: icons for the folders, messages opening on their own */
     if (plat_touch() && first_run) app.prefs.reader_pos = 2, app.prefs.sidebar_rail = 1;
     tab_add(&app, TAB_MAIL);
     apply_prefs(&app);
-    app.have_account = jd_account_load(&app.account, err, sizeof err) == 0;
-    if (app.have_account) app.password = plat_secret_load(app.account.address);
-    if (app.have_account && app.password) app_connect(&app);
-    else form_open(&app, NULL);
+    accounts_start(&app);
+    calendar_start(&app);
 
     while (!WindowShouldClose()) {
         plat_frame(current_mode(&app) == MODE_INSERT);
         handle_events(&app);
+        accounts_tick(&app);
         calendar_tick(&app);
         if (!app.show_form) update_tick(&app);
         char *url;
@@ -188,7 +176,12 @@ int main(int argc, char **argv)
         }
         int64_t tapped = plat_notify_poll();
         if (tapped) {
-            mail_open_message(&app, tapped);
+            /* another account's mail opens that account */
+            int account;
+            int64_t id;
+            notify_untag(tapped, &account, &id);
+            if (account != app.cur) account_switch(&app, account);
+            if (account == app.cur) mail_open_message(&app, id);
             SetWindowFocused();
         }
         if (!app.show_form && IsKeyPressed(KEY_COMMA) && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)))
@@ -215,6 +208,8 @@ int main(int argc, char **argv)
     }
     pending_tick(&app, 1);
     app_disconnect(&app);
+    accounts_stop(&app);
+    calendar_quit(&app);
     plat_notify_shutdown();
     jd_account_free(&app.account);
     jd_prefs_free(&app.prefs);

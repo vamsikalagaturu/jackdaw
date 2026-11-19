@@ -166,6 +166,8 @@ static void read_event(icalcomponent *ev, jd_ical_event *e)
     e->description = dup_text(icalcomponent_get_description(ev));
     struct icaltimetype s = icalcomponent_get_dtstart(ev), en = icalcomponent_get_dtend(ev);
     e->all_day = s.is_date;
+    const char *tz = s.is_date || icaltime_is_utc(s) ? NULL : icaltime_get_tzid(s);
+    e->tzid = tz && *tz ? jd_strdup(tz) : NULL;
     e->start = to_unix(s);
     e->end = icaltime_is_null_time(en) ? e->start : to_unix(en);
     if (e->end < e->start) e->end = e->start;
@@ -187,7 +189,7 @@ int jd_ical_read(const char *ics, jd_ical_event *out)
 
 void jd_ical_event_free(jd_ical_event *e)
 {
-    free(e->uid), free(e->summary), free(e->location), free(e->description), free(e->rrule);
+    free(e->uid), free(e->summary), free(e->location), free(e->description), free(e->rrule), free(e->tzid);
     *e = (jd_ical_event){.alarm = -1};
 }
 
@@ -342,6 +344,58 @@ static icaltimezone *local_zone(void)
     return strcmp(name, "UTC") == 0 ? NULL : icaltimezone_get_builtin_timezone(name);
 }
 
+const char *const *jd_tz_names(int *n)
+{
+    static const char **names;
+    static int count = -1;
+    pthread_once(&once, init_once);
+    if (count < 0) {
+        icalarray *zones = icaltimezone_get_builtin_timezones();
+        count = 0;
+        names = jd_alloc(sizeof *names * ((zones ? zones->num_elements : 0) + 1));
+        for (size_t i = 0; zones && i < zones->num_elements; i++) {
+            const char *loc = icaltimezone_get_location(icalarray_element_at(zones, i));
+            if (loc && *loc) names[count++] = loc;
+        }
+    }
+    *n = count;
+    return names;
+}
+
+int jd_tz_known(const char *tzid)
+{
+    pthread_once(&once, init_once);
+    return tzid && *tzid && icaltimezone_get_builtin_timezone(tzid) != NULL;
+}
+
+int64_t jd_tz_time(const char *tzid, int y, int m, int d, int hh, int mm)
+{
+    pthread_once(&once, init_once);
+    icaltimezone *z = tzid ? icaltimezone_get_builtin_timezone(tzid) : NULL;
+    if (!z) {
+        struct tm tm = {.tm_year = y - 1900, .tm_mon = m - 1, .tm_mday = d, .tm_hour = hh, .tm_min = mm, .tm_isdst = -1};
+        return (int64_t)mktime(&tm);
+    }
+    struct icaltimetype t = icaltime_null_time();
+    t.year = y, t.month = m, t.day = d, t.hour = hh, t.minute = mm;
+    return (int64_t)icaltime_as_timet_with_zone(t, z);
+}
+
+void jd_tz_wall(const char *tzid, int64_t t, int *y, int *m, int *d, int *hh, int *mm)
+{
+    pthread_once(&once, init_once);
+    icaltimezone *z = tzid ? icaltimezone_get_builtin_timezone(tzid) : NULL;
+    if (!z) {
+        time_t tt = (time_t)t;
+        struct tm tm;
+        localtime_r(&tt, &tm);
+        *y = tm.tm_year + 1900, *m = tm.tm_mon + 1, *d = tm.tm_mday, *hh = tm.tm_hour, *mm = tm.tm_min;
+        return;
+    }
+    struct icaltimetype w = icaltime_from_timet_with_zone((icaltime_t)t, 0, z);
+    *y = w.year, *m = w.month, *d = w.day, *hh = w.hour, *mm = w.minute;
+}
+
 /* the zone's rules from a year before from on: the system's zoneinfo goes back to 1893, kilobytes for every event */
 static void need_zone(icalcomponent *cal, icaltimezone *z, int64_t from)
 {
@@ -387,7 +441,8 @@ char *jd_ical_write(const char *old, const jd_ical_event *e)
         ts = date_of(e->start);
         te = date_of(e->end > e->start ? e->end : e->start + 86400);
     } else {
-        icaltimezone *z = local_zone();
+        icaltimezone *own = e->tzid ? icaltimezone_get_builtin_timezone(e->tzid) : NULL;
+        icaltimezone *z = own ? own : local_zone();
         icaltimezone *zone = z ? z : icaltimezone_get_utc_timezone();
         ts = icaltime_from_timet_with_zone((icaltime_t)e->start, 0, zone);
         te = icaltime_from_timet_with_zone((icaltime_t)(e->end > e->start ? e->end : e->start), 0, zone);

@@ -51,6 +51,9 @@ int jd_imap_fetch_bodies(jd_imap *m, const uint32_t *uids, int n, jd_body_cb *cb
 
 /* UID STORE +FLAGS.SILENT or -FLAGS.SILENT of one JD_ flag */
 int jd_imap_set_flag(jd_imap *m, const uint32_t *uids, int n, int flag, int on);
+/* the same for a keyword (RFC 3501 flag-keyword, an atom such as $Snoozed-1795000000), and \Seen with it when seen
+   is 1 (added) or -1 (removed) */
+int jd_imap_set_keyword(jd_imap *m, const uint32_t *uids, int n, const char *keyword, int on, int seen);
 /* UID STORE +FLAGS.SILENT (\Deleted keyword) of one message of the selected folder, so that only one client acts
    on it: with modseq > 0 as UNCHANGEDSINCE modseq (RFC 7162 3.1.3), and claimed 0 when the server reports the
    message modified since; without, unconditional. The keyword tells the claimant its own claim later; it is left

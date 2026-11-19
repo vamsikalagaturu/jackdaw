@@ -99,6 +99,21 @@ void jd_folder_set_collapsed(jd_store *s, int64_t folder, int collapsed);
 /* its id, 0 when the server has none yet; name (malloc'd) is its full name either way */
 int64_t jd_store_settings_folder(jd_store *s, char **name);
 
+/* Snoozed mail waits in this folder under the personal namespace, each message with a keyword
+   JD_SNOOZE_KEYWORD<unix time> saying when it goes back to the Inbox */
+#define JD_SNOOZED_FOLDER "Snoozed"
+#define JD_SNOOZE_KEYWORD "$Snoozed-"
+/* its id, 0 when the server has none yet; name (malloc'd) is its full name either way */
+int64_t jd_store_snoozed_folder(jd_store *s, char **name);
+typedef struct {
+    int64_t id, at;
+    uint32_t uid;
+    char *keyword;
+} jd_snoozed;
+/* the folder's snoozed messages, soonest first */
+jd_snoozed *jd_store_snoozed(jd_store *s, int64_t folder, int *n);
+void jd_snoozed_free(jd_snoozed *z, int n);
+
 /* Inbox first, then the special-use folders (the settings folder left out), then the rest by name */
 jd_folder_row *jd_store_folders(jd_store *s, int *n);
 void jd_folder_rows_free(jd_folder_row *rows, int n);
@@ -205,6 +220,9 @@ void jd_store_calendar_enable(jd_store *s, int64_t id, int on);
 void jd_store_calendar_show(jd_store *s, int64_t id, int on);
 /* a colour of the user's ("#rrggbb") over the server's; NULL goes back to the server's */
 void jd_store_calendar_recolor(jd_store *s, int64_t id, const char *color);
+/* the calendars and events of the store at path (an earlier jackdaw's mail.db) added to s, then gone from there;
+   how many calendars came */
+int jd_store_calendars_import(jd_store *s, const char *path);
 /* account's calendars (and those filed under no account) whose href is not among hrefs go, with their events;
    account NULL: every calendar's */
 void jd_store_calendars_keep(jd_store *s, const char *account, char **hrefs, int n);
@@ -226,6 +244,9 @@ void jd_store_event_delete(jd_store *s, int64_t calendar, const char *href);
    before to */
 jd_event_row *jd_store_events(jd_store *s, int64_t from, int64_t to, int *n);
 jd_event_row *jd_store_calendar_events(jd_store *s, int64_t calendar, int *n);
+/* the events of synced and shown calendars whose title, place or iCalendar text holds text, latest first (500 at
+   most) */
+jd_event_row *jd_store_events_search(jd_store *s, const char *text, int *n);
 /* one event, NULL when gone */
 jd_event_row *jd_store_event(jd_store *s, int64_t id);
 jd_event_row *jd_store_event_by_uid(jd_store *s, const char *uid);

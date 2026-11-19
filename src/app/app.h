@@ -15,7 +15,7 @@ enum { PANE_FOLDERS, PANE_LIST, PANE_READER };
 typedef enum { DLG_NONE, DLG_PROMPT, DLG_CONFIRM, DLG_PICK_FOLDER, DLG_RULES } dialog_kind;
 typedef enum {
     ACT_NONE, ACT_CREATE_FOLDER, ACT_RENAME_FOLDER, ACT_DELETE_FOLDER, ACT_MOVE, ACT_COPY, ACT_DESTROY, ACT_ADD_RULE, ACT_LOGOUT,
-    ACT_DISCARD, ACT_SEND_LATER, ACT_DELETE_EVENT, ACT_USE_SHARED
+    ACT_DISCARD, ACT_SEND_LATER, ACT_DELETE_EVENT, ACT_USE_SHARED, ACT_SNOOZE_AT
 } action;
 
 typedef struct {
@@ -104,9 +104,22 @@ typedef struct {
     struct jd_compose *compose;   /* TAB_COMPOSE */
 } jd_tab;
 
+/* A mail account of [[account]] and what runs for it. The open one's live in jd_app's own fields (account,
+   password, dir, view, sync, fetcher) and its slot holds none of them; the others run here in the background:
+   their workers sync, file by the rules, send what is due and wake snoozed mail, and their new mail notifies. */
+typedef struct {
+    jd_account account;
+    char *password, *dir;
+    jd_store *view;
+    jd_sync *sync;
+    int unread;    /* its Inbox's unread messages, for the switcher */
+    char *refused; /* the server refused its password: why (its worker stopped) */
+} jd_slot;
+
 typedef struct {
     jd_ui ui;
     int show_form;
+    int adding; /* the form adds an account, the open one staying as it is */
 
     jd_account account;
     jd_prefs prefs;
@@ -116,6 +129,8 @@ typedef struct {
     char *dir;
     jd_sync *sync;
     jd_store *view;
+    jd_slot *slots; /* every account, in [[account]] order; slots[cur] is the open one */
+    int nslots, cur;
 
     jd_field fields[F_COUNT];
     jd_security imap_sec, smtp_sec;
@@ -197,6 +212,8 @@ void filters_draw(jd_app *app, Rectangle r);
 
 void form_open(jd_app *app, const char *error);
 void form_fill(jd_app *app);
+/* the form's fields from a; existing 0 for a new one (default ports, a password to type) */
+void form_fill_from(jd_app *app, const jd_account *a, int existing);
 int form_submit(jd_app *app);
 float form_fields_draw(jd_app *app, float x, float y, float w, int *focus);
 void form_frame(jd_app *app);
@@ -205,6 +222,8 @@ float help_content(jd_app *app, float x, float y, float w, const char *filter);
 
 void mail_frame(jd_app *app);
 void mail_reload(jd_app *app);
+/* the mail view emptied (folders, list, reader, search, status), as before another account's comes in */
+void mail_view_reset(jd_app *app);
 void mail_body_ready(jd_app *app, int64_t id);
 void mail_server_results(jd_app *app, int64_t serial, const int64_t *ids, int n);
 void mail_select_inbox(jd_app *app);
@@ -268,6 +287,13 @@ void act_move_to(jd_app *app, const char *folder, int copy);
 void act_move_ids(jd_app *app, int64_t *ids, int n, const char *folder, int copy, int single);
 /* a reader card's actions: on that one message, whatever the list has selected */
 void message_archive(jd_app *app, int64_t id);
+/* snooze (b): the times menu for the selection, or for one message; snooze_draw draws it each frame, snooze_typed
+   takes Pick a time's answer */
+void act_snooze(jd_app *app);
+void message_snooze(jd_app *app, int64_t id);
+void snooze_draw(jd_app *app);
+void snooze_typed(jd_app *app, const char *text);
+int snooze_open_now(void);
 /* folder: where it is, so a message already in Trash is deleted for good (after asking) */
 void message_delete(jd_app *app, int64_t id, int64_t folder);
 void message_move_ask(jd_app *app, int64_t id, int copy);
@@ -341,6 +367,13 @@ void compose_discard(jd_app *app);
 void compose_schedule_typed(jd_app *app, const char *text);
 void compose_free(jd_app *app, struct jd_compose *c);
 void compose_sent(jd_app *app, int64_t serial, const char *error);
+/* Undo send: sent messages wait [compose] undo_seconds, out of the tab bar, then go to the worker. tick each frame;
+   draw the "Sending in n s · Undo" bar above y (its top returned, y when none); flush hands every waiting one to
+   the worker now (before it stops), free drops them after it stopped */
+void compose_held_tick(jd_app *app);
+float compose_held_draw(jd_app *app, float y);
+void compose_held_flush(jd_app *app);
+void compose_held_free(jd_app *app);
 void compose_saved(jd_app *app, int64_t serial, const char *error);
 void compose_attach_paths(jd_app *app, struct jd_compose *c, char **paths, int n);
 void compose_set_to(struct jd_compose *c, const char *mailto);
@@ -362,8 +395,8 @@ const char *calendar_error(void);
 void calendar_delete_confirmed(jd_app *app);
 /* a sent mail's outcome: 1 when it was the calendar's answer to an organizer */
 int calendar_sent(jd_app *app, int64_t serial, const char *error);
-/* every calendar account's password or Google sign-in out of the keystore (logging out) */
-void calendar_forget_all(jd_app *app);
+/* the workers stopped and the calendar's store closed, on quitting */
+void calendar_quit(jd_app *app);
 /* a calendar account's worker runs and is signed in */
 int calendar_connected(void);
 /* Settings' Calendar section; returns the y below it */
@@ -394,7 +427,29 @@ int tabs_keys(jd_app *app);
 jd_tab *tab_add(jd_app *app, tab_kind kind);
 const char *tab_title(jd_app *app, int i);
 void tab_close(jd_app *app, int i);
+/* a compose tab out of the tab bar, its compose kept (undo send holds it) */
+struct jd_compose *tab_detach(jd_app *app, int i);
 void save_prefs(jd_app *app);
+
+/* filters.c: the vacation reply (RFC 5230) as a block of its own in the active Sieve script; Settings > Server
+   filters draws the form (focus numbers FOCUS_VAC + VF_*, FOCUS_VAC + VF_COUNT the reply's text) */
+enum { VF_FROM, VF_UNTIL, VF_SUBJECT, VF_COUNT };
+enum { FOCUS_VAC = 400 };
+typedef struct {
+    int state; /* 0 not read yet, 1 asked, 2 read, -1 failed (message says why) */
+    int on, days, saving;
+    jd_field f[VF_COUNT]; /* dates as 2026-12-24, either empty; the subject */
+    jd_editor text;
+    char *script, *name; /* the active script as last read or saved, and its name */
+    char *sent;          /* the script on its way to the server */
+    char *of;            /* the account it was read from: another one open reads its own */
+    char message[520];
+} jd_vacation_form;
+/* the form, the server's script asked for on the first look */
+jd_vacation_form *vacation_form(jd_app *app);
+void vacation_save(jd_app *app);
+/* its keys while a field has the focus: 1 when they were its */
+int vacation_keys(jd_app *app, int *focus);
 
 void dialog_open(jd_app *app, dialog_kind kind, action act, const char *title, const char *value);
 void dialog_draw(jd_app *app);
@@ -402,6 +457,28 @@ int64_t *selection_ids(jd_app *app, int *n);
 
 void app_connect(jd_app *app);
 void app_disconnect(jd_app *app);
-/* forgets the account: its password, its settings section and its local mail (to the trash) */
+/* forgets the open account: its password, its [[account]] and its local mail (to the trash); another account opens,
+   or the form when it was the last */
 void app_logout(jd_app *app);
+
+/* form.c: the mail accounts. account_at(app, 0) is the first, whose folder carries the shared settings */
+int accounts_count(jd_app *app);
+const jd_account *account_at(jd_app *app, int i);
+/* every account of settings.toml: the first opened (app_connect), the others started in the background */
+void accounts_start(jd_app *app);
+/* account i opened in place of the open one, which goes on in the background; its tabs close (drafts saved) */
+void account_switch(jd_app *app, int i);
+/* the form, to add one more account */
+void account_add_open(jd_app *app);
+/* sidebar.c: the accounts list opened from the sidebar's account, drawn over the page */
+void accounts_menu_draw(jd_app *app);
+int accounts_menu_open(void);
+/* every worker but the open one's: events read each frame (new mail notifies, a refused password is noted) */
+void accounts_tick(jd_app *app);
+/* the background accounts' workers stopped, their stores closed (the open one: app_disconnect) */
+void accounts_stop(jd_app *app);
+/* settings.toml written with every account */
+void settings_write(jd_app *app);
+/* the first account's store, worker, folder and account, open or in the background */
+void account_first(jd_app *app, jd_store **view, jd_sync **sync, const char **dir, const jd_account **account);
 void format_date(int64_t t, char *out, int len);

@@ -39,8 +39,8 @@ void jd_sync_stop(jd_sync *s);
 void jd_sync_now(jd_sync *s);
 int jd_sync_poll(jd_sync *s, jd_event *ev);
 /* called on the worker's thread, besides JD_EV_NEW_MAIL, for a platform whose event loop stops in the
-   background; NULL by default */
-extern void (*jd_sync_new_mail_hook)(const char *from, const char *subject, int64_t id, int count);
+   background (account: the worker's address); NULL by default */
+extern void (*jd_sync_new_mail_hook)(const char *account, const char *from, const char *subject, int64_t id, int count);
 /* the same for JD_EV_SCHEDULED: err NULL when sent */
 extern void (*jd_sync_scheduled_hook)(const char *subject, const char *err);
 void jd_event_free(jd_event *ev);
@@ -50,6 +50,9 @@ void jd_sync_fetch_body(jd_sync *s, int64_t message_id);
 void jd_sync_set_flag(jd_sync *s, const int64_t *ids, int n, int flag, int on);
 /* to the folder named to; copy keeps the originals */
 void jd_sync_move(jd_sync *s, const int64_t *ids, int n, const char *to, int copy);
+/* out of sight until then (Unix time): into the Snoozed folder (jd_store_snoozed_folder, made when missing) with the
+   time as a keyword; whichever client of the account runs then moves them back to the Inbox, unread */
+void jd_sync_snooze(jd_sync *s, const int64_t *ids, int n, int64_t until);
 /* removes the messages for good (\Deleted and UID EXPUNGE) */
 void jd_sync_destroy(jd_sync *s, const int64_t *ids, int n);
 /* server-side full-text search of every folder, or of folder_name; answered with JD_EV_SEARCH */

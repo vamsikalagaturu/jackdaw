@@ -47,6 +47,7 @@ typedef struct {
     char *font_ui, *font_list, *font_reader, *font_mono; /* [fonts] ui, list, reader, mono: family names, "" = Inter */
     int attachment_list; /* [compose] attachment_list: a numbered list of the attached files in the body */
     int markdown;        /* [compose] markdown: the body is also sent as HTML, rendered from Markdown */
+    int undo_seconds;    /* [compose] undo_seconds: a sent message waits this long for Undo; 0, 5, 10 (default), 20, 30 */
     int mono_plain;      /* [fonts] mono_plain: plain-text mail in the monospace font */
     int sidebar_width, list_width, list_height; /* [view], pixels; 0 = default */
     int light;           /* the theme in use: scheme, with "system" resolved (apply_prefs) */
@@ -89,7 +90,11 @@ void jd_prefs_remove_calendar(jd_prefs *p, int i);
 int jd_prefs_trusts_images(const jd_prefs *p, const char *address);
 void jd_prefs_trust_images(jd_prefs *p, const char *address, int trust);
 /* writes the whole file; an account without an address leaves [account] out */
-int jd_settings_save(const jd_account *a, const jd_prefs *p);
+/* [[account]], one per mail account, the first first; an older file's single [account] is read as the only one */
+int jd_settings_save(const jd_account *const *accounts, int naccounts, const jd_prefs *p);
+/* every complete account, 0 when there is at least one */
+int jd_accounts_load(jd_account **out, int *n, char *err, int errlen);
+void jd_accounts_free(jd_account *a, int n);
 
 /* The settings an account's jackdaws share ([sync] settings): groups compared and merged each on its own, the
    newer change winning. Layout, sizes, fonts, push and the sync timers stay per device. */

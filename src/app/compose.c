@@ -519,6 +519,29 @@ static char *build(jd_app *app, struct jd_compose *c, int draft, size_t *len, ch
     return msg;
 }
 
+/* sent messages waiting for Undo (until > 0), or handed to the worker and waiting for its answer (until 0) */
+enum { MAX_HELD = 8 };
+static struct {
+    struct jd_compose *c;
+    double until;
+} held[MAX_HELD];
+static int nheld;
+
+/* to the worker; 0 when it could not go (c->error says why) */
+static int release(jd_app *app, struct jd_compose *c)
+{
+    size_t len;
+    char **rcpts = NULL;
+    int n = 0;
+    char *msg = build(app, c, 0, &len, &rcpts, &n);
+    int ok = msg && n && app->sync;
+    if (ok) jd_sync_send(app->sync, msg, len, rcpts, n, c->msgid, c->replied, c->serial);
+    else if (!c->error[0]) snprintf(c->error, sizeof c->error, "Not sent: no connection.");
+    jd_rcpts_free(rcpts, n);
+    free(msg);
+    return ok;
+}
+
 static void send(jd_app *app, struct jd_compose *c)
 {
     if (c->sending || !app->sync) return;
@@ -530,6 +553,14 @@ static void send(jd_app *app, struct jd_compose *c)
     if (!msg) return;
     if (!n) {
         snprintf(c->error, sizeof c->error, "Add someone to send it to.");
+    } else if (app->prefs.undo_seconds > 0 && nheld < MAX_HELD) {
+        /* out of the tab bar until it goes; Undo brings it back */
+        c->serial = next_serial++;
+        c->sending = 1;
+        for (int t = 0; t < app->ntabs; t++)
+            if (app->tabs[t].kind == TAB_COMPOSE && app->tabs[t].compose == c) tab_detach(app, t);
+        held[nheld++].c = c;
+        held[nheld - 1].until = GetTime() + app->prefs.undo_seconds;
     } else {
         c->serial = next_serial++;
         c->sending = 1;
@@ -537,6 +568,75 @@ static void send(jd_app *app, struct jd_compose *c)
     }
     jd_rcpts_free(rcpts, n);
     free(msg);
+}
+
+static void unhold(int k)
+{
+    memmove(held + k, held + k + 1, sizeof *held * (size_t)(nheld - k - 1));
+    nheld--;
+}
+
+/* back in a tab of its own, as it was before Send */
+static void reattach(jd_app *app, struct jd_compose *c)
+{
+    c->sending = 0;
+    tab_add(app, TAB_COMPOSE)->compose = c;
+}
+
+void compose_held_tick(jd_app *app)
+{
+    for (int k = 0; k < nheld; k++)
+        if (held[k].until > 0 && GetTime() >= held[k].until) {
+            held[k].until = 0;
+            if (!release(app, held[k].c)) {
+                struct jd_compose *c = held[k].c;
+                unhold(k--);
+                reattach(app, c);
+            }
+        }
+}
+
+float compose_held_draw(jd_app *app, float y)
+{
+    jd_ui *ui = &app->ui;
+    for (int k = nheld - 1; k >= 0; k--) {
+        if (held[k].until <= 0) continue;
+        int left = (int)(held[k].until - GetTime() + 0.999);
+        const char *subject = held[k].c->fields[C_SUBJECT].len ? held[k].c->fields[C_SUBJECT].text : "(no subject)";
+        char label[600];
+        snprintf(label, sizeof label, "Sending \"%.500s\" in %d s", subject, left < 1 ? 1 : left);
+        float maxw = jd_screen_w() - 200, tw = jd_text_width(ui, label, 14, 0);
+        if (tw > maxw) tw = maxw;
+        Rectangle box = {(jd_screen_w() - tw - 130) / 2, y - 52, tw + 130, 44};
+        DrawRectangleRounded((Rectangle){box.x + 2, box.y + 3, box.width, box.height}, 0.3f, 6, ColorAlpha(BLACK, 0.3f));
+        DrawRectangleRounded(box, 0.3f, 6, JD_NORD3);
+        jd_text_fit(ui, label, box.x + 16, box.y + 14, tw, 14, JD_NORD6, 0);
+        Rectangle undo = {box.x + tw + 30, box.y + 7, 86, 30};
+        int hover = CheckCollisionPointRec(GetMousePosition(), undo) && !app->dialog.kind;
+        DrawRectangleRounded(undo, 0.3f, 6, hover ? JD_NORD2 : JD_NORD3);
+        jd_icon("undo-2", undo.x + 8, undo.y + 7, 16, JD_NORD8);
+        jd_text(ui, "Undo", undo.x + 30, undo.y + 7, 14, JD_NORD8, 1);
+        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            struct jd_compose *c = held[k].c;
+            unhold(k);
+            reattach(app, c);
+            return y;
+        }
+        y = box.y - 6;
+    }
+    return y;
+}
+
+void compose_held_flush(jd_app *app)
+{
+    for (int k = 0; k < nheld; k++)
+        if (held[k].until > 0) held[k].until = 0, release(app, held[k].c);
+}
+
+void compose_held_free(jd_app *app)
+{
+    for (int k = 0; k < nheld; k++) compose_free(app, held[k].c);
+    nheld = 0;
 }
 
 /* 1 when handed to the worker */
@@ -639,6 +739,22 @@ static struct jd_compose *by_serial(jd_app *app, int64_t serial, int *tab)
 
 void compose_sent(jd_app *app, int64_t serial, const char *error)
 {
+    for (int k = 0; k < nheld; k++) {
+        if (held[k].c->serial != serial) continue;
+        struct jd_compose *c = held[k].c;
+        unhold(k);
+        if (error) {
+            /* back where it can be fixed and sent again */
+            reattach(app, c);
+            snprintf(c->error, sizeof c->error, "Not sent: %s", error);
+            return;
+        }
+        c->dirty = 0;
+        c->body.changed = 0;
+        compose_free(app, c);
+        notify_user(app, "Sent.");
+        return;
+    }
     int tab;
     struct jd_compose *c = by_serial(app, serial, &tab);
     if (!c) return;

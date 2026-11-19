@@ -16,6 +16,16 @@ jd_tab *tab_add(jd_app *app, tab_kind kind)
     return &app->tabs[app->tab];
 }
 
+struct jd_compose *tab_detach(jd_app *app, int i)
+{
+    if (i <= 0 || i >= app->ntabs || app->tabs[i].kind != TAB_COMPOSE) return NULL;
+    struct jd_compose *c = app->tabs[i].compose;
+    memmove(app->tabs + i, app->tabs + i + 1, sizeof *app->tabs * (size_t)(app->ntabs - i - 1));
+    app->ntabs--;
+    if (app->tab >= i && app->tab > 0) app->tab--;
+    return c;
+}
+
 void tab_close(jd_app *app, int i)
 {
     if (i <= 0 || i >= app->ntabs) return;

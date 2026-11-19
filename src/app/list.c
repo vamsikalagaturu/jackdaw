@@ -373,6 +373,104 @@ static int64_t *one_id(int64_t id)
 
 void message_archive(jd_app *app, int64_t id) { archive_ids(app, one_id(id), 1, 1); }
 
+/* ---- snooze: the messages' times menu, then out of sight until the time chosen ---- */
+
+static jd_popup snooze_pop;
+static int64_t *snooze_ids;
+static int nsnooze;
+
+static void snooze_open(jd_app *app, int64_t *ids, int n)
+{
+    free(snooze_ids);
+    snooze_ids = ids, nsnooze = n;
+    if (!n) return;
+    jd_popup_open(&snooze_pop);
+    /* under the mouse when that asked, else in the middle of the list */
+    if (IsKeyPressed(KEY_B)) snooze_pop.at = (Vector2){jd_screen_w() / 2 - 140, jd_screen_h() / 3};
+    (void)app;
+}
+
+void act_snooze(jd_app *app)
+{
+    int n;
+    int64_t *ids = selection_ids(app, &n);
+    snooze_open(app, ids, n);
+}
+
+void message_snooze(jd_app *app, int64_t id) { snooze_open(app, one_id(id), 1); }
+
+static void snooze_until(jd_app *app, int64_t at)
+{
+    if (!app->sync || !nsnooze) return;
+    jd_sync_snooze(app->sync, snooze_ids, nsnooze, at);
+    char when[48];
+    time_t t = (time_t)at;
+    struct tm tm;
+    localtime_r(&t, &tm);
+    strftime(when, sizeof when, "%a %d %b, %H:%M", &tm);
+    notify_user(app, "Snoozed until %s.", when);
+    free(snooze_ids);
+    snooze_ids = NULL, nsnooze = 0;
+}
+
+void snooze_typed(jd_app *app, const char *text)
+{
+    struct tm tm = {.tm_isdst = -1};
+    if (sscanf(text, "%d-%d-%d %d:%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min) != 5) {
+        notify_user(app, "Not a time: \"%s\"; write it as 2026-11-20 08:00.", text);
+        return;
+    }
+    tm.tm_year -= 1900, tm.tm_mon -= 1;
+    int64_t at = (int64_t)mktime(&tm);
+    if (at <= jd_now()) {
+        notify_user(app, "Pick a time still to come.");
+        return;
+    }
+    snooze_until(app, at);
+}
+
+void snooze_draw(jd_app *app)
+{
+    if (!snooze_pop.open) return;
+    time_t now = time(NULL);
+    struct tm today;
+    localtime_r(&now, &today);
+    struct tm evening = today, tomorrow = today, monday = today;
+    evening.tm_hour = 18, evening.tm_min = evening.tm_sec = 0, evening.tm_isdst = -1;
+    tomorrow.tm_mday += 1, tomorrow.tm_hour = 8, tomorrow.tm_min = tomorrow.tm_sec = 0, tomorrow.tm_isdst = -1;
+    int to_monday = (8 - today.tm_wday) % 7;
+    monday.tm_mday += to_monday ? to_monday : 7, monday.tm_hour = 8, monday.tm_min = monday.tm_sec = 0;
+    monday.tm_isdst = -1;
+    /* later today: this evening, or three hours on once the evening is near */
+    int64_t later = mktime(&evening);
+    if (later - now < 2 * 3600) later = (now + 3 * 3600) / 3600 * 3600;
+    int64_t at[3] = {later, mktime(&tomorrow), mktime(&monday)};
+    static const char *names[] = {"Later today", "Tomorrow morning", "Monday morning"};
+    char labels[3][80];
+    for (int i = 0; i < 3; i++) {
+        char when[40];
+        time_t t = (time_t)at[i];
+        struct tm tm;
+        localtime_r(&t, &tm);
+        strftime(when, sizeof when, i == 0 ? "%H:%M" : "%a %H:%M", &tm);
+        snprintf(labels[i], sizeof labels[i], "%s (%s)", names[i], when);
+    }
+    jd_popup_item items[] = {{labels[0], "bell", NULL, 0}, {labels[1], "sun", NULL, 0}, {labels[2], "calendar", NULL, 0},
+                             {"Pick a time...", "pencil", NULL, 0}};
+    int i = jd_popup_draw(&app->ui, &snooze_pop, items, 4);
+    if (i >= 0 && i < 3) snooze_until(app, at[i]);
+    else if (i == 3) {
+        char typed[32];
+        strftime(typed, sizeof typed, "%Y-%m-%d %H:%M", &tomorrow);
+        dialog_open(app, DLG_PROMPT, ACT_SNOOZE_AT, "Snooze until (YYYY-MM-DD HH:MM)", typed);
+    }
+}
+
+int snooze_open_now(void)
+{
+    return snooze_pop.open;
+}
+
 void message_delete(jd_app *app, int64_t id, int64_t folder) { delete_ids(app, one_id(id), 1, folder, 1); }
 
 /* the folder picker, the move or copy then for this one message (dialog.ids) */
@@ -898,6 +996,7 @@ int list_keys(jd_app *app)
     else if (IsKeyPressed(KEY_U) && !shift) act_toggle_read(app);
     else if (IsKeyPressed(KEY_S) && !shift) act_toggle_flag(app);
     else if (IsKeyPressed(KEY_E) && !shift) act_archive(app);
+    else if (IsKeyPressed(KEY_B) && !shift && !ctrl) act_snooze(app);
     else if ((IsKeyPressed(KEY_D) && !shift) || IsKeyPressed(KEY_DELETE)) act_delete(app);
     else if (IsKeyPressed(KEY_M) && !shift) dialog_open(app, DLG_PICK_FOLDER, ACT_MOVE, "Move to", NULL);
     else if (IsKeyPressed(KEY_C) && !shift && !ctrl) dialog_open(app, DLG_PICK_FOLDER, ACT_COPY, "Copy to", NULL);

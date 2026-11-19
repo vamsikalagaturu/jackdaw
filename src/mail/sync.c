@@ -36,7 +36,7 @@ enum {
 
 typedef enum {
     OP_FLAG, OP_MOVE, OP_COPY, OP_DESTROY, OP_BODY, OP_SEARCH, OP_CREATE, OP_RENAME, OP_DELETE_FOLDER, OP_SEND, OP_DRAFT,
-    OP_SIEVE_GET, OP_SIEVE_PUT, OP_SETTINGS
+    OP_SIEVE_GET, OP_SIEVE_PUT, OP_SETTINGS, OP_SNOOZE
 } op_kind;
 
 /* A request from the UI, by message ids; the worker turns it into ops. */
@@ -257,11 +257,12 @@ static void notify_fresh(jd_sync *s, int64_t inbox, const int64_t *ids, int n)
     int nrows;
     jd_thread_row *rows = jd_store_list(s->store, &q, &nrows);
     if (nrows) emit(s, JD_EV_NEW_MAIL, rows[0].senders, rows[0].subject, rows[0].latest, nrows);
-    if (nrows && jd_sync_new_mail_hook) jd_sync_new_mail_hook(rows[0].senders, rows[0].subject, rows[0].latest, nrows);
+    if (nrows && jd_sync_new_mail_hook)
+        jd_sync_new_mail_hook(s->account.address, rows[0].senders, rows[0].subject, rows[0].latest, nrows);
     jd_thread_rows_free(rows, nrows);
 }
 
-void (*jd_sync_new_mail_hook)(const char *from, const char *subject, int64_t id, int count);
+void (*jd_sync_new_mail_hook)(const char *account, const char *from, const char *subject, int64_t id, int count);
 void (*jd_sync_scheduled_hook)(const char *subject, const char *err);
 
 /* [[rule]]s in order; a message moved or deleted by one is out of reach of the next */
@@ -549,6 +550,7 @@ static void apply_requests(jd_sync *s)
         case OP_COPY:
         case OP_BODY: push_per_folder(s, rq, 0); break;
         case OP_MOVE:
+        case OP_SNOOZE:
         case OP_DESTROY: push_per_folder(s, rq, 1); break;
         case OP_SEARCH:
         case OP_CREATE:
@@ -706,6 +708,76 @@ static int settings_newest(jd_sync *s, const char *name, int make, int64_t *fold
     if (n) *uid = uids[n - 1];
     free(uids);
     return JD_IMAP_OK;
+}
+
+/* the folder name's id here, made on the server first when it has none */
+static int64_t ensure_folder(jd_sync *s, const char *name, int *r)
+{
+    jd_mailbox *boxes;
+    int nb, there = 0;
+    if ((*r = jd_imap_list(s->imap, &boxes, &nb)) != JD_IMAP_OK) return 0;
+    for (int i = 0; i < nb; i++) there |= strcmp(boxes[i].name, name) == 0;
+    jd_mailboxes_free(boxes, nb);
+    if (!there && (*r = jd_imap_create(s->imap, name)) != JD_IMAP_OK) return 0;
+    int64_t id = jd_store_folder_by_name(s->store, name);
+    if (!id) {
+        jd_store_begin(s->store);
+        id = jd_folder_upsert(s->store, name, 0, NULL);
+        jd_store_commit(s->store);
+    }
+    return id;
+}
+
+/* the keyword with the time (o->a), then a move into the Snoozed folder (the folder selected) */
+static int run_snooze(jd_sync *s, op *o)
+{
+    char *name;
+    jd_store_snoozed_folder(s->store, &name);
+    int r;
+    jd_selected sel;
+    int64_t to = ensure_folder(s, name, &r);
+    if (r == JD_IMAP_OK) r = jd_imap_select(s->imap, o->folder_name, &sel);
+    if (r == JD_IMAP_OK) r = jd_imap_set_keyword(s->imap, o->uids, o->n, o->a, 1, 0);
+    if (r == JD_IMAP_OK) r = jd_imap_move(s->imap, o->uids, o->n, name);
+    if (r == JD_IMAP_OK && to) r = sync_folder(s, to, name);
+    free(name);
+    return r;
+}
+
+/* the soonest snoozed message's time, 0 when none */
+static int64_t next_snoozed(jd_sync *s)
+{
+    int64_t folder = jd_store_snoozed_folder(s->store, NULL), at = 0;
+    int n = 0;
+    jd_snoozed *z = folder ? jd_store_snoozed(s->store, folder, &n) : NULL;
+    if (n) at = z[0].at;
+    jd_snoozed_free(z, n);
+    return at;
+}
+
+/* Due snoozed mail back to the Inbox, unread, without its keyword; the folder synced first, so a message another
+   client already brought back is not looked for. Two clients moving the same message: the second finds it gone. */
+static int wake_snoozed(jd_sync *s)
+{
+    char *name;
+    int64_t folder = jd_store_snoozed_folder(s->store, &name);
+    int r = folder ? sync_folder(s, folder, name) : JD_IMAP_OK, n = 0;
+    jd_snoozed *z = r == JD_IMAP_OK && folder ? jd_store_snoozed(s->store, folder, &n) : NULL;
+    int64_t now = jd_now();
+    jd_selected sel;
+    int woke = 0;
+    for (int i = 0; i < n && r == JD_IMAP_OK && z[i].at <= now; i++) {
+        r = jd_imap_select(s->imap, name, &sel);
+        if (r == JD_IMAP_OK) r = jd_imap_set_keyword(s->imap, &z[i].uid, 1, z[i].keyword, 0, -1);
+        if (r == JD_IMAP_OK) r = jd_imap_move(s->imap, &z[i].uid, 1, "INBOX");
+        woke++;
+    }
+    if (woke && r == JD_IMAP_OK) r = sync_folder(s, folder, name);
+    if (woke && r == JD_IMAP_OK && s->inbox) r = sync_folder(s, s->inbox, "INBOX");
+    jd_snoozed_free(z, n);
+    free(name);
+    if (woke) emit(s, JD_EV_CHANGED, NULL, NULL, 0, 0);
+    return r;
 }
 
 /* Stored only when the server's newest copy is still the one the UI merged with (o->replied, its UID; 0 none):
@@ -919,7 +991,7 @@ static int run_op(jd_sync *s, op *o)
 {
     jd_selected sel;
     int needs_folder = o->kind == OP_FLAG || o->kind == OP_MOVE || o->kind == OP_COPY || o->kind == OP_DESTROY ||
-                       o->kind == OP_BODY;
+                       o->kind == OP_BODY || o->kind == OP_SNOOZE;
     if (needs_folder && jd_imap_select(s->imap, o->folder_name, &sel) != JD_IMAP_OK) return JD_IMAP_ERROR;
     switch (o->kind) {
     case OP_FLAG: return jd_imap_set_flag(s->imap, o->uids, o->n, o->flag, o->on);
@@ -939,6 +1011,7 @@ static int run_op(jd_sync *s, op *o)
     case OP_SEND: return run_send(s, o);
     case OP_DRAFT: return run_draft(s, o);
     case OP_SETTINGS: return run_settings(s, o);
+    case OP_SNOOZE: return run_snooze(s, o);
     case OP_SIEVE_GET:
     case OP_SIEVE_PUT: {
         /* its own connection, answered either way: a missing ManageSieve is not a reason to reconnect IMAP */
@@ -964,7 +1037,7 @@ static const char *op_name(op_kind k)
     static const char *names[] = {"changing flags", "moving mail", "copying mail", "deleting mail",
                                   "downloading a message", "searching the server", "creating the folder",
                                   "renaming the folder", "deleting the folder", "sending", "saving the draft",
-                                  "reading filters", "saving filters", "sharing the settings"};
+                                  "reading filters", "saving filters", "sharing the settings", "snoozing mail"};
     return names[k];
 }
 
@@ -1067,6 +1140,12 @@ static void *worker(void *arg)
             r = send_due(s);
             send_at = next_scheduled(s);
         }
+        int64_t wake = next_snoozed(s);
+        if (r == JD_IMAP_OK && wake && wake <= jd_now()) {
+            r = wake_snoozed(s);
+            wake = next_snoozed(s);
+        }
+        if (wake && (!send_at || wake < send_at)) send_at = wake;
         if (r != JD_IMAP_OK) {
             emit(s, JD_EV_ERROR, "Connection lost, reconnecting.", NULL, 0, 0);
             drop_connection(s);
@@ -1249,6 +1328,13 @@ void jd_sync_sieve_get(jd_sync *s)
 void jd_sync_sieve_put(jd_sync *s, const char *name, const char *script)
 {
     request_add(s, (request){.kind = OP_SIEVE_PUT, .a = jd_strdup(script), .b = jd_strdup(name)}, NULL, 0);
+}
+
+void jd_sync_snooze(jd_sync *s, const int64_t *ids, int n, int64_t until)
+{
+    if (n <= 0) return;
+    char *keyword = jd_printf(JD_SNOOZE_KEYWORD "%lld", (long long)until);
+    request_add(s, (request){.kind = OP_SNOOZE, .a = keyword}, ids, n);
 }
 
 void jd_sync_put_settings(jd_sync *s, const char *msg, size_t len, uint32_t merged_with)

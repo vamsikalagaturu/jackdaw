@@ -38,6 +38,16 @@ int plat_trash(const char *path);
 /* -1 when there is no notification service to send to */
 int plat_notify(const char *summary, const char *body, int64_t tag);
 int64_t plat_notify_poll(void);
+/* new mail's tag: the message id with its account's place in [[account]] above bit 48 (the first's is the id) */
+static inline int64_t notify_tag(int account, int64_t id)
+{
+    return ((int64_t)account << 48) | (id & ((1LL << 48) - 1));
+}
+static inline void notify_untag(int64_t tag, int *account, int64_t *id)
+{
+    *account = (int)(tag >> 48);
+    *id = tag & ((1LL << 48) - 1);
+}
 /* Android: a foreground service keeps IMAP IDLE open while the app is closed; nothing on a desktop */
 void plat_push(int on);
 /* Android: wakes a check at t (epoch seconds) to send a scheduled draft, 0 for none; nothing on a desktop, where

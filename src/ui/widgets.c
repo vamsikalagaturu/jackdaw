@@ -906,7 +906,14 @@ int jd_popup_draw(jd_ui *ui, jd_popup *p, const jd_popup_item *items, int n)
         return -1;
     }
     float h = 8, w = 240;
-    for (int i = 0; i < n; i++) h += items[i].label ? 30 : 9;
+    for (int i = 0; i < n; i++) {
+        h += items[i].label ? 30 : 9;
+        /* as wide as its longest row: icon, label, then its keys apart from it */
+        float need = items[i].label ? 8 + 34 + jd_text_width(ui, items[i].label, 14, 0) + 16 : 0;
+        if (items[i].label && items[i].keys && !ui->touch) need += jd_text_width(ui, items[i].keys, 12, 0) + 20;
+        if (need > w) w = need;
+    }
+    if (w > jd_screen_w() - 8) w = jd_screen_w() - 8;
     float x = p->at.x, y = p->at.y;
     if (x + w > jd_screen_w() - 4) x = jd_screen_w() - w - 4;
     if (y + h > jd_screen_h() - 4) y = jd_screen_h() - h - 4;
@@ -928,11 +935,10 @@ int jd_popup_draw(jd_ui *ui, jd_popup *p, const jd_popup_item *items, int n)
         Color fg = items[i].disabled ? JD_MUTED : JD_NORD6;
         if (hover) DrawRectangleRounded(row, 0.2f, 6, JD_NORD2);
         if (items[i].icon) jd_icon(items[i].icon, row.x + 8, yy + 6, 16, items[i].disabled ? JD_MUTED : hover ? JD_NORD8 : JD_NORD4);
-        jd_text(ui, items[i].label, row.x + 34, yy + 7, 14, fg, 0);
-        if (items[i].keys && !ui->touch) {
-            float kw = jd_text_width(ui, items[i].keys, 12, 0);
-            jd_text(ui, items[i].keys, row.x + row.width - kw - 8, yy + 8, 12, JD_MUTED, 0);
-        }
+        /* the label stops short of the keys on a screen too narrow for both */
+        float kw = items[i].keys && !ui->touch ? jd_text_width(ui, items[i].keys, 12, 0) : 0;
+        jd_text_fit(ui, items[i].label, row.x + 34, yy + 7, row.width - 34 - 8 - (kw ? kw + 20 : 0), 14, fg, 0);
+        if (kw) jd_text(ui, items[i].keys, row.x + row.width - kw - 8, yy + 8, 12, JD_MUTED, 0);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) chosen = i;
         yy += 30;
     }

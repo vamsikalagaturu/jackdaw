@@ -10,6 +10,42 @@
 #include "platform.h"
 #include "ui/icons.h"
 
+/* the accounts list under the sidebar's account (accounts_menu_draw draws it over everything) */
+static jd_popup accounts_menu;
+
+int accounts_menu_open(void)
+{
+    return accounts_menu.open;
+}
+
+void accounts_menu_draw(jd_app *app)
+{
+    if (!accounts_menu.open) return;
+    int n = accounts_count(app);
+    if (n > 9) n = 9;
+    jd_popup_item items[12];
+    char labels[9][300], counts[9][48];
+    int folder_unread = 0;
+    for (int i = 0; i < app->nfolders; i++)
+        if (strcasecmp(app->folders[i].name, "INBOX") == 0) folder_unread = app->folders[i].unread;
+    for (int i = 0; i < n; i++) {
+        const jd_account *a = account_at(app, i);
+        const jd_slot *s = app->nslots ? &app->slots[i] : NULL;
+        int unread = i == app->cur ? folder_unread : s ? s->unread : 0;
+        snprintf(labels[i], sizeof labels[i], "%s%s", a->address ? a->address : "?", s && s->refused ? "  (sign in)" : "");
+        if (unread && !app->ui.touch) snprintf(counts[i], sizeof counts[i], "%d  ·  Ctrl+Shift+%d", unread, i + 1);
+        else if (unread) snprintf(counts[i], sizeof counts[i], "%d", unread);
+        else if (!app->ui.touch) snprintf(counts[i], sizeof counts[i], "Ctrl+Shift+%d", i + 1);
+        else counts[i][0] = 0;
+        items[i] = (jd_popup_item){labels[i], i == app->cur ? "check" : "mail", counts[i][0] ? counts[i] : NULL, 0};
+    }
+    items[n] = (jd_popup_item){NULL, NULL, NULL, 0};
+    items[n + 1] = (jd_popup_item){"Add an account...", "user", NULL, 0};
+    int k = jd_popup_draw(&app->ui, &accounts_menu, items, n + 2);
+    if (k >= 0 && k < n) account_switch(app, k);
+    else if (k == n + 1) account_add_open(app);
+}
+
 const char *folder_label(const jd_folder_row *f)
 {
     if (strcasecmp(f->name, "INBOX") == 0) return "Inbox";
@@ -302,12 +338,27 @@ void sidebar_draw(jd_app *app, Rectangle r)
     }
     tip_at.x = r.x + r.width - 160;
     tip_at.y = r.y + 48;
+    /* the open account; a click lists them all, to switch or add one */
+    Rectangle who = {r.x + 8, r.y + 54, r.width - 16, 42};
+    int hover_who = CheckCollisionPointRec(GetMousePosition(), who) && free_input && !accounts_menu.open;
+    if (hover_who || accounts_menu.open) DrawRectangleRounded(who, 0.25f, 6, JD_NORD2);
     char initial[8] = "?";
     if (app->account.address) snprintf(initial, sizeof initial, "%c", toupper((unsigned char)app->account.address[0]));
     DrawCircleV((Vector2){r.x + 30, r.y + 74}, 14, JD_NORD10);
     jd_text(ui, initial, r.x + 30 - jd_text_width(ui, initial, 14, 1) / 2, r.y + 67, 14, JD_ON_ACCENT, 1);
-    jd_text_fit(ui, app->account.name ? app->account.name : "", r.x + 52, r.y + 58, r.width - 64, 15, JD_NORD6, 1);
-    jd_text_fit(ui, app->account.address ? app->account.address : "", r.x + 52, r.y + 76, r.width - 64, 12, JD_MUTED, 0);
+    jd_text_fit(ui, app->account.name ? app->account.name : "", r.x + 52, r.y + 58, r.width - 84, 15, JD_NORD6, 1);
+    jd_text_fit(ui, app->account.address ? app->account.address : "", r.x + 52, r.y + 76, r.width - 84, 12, JD_MUTED, 0);
+    /* another account's unread mail, beside the arrow */
+    int elsewhere = 0;
+    for (int i = 0; i < app->nslots; i++)
+        if (i != app->cur) elsewhere += app->slots[i].unread;
+    jd_icon(accounts_menu.open ? "chevron-down" : "chevron-right", who.x + who.width - 22, who.y + 13, 16, JD_NORD4);
+    if (elsewhere) DrawCircleV((Vector2){who.x + who.width - 28, who.y + 12}, 4, JD_NORD8);
+    /* on release: the press that opens it would otherwise count as a click outside it, and shut it */
+    if (hover_who && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+        jd_popup_open(&accounts_menu);
+        accounts_menu.at = (Vector2){who.x, who.y + who.height + 4};
+    }
 
     Rectangle write = {r.x + 12, r.y + 102, r.width - 24, 38};
     int hover_write = CheckCollisionPointRec(GetMousePosition(), write) && free_input;

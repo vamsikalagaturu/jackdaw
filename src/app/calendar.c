@@ -5,6 +5,7 @@
 #include <string.h>
 #include <strings.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "app.h"
 #include "cal/calsync.h"
@@ -22,7 +23,7 @@ enum { AGENDA_DAYS = 30, HOUR_H = 56, MAX_REMINDERS = 32 };
 /* Settings' focus numbers for the calendar fields, past settings.c's own */
 enum { CF_URL = 200, CF_USER, CF_PASSWORD, CF_GOOGLE, CF_COUNT };
 /* the editor's fields, in Tab order */
-enum { EF_TITLE, EF_DATE0, EF_TIME0, EF_DATE1, EF_TIME1, EF_LOCATION, EF_NOTES, EF_COUNT };
+enum { EF_TITLE, EF_DATE0, EF_TIME0, EF_DATE1, EF_TIME1, EF_TZ, EF_LOCATION, EF_NOTES, EF_COUNT };
 
 /* an event's occurrence in the shown range */
 typedef struct {
@@ -48,8 +49,17 @@ static struct {
     int64_t delete_event;
     int64_t serials, delete_serial, respond_serial, reply_serial;
 } cv = {.stale = 1, .detail = -1, .sel = -1, .serials = 1LL << 40};
+/* The calendar's own store, calendar.db in jackdaw's data folder: calendars are no mail account's (the UI's
+   connection; each account's worker opens its own) */
+static jd_store *cal_store;
 /* the list of calendars to show or hide is open (the header's Calendars button) */
 static int shown_open;
+/* searching the events (/): the field in the header, and the text the results in cv.occs were found for */
+static struct {
+    int open, focus;
+    jd_field q;
+    char *found_for;
+} cs;
 /* the editor's calendar dropdown: open, and where its list was drawn last frame */
 static int cal_dd_open;
 static Rectangle cal_dd_box;
@@ -109,7 +119,7 @@ static void picker_toggle(const jd_calendar_row *c)
 static void picker_apply(jd_app *app, Color c)
 {
     picker_set(c);
-    if (app->view) jd_store_calendar_recolor(app->view, cp.cal, cp.hex.text);
+    if (cal_store) jd_store_calendar_recolor(cal_store, cp.cal, cp.hex.text);
     cv.stale = 1;
     share_changed(app);
 }
@@ -199,7 +209,7 @@ static float picker_draw(jd_app *app, const jd_calendar_row *c, float x, float y
     Rectangle reset = {px + 160, py, 72, 32};
     if (c->user_color && CheckCollisionPointRec(m, reset)) jd_tooltip("Back to the server's colour", reset.x - 40, reset.y + 38);
     if (c->user_color && jd_button(ui, "Reset", reset, 0)) {
-        if (app->view) jd_store_calendar_recolor(app->view, cp.cal, NULL);
+        if (cal_store) jd_store_calendar_recolor(cal_store, cp.cal, NULL);
         picker_set(hex_color(c->server_color));
         cv.stale = 1;
         share_changed(app);
@@ -222,6 +232,7 @@ static struct {
     char *rrule_kept; /* a rule the choices do not cover, kept as it was */
     char *old_ics;
     char error[300];
+    char tz[96]; /* the zone its times are typed in (IANA name); the field f[EF_TZ] searches the zones */
 } ed;
 
 static struct {
@@ -356,10 +367,10 @@ static int by_start(const void *a, const void *b)
 static occ *gather(jd_app *app, int64_t from, int64_t to, int *n)
 {
     *n = 0;
-    if (!app->view) return NULL;
+    if (!cal_store) return NULL;
     int nrows;
     /* an all-day event's dates are UTC midnights: a day either side covers every zone */
-    jd_event_row *rows = jd_store_events(app->view, from - 86400, to + 86400, &nrows);
+    jd_event_row *rows = jd_store_events(cal_store, from - 86400, to + 86400, &nrows);
     occ *out = NULL;
     for (int i = 0; i < nrows; i++) {
         jd_occurrence *o = NULL;
@@ -399,6 +410,8 @@ static void range(int64_t *from, int64_t *to)
 
 static void reload(jd_app *app)
 {
+    /* the search's results stand in for the view's events (search_run) */
+    if (cs.open) return;
     int64_t from, to;
     range(&from, &to);
     if (!cv.stale && from == cv.from && to == cv.to) return;
@@ -423,47 +436,45 @@ static struct {
 static int nacc;
 
 /* the keystore entry of an account's password or Google sign-in */
-static char *secret_key(jd_app *app, const jd_cal_account *a)
+static char *secret_key(const jd_cal_account *a)
 {
     char *id = jd_cal_account_id(a);
-    char *key = jd_printf("%s calendar %s", app->account.address ? app->account.address : "", id);
+    char *key = jd_printf("calendar %s", id);
     free(id);
     return key;
 }
 
-/* the one entry a single calendar account had before there were several */
-static char *legacy_key(jd_app *app)
+/* Where an earlier jackdaw kept it, under a mail account's address: "<address> calendar <id>", or for the only
+   account there was then "<address> calendar". Moved to secret_key's entry when found; NULL when none. */
+static char *old_secret(jd_app *app, const jd_cal_account *a, int first)
 {
-    return jd_printf("%s calendar", app->account.address ? app->account.address : "");
-}
-
-void calendar_forget_all(jd_app *app)
-{
-    for (int i = 0; i < app->prefs.ncals; i++) {
-        char *key = secret_key(app, &app->prefs.cals[i]);
-        plat_secret_delete(key);
-        free(key);
+    char *id = jd_cal_account_id(a);
+    char *secret = NULL;
+    for (int k = 0; k < accounts_count(app) && !secret; k++) {
+        const char *address = account_at(app, k)->address;
+        if (!address) continue;
+        for (int legacy = 0; legacy <= first && !secret; legacy++) {
+            char *old = legacy ? jd_printf("%s calendar", address) : jd_printf("%s calendar %s", address, id);
+            secret = plat_secret_load(old);
+            char *key = secret ? secret_key(a) : NULL;
+            if (secret && plat_secret_save(key, secret) == 0) plat_secret_delete(old);
+            free(key), free(old);
+        }
     }
-    char *key = legacy_key(app);
-    plat_secret_delete(key);
-    free(key);
+    free(id);
+    return secret;
 }
 
 /* account a's sign-in, calendars and events, gone from here (it stays in prefs) */
 static void forget_account(jd_app *app, int a)
 {
     const jd_cal_account *ac = &app->prefs.cals[a];
-    char *key = secret_key(app, ac);
+    char *key = secret_key(ac);
     plat_secret_delete(key);
     free(key);
     char *id = jd_cal_account_id(ac);
-    if (app->view) jd_store_calendars_keep(app->view, id, NULL, 0);
+    if (cal_store) jd_store_calendars_keep(cal_store, id, NULL, 0);
     free(id);
-    if (a == 0) {
-        char *old = legacy_key(app);
-        plat_secret_delete(old);
-        free(old);
-    }
 }
 
 int calendar_connected(void)
@@ -487,15 +498,9 @@ static void start_one(jd_app *app, int i, const char *db)
     jd_cal_account *a = &app->prefs.cals[i];
     acc[i].refused = 0;
     acc[i].error[0] = 0;
-    char *key = secret_key(app, a);
+    char *key = secret_key(a);
     char *secret = plat_secret_load(key);
-    if (!secret && i == 0) {
-        /* moved to its own entry, so a second account can have one too */
-        char *old = legacy_key(app);
-        secret = plat_secret_load(old);
-        if (secret && plat_secret_save(key, secret) == 0) plat_secret_delete(old);
-        free(old);
-    }
+    if (!secret) secret = old_secret(app, a, i == 0);
     free(key);
     if (!secret) {
         /* also an account another jackdaw shared: adding it again here (the same address) signs this device in */
@@ -512,14 +517,42 @@ static void start_one(jd_app *app, int i, const char *db)
     free(secret);
 }
 
+static char *cal_db(void)
+{
+    jd_mkdirs(jd_data_dir());
+    return jd_printf("%s/calendar.db", jd_data_dir());
+}
+
 void calendar_start(jd_app *app)
 {
     calendar_stop(app);
-    if (!app->dir) return;
-    char *db = jd_printf("%s/mail.db", app->dir);
+    char *db = cal_db();
+    if (!cal_store) {
+        char err[300];
+        cal_store = jd_store_open(db, err, sizeof err);
+        if (!cal_store) fprintf(stderr, "jackdaw: %s: %s\n", db, err);
+        /* calendars an earlier jackdaw kept in a mail account's store come over, once */
+        int n = 0;
+        jd_calendar_row *have = cal_store ? jd_store_calendars(cal_store, &n) : NULL;
+        if (have) jd_calendar_rows_free(have, n);
+        for (int k = 0; cal_store && !n && k < accounts_count(app); k++) {
+            char *dir = jd_account_dir(account_at(app, k));
+            char *old = jd_printf("%s/mail.db", dir);
+            if (access(old, F_OK) == 0) n = jd_store_calendars_import(cal_store, old);
+            free(old), free(dir);
+        }
+    }
     nacc = app->prefs.ncals < MAX_ACCOUNTS ? app->prefs.ncals : MAX_ACCOUNTS;
     for (int i = 0; i < nacc; i++) start_one(app, i, db);
     free(db);
+    cv.stale = 1, rem_stale = 1;
+}
+
+void calendar_quit(jd_app *app)
+{
+    calendar_stop(app);
+    jd_store_close(cal_store);
+    cal_store = NULL;
 }
 
 /* Sync now: every running worker looks again; a stopped one (refused, or never started) starts afresh */
@@ -529,7 +562,7 @@ static void sync_now(jd_app *app)
         calendar_start(app);
         return;
     }
-    char *db = app->dir ? jd_printf("%s/mail.db", app->dir) : NULL;
+    char *db = cal_db();
     for (int i = 0; i < nacc; i++) {
         if (acc[i].worker && !acc[i].refused) {
             jd_calsync_now(acc[i].worker);
@@ -586,7 +619,7 @@ char *calendar_choices_text(jd_app *app, const jd_toml *t, const jd_toml *keep)
     jd_calendar_row *from = t ? NULL : keep ? jd_alloc(sizeof *from * (size_t)(nkeep + 1)) : NULL;
     for (int i = 0; from && i < nkeep; i++) from[i] = choice_of(keep, i);
     int n = 0, nstore = 0;
-    jd_calendar_row *store = !t && app->view ? jd_store_calendars(app->view, &nstore) : NULL;
+    jd_calendar_row *store = !t && cal_store ? jd_store_calendars(cal_store, &nstore) : NULL;
     jd_calendar_row *out = jd_alloc(sizeof *out * (size_t)(nkeep + nstore + 1));
     for (int i = 0; t && i < nkeep; i++) {
         out[n] = choice_of(t, i);
@@ -624,7 +657,7 @@ char *calendar_choices_text(jd_app *app, const jd_toml *t, const jd_toml *keep)
 void calendar_choices_apply(jd_app *app, const jd_toml *t)
 {
     int n, synced = 0;
-    jd_calendar_row *c = app->view ? jd_store_calendars(app->view, &n) : NULL;
+    jd_calendar_row *c = cal_store ? jd_store_calendars(cal_store, &n) : NULL;
     for (int i = 0; c && i < jd_toml_count(t, "calendar_choice"); i++) {
         char table[48];
         snprintf(table, sizeof table, "calendar_choice.%d", i);
@@ -634,9 +667,9 @@ void calendar_choices_apply(jd_app *app, const jd_toml *t)
         for (int j = 0; j < n; j++) {
             if (!jd_streq(c[j].account, account) || !jd_streq(c[j].href, href)) continue;
             int sync = jd_toml_bool(t, table, "sync", 0), shown = jd_toml_bool(t, table, "shown", 1);
-            if (sync != c[j].enabled) jd_store_calendar_enable(app->view, c[j].id, sync), synced |= sync;
-            if (shown != c[j].shown) jd_store_calendar_show(app->view, c[j].id, shown);
-            if (!jd_streq(color, c[j].user_color)) jd_store_calendar_recolor(app->view, c[j].id, color);
+            if (sync != c[j].enabled) jd_store_calendar_enable(cal_store, c[j].id, sync), synced |= sync;
+            if (shown != c[j].shown) jd_store_calendar_show(cal_store, c[j].id, shown);
+            if (!jd_streq(color, c[j].user_color)) jd_store_calendar_recolor(cal_store, c[j].id, color);
         }
     }
     if (c) jd_calendar_rows_free(c, n);
@@ -670,7 +703,7 @@ void calendar_accounts_apply(jd_app *app, const jd_toml *t)
 static jd_calsync *worker_of(jd_app *app, int64_t calendar)
 {
     int n;
-    jd_calendar_row *rows = app->view ? jd_store_calendars(app->view, &n) : NULL;
+    jd_calendar_row *rows = cal_store ? jd_store_calendars(cal_store, &n) : NULL;
     const char *account = NULL;
     int found = 0;
     for (int i = 0; rows && i < n; i++)
@@ -777,6 +810,8 @@ static void handle(jd_app *app, int i, jd_cal_event *ev)
         break;
     case JD_CAL_EV_CHANGED:
         cv.stale = 1, rem_stale = 1;
+        free(cs.found_for);
+        cs.found_for = NULL;
         /* calendars just found here take the choices made for them on another device */
         share_calendars_found(app);
         break;
@@ -883,7 +918,7 @@ void calendar_tick(jd_app *app)
             jd_cal_event_free(&ev);
         }
     signin_tick(app);
-    if (app->view) reminders_tick(app);
+    if (cal_store) reminders_tick(app);
 }
 
 /* ---- the editor ---- */
@@ -905,7 +940,7 @@ static const char *const alarm_names[] = {"None", "At start", "10 min", "30 min"
 static int64_t first_writable(jd_app *app, int64_t prefer)
 {
     int n;
-    jd_calendar_row *c = app->view ? jd_store_calendars(app->view, &n) : NULL;
+    jd_calendar_row *c = cal_store ? jd_store_calendars(cal_store, &n) : NULL;
     int64_t id = 0;
     for (int i = 0; c && i < n && !id; i++)
         if (c[i].id == prefer && !c[i].readonly && c[i].enabled) id = c[i].id;
@@ -930,14 +965,54 @@ static void set_times(int64_t start, int64_t end, int all_day)
         jd_field_set(&ed.f[EF_TIME1], "10:00");
         return;
     }
-    fmt(start, "%Y-%m-%d", s, sizeof s);
+    /* as the clock in the event's zone reads them */
+    int y, m, d, hh, mm;
+    jd_tz_wall(ed.tz, start, &y, &m, &d, &hh, &mm);
+    snprintf(s, sizeof s, "%04d-%02d-%02d", y, m, d);
     jd_field_set(&ed.f[EF_DATE0], s);
-    fmt(start, "%H:%M", s, sizeof s);
+    snprintf(s, sizeof s, "%02d:%02d", hh, mm);
     jd_field_set(&ed.f[EF_TIME0], s);
-    fmt(end, "%Y-%m-%d", s, sizeof s);
+    jd_tz_wall(ed.tz, end, &y, &m, &d, &hh, &mm);
+    snprintf(s, sizeof s, "%04d-%02d-%02d", y, m, d);
     jd_field_set(&ed.f[EF_DATE1], s);
-    fmt(end, "%H:%M", s, sizeof s);
+    snprintf(s, sizeof s, "%02d:%02d", hh, mm);
     jd_field_set(&ed.f[EF_TIME1], s);
+}
+
+/* up to max zones whose name holds text (any case; a space matches '_'), the ones it starts a part of first */
+static int tz_matches(const char *text, const char **out, int max)
+{
+    int n, k = 0;
+    const char *const *names = jd_tz_names(&n);
+    char want[96];
+    snprintf(want, sizeof want, "%s", text);
+    for (char *c = want; *c; c++)
+        if (*c == ' ') *c = '_';
+    for (int pass = 0; pass < 2 && k < max; pass++)
+        for (int i = 0; i < n && k < max; i++) {
+            const char *at = strcasestr(names[i], want);
+            if (!at) continue;
+            int starts = at == names[i] || at[-1] == '/' || at[-1] == '_';
+            if (starts != !pass) continue;
+            out[k++] = names[i];
+        }
+    return k;
+}
+
+/* "America/New_York" as "New York" */
+static void zone_city(const char *tzid, char *out, size_t n)
+{
+    const char *slash = strrchr(tzid, '/');
+    snprintf(out, n, "%s", slash ? slash + 1 : tzid);
+    for (char *c = out; *c; c++)
+        if (*c == '_') *c = ' ';
+}
+
+/* the zone its times are typed in: the event's own when this system knows it, else the local one */
+static void set_zone(const char *tzid)
+{
+    snprintf(ed.tz, sizeof ed.tz, "%s", tzid && jd_tz_known(tzid) ? tzid : jd_local_tzid());
+    jd_field_set(&ed.f[EF_TZ], ed.tz);
 }
 
 static void editor_new(jd_app *app, int64_t start, int all_day)
@@ -956,13 +1031,14 @@ static void editor_new(jd_app *app, int64_t start, int all_day)
     for (int i = 0; i < EF_COUNT - 1; i++) jd_field_set(&ed.f[i], NULL);
     jd_editor_set(&ed.notes, "");
     ed.all_day = all_day, ed.repeat = 0, ed.alarm = 0;
+    set_zone(NULL);
     set_times(all_day ? jd_days_from_civil(local_tm(start).tm_year + 1900, local_tm(start).tm_mon + 1, local_tm(start).tm_mday) * 86400 : start,
               all_day ? 0 : start + 3600, all_day);
 }
 
 static void editor_edit(jd_app *app, int64_t event)
 {
-    jd_event_row *row = app->view ? jd_store_event(app->view, event) : NULL;
+    jd_event_row *row = cal_store ? jd_store_event(cal_store, event) : NULL;
     if (!row) return;
     if (row->readonly) {
         notify_user(app, "That calendar is read-only.");
@@ -986,6 +1062,7 @@ static void editor_edit(jd_app *app, int64_t event)
     jd_field_set(&ed.f[EF_LOCATION], e.location);
     jd_editor_set(&ed.notes, e.description ? e.description : "");
     ed.all_day = e.all_day;
+    set_zone(e.tzid);
     set_times(e.start, e.end, e.all_day);
     ed.repeat = 0;
     if (e.rrule) {
@@ -1032,8 +1109,9 @@ static void editor_save(jd_app *app)
         e.start = jd_days_from_civil(y0, m0, d0) * 86400;
         e.end = (jd_days_from_civil(y1, m1, d1) + 1) * 86400;
     } else {
-        e.start = mk_local(y0, m0, d0, h0, i0);
-        e.end = mk_local(y1, m1, d1, h1, i1);
+        e.start = jd_tz_time(ed.tz, y0, m0, d0, h0, i0);
+        e.end = jd_tz_time(ed.tz, y1, m1, d1, h1, i1);
+        if (strcmp(ed.tz, jd_local_tzid()) != 0) e.tzid = ed.tz;
     }
     if (e.end < e.start || (ed.all_day && e.end <= e.start)) {
         snprintf(ed.error, sizeof ed.error, "The event ends before it starts.");
@@ -1053,7 +1131,7 @@ static void editor_save(jd_app *app)
     ed.saving = 1;
     ed.error[0] = 0;
     /* moved to a calendar of another account: written there anew, then removed by the account it was in */
-    jd_event_row *was = ed.event && app->view ? jd_store_event(app->view, ed.event) : NULL;
+    jd_event_row *was = ed.event && cal_store ? jd_store_event(cal_store, ed.event) : NULL;
     jd_calsync *from = was ? worker_of(app, was->calendar) : NULL;
     if (was && from && from != to) {
         jd_calsync_put(to, ed.calendar, 0, ics, ed.serial);
@@ -1067,7 +1145,7 @@ static void editor_save(jd_app *app)
 
 static void ask_delete(jd_app *app, int64_t event)
 {
-    jd_event_row *row = app->view ? jd_store_event(app->view, event) : NULL;
+    jd_event_row *row = cal_store ? jd_store_event(cal_store, event) : NULL;
     if (!row) return;
     if (row->readonly) notify_user(app, "That calendar is read-only.");
     else {
@@ -1083,7 +1161,7 @@ static void ask_delete(jd_app *app, int64_t event)
 void calendar_delete_confirmed(jd_app *app)
 {
     if (!cv.delete_event) return;
-    jd_event_row *row = app->view ? jd_store_event(app->view, cv.delete_event) : NULL;
+    jd_event_row *row = cal_store ? jd_store_event(cal_store, cv.delete_event) : NULL;
     jd_calsync *w = row ? worker_of(app, row->calendar) : NULL;
     if (row) jd_event_rows_free(row, 1);
     if (!w) {
@@ -1099,7 +1177,7 @@ void calendar_delete_confirmed(jd_app *app)
 
 int calendar_typing(void)
 {
-    return ed.open || (cp.cal && cp.hex_focus);
+    return ed.open || (cp.cal && cp.hex_focus) || (cs.open && cs.focus);
 }
 
 static void editor_keys(jd_app *app)
@@ -1116,8 +1194,21 @@ static void editor_keys(jd_app *app)
         return;
     }
     if (IsKeyPressed(KEY_TAB)) {
+        if (ed.focus == EF_TZ) jd_field_set(&ed.f[EF_TZ], ed.tz);
+        int ntz;
+        jd_tz_names(&ntz);
         do ed.focus = (ed.focus + (shift ? EF_COUNT - 1 : 1)) % EF_COUNT;
-        while (ed.all_day && (ed.focus == EF_TIME0 || ed.focus == EF_TIME1));
+        while ((ed.all_day && (ed.focus == EF_TIME0 || ed.focus == EF_TIME1)) || (ed.focus == EF_TZ && (ed.all_day || !ntz)));
+        /* arriving there starts a search */
+        if (ed.focus == EF_TZ) jd_field_set(&ed.f[EF_TZ], NULL);
+        return;
+    }
+    if (ed.focus == EF_TZ && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
+        /* the first zone the typed text finds */
+        const char *found[1];
+        if (tz_matches(ed.f[EF_TZ].text, found, 1)) snprintf(ed.tz, sizeof ed.tz, "%s", found[0]);
+        jd_field_set(&ed.f[EF_TZ], ed.tz);
+        ed.focus = EF_LOCATION;
         return;
     }
     if (ed.focus == EF_NOTES) jd_editor_input(&app->ui, &ed.notes);
@@ -1171,7 +1262,8 @@ static void editor_draw(jd_app *app, Rectangle page)
     float ix = x + 20, iw = w - 40, y = top + 16;
     jd_text(ui, ed.event ? "Edit event" : "New event", ix, y, 18, JD_NORD6, 1);
     y += 36;
-    static const char *const placeholders[] = {"Title", "2026-11-19", "09:00", "2026-11-19", "10:00", "Location"};
+    static const char *const placeholders[] = {"Title", "2026-11-19", "09:00", "2026-11-19", "10:00", "Type a city or zone",
+                                               "Location"};
     for (int i = 0; i < EF_COUNT - 1; i++) ed.f[i].placeholder = placeholders[i];
     stacked = iw < 420;
     if (jd_field_draw(ui, &ed.f[EF_TITLE], (Rectangle){ix, y, iw, 34}, ed.focus == EF_TITLE)) ed.focus = EF_TITLE;
@@ -1189,7 +1281,46 @@ static void editor_draw(jd_app *app, Rectangle page)
     if (jd_field_draw(ui, &ed.f[EF_DATE1], (Rectangle){cx, y, dw, 34}, ed.focus == EF_DATE1)) ed.focus = EF_DATE1;
     if (!ed.all_day && jd_field_draw(ui, &ed.f[EF_TIME1], (Rectangle){cx + dw + 8, y, tw, 34}, ed.focus == EF_TIME1))
         ed.focus = EF_TIME1;
-    y += 46;
+    y += 42;
+    /* the zone the times above are in; typing searches the system's zones, listed under the field */
+    Rectangle tzf = {0};
+    int ntz = 0;
+    if (!ed.all_day && jd_tz_names(&ntz) && ntz) {
+        cx = row_label(app, "Time zone", ix, &y);
+        tzf = (Rectangle){cx, y, ix + iw - cx < 360 ? ix + iw - cx : 360, 34};
+        ed.f[EF_TZ].inert = cal_dd_open && CheckCollisionPointRec(GetMousePosition(), cal_dd_box);
+        if (jd_field_draw(ui, &ed.f[EF_TZ], tzf, ed.focus == EF_TZ)) {
+            if (ed.focus != EF_TZ) jd_field_set(&ed.f[EF_TZ], NULL);
+            ed.focus = EF_TZ;
+        }
+        if (ed.focus != EF_TZ && strcmp(ed.f[EF_TZ].text, ed.tz) != 0) jd_field_set(&ed.f[EF_TZ], ed.tz);
+        y += 42;
+        /* while typing: the zones found, in line (Enter takes the first) */
+        const char *found[6];
+        int nf = ed.focus == EF_TZ && ed.f[EF_TZ].len && strcmp(ed.f[EF_TZ].text, ed.tz) != 0
+                     ? tz_matches(ed.f[EF_TZ].text, found, 6) : 0;
+        if (ed.focus == EF_TZ && ed.f[EF_TZ].len && !nf) {
+            jd_text(ui, "No zone has that name.", tzf.x + 4, y, FS_SMALL, JD_MUTED, 0);
+            y += 24;
+        }
+        for (int i = 0; i < nf; i++) {
+            Rectangle row = {tzf.x, y, tzf.width, 28};
+            int hover = CheckCollisionPointRec(GetMousePosition(), row) && !app->dialog.kind;
+            if (hover || i == 0) DrawRectangleRounded(row, 0.3f, 6, hover ? JD_NORD3 : JD_NORD2);
+            char city[64], line[160];
+            zone_city(found[i], city, sizeof city);
+            snprintf(line, sizeof line, "%s  ·  %s", city, found[i]);
+            jd_text_fit(ui, line, row.x + 10, mid_y(row, FS_EVENT), row.width - 20, FS_EVENT, JD_NORD6, i == 0);
+            if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                snprintf(ed.tz, sizeof ed.tz, "%s", found[i]);
+                jd_field_set(&ed.f[EF_TZ], ed.tz);
+                ed.focus = EF_LOCATION;
+            }
+            y += 30;
+        }
+        if (nf) y += 4;
+    }
+    y += 4;
     const char *rep[6];
     int nrep = 5;
     for (int i = 0; i < 5; i++) rep[i] = repeats[i];
@@ -1210,7 +1341,7 @@ static void editor_draw(jd_app *app, Rectangle page)
     if (asel < 6) ed.alarm = asel;
     /* the calendar: a dropdown of the synced ones that can be written, under their accounts */
     int nc;
-    jd_calendar_row *cals = app->view ? jd_store_calendars(app->view, &nc) : NULL;
+    jd_calendar_row *cals = cal_store ? jd_store_calendars(cal_store, &nc) : NULL;
     const char *cname = "?";
     Color ccol = JD_NORD8;
     for (int i = 0; cals && i < nc; i++)
@@ -1335,6 +1466,58 @@ static void set_view(int v)
     cv.detail = -1, cv.sel = -1, cv.scrolled_for = -1, cv.scroll = 0;
 }
 
+static void search_open(void)
+{
+    cs.open = cs.focus = 1;
+    cv.detail = -1, cv.sel = -1, cv.scroll = 0;
+    shown_open = 0;
+}
+
+static void search_close(void)
+{
+    cs.open = cs.focus = 0;
+    jd_field_set(&cs.q, NULL);
+    free(cs.found_for);
+    cs.found_for = NULL;
+    cv.stale = 1, cv.detail = -1, cv.sel = -1, cv.scroll = 0;
+}
+
+/* the search's keys while it is open: 1 when it took them */
+static int search_keys(jd_app *app)
+{
+    if (!cs.open) return 0;
+    if (cs.focus) {
+        if (IsKeyPressed(KEY_ESCAPE)) search_close();
+        else if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER) || IsKeyPressed(KEY_DOWN))
+            cs.focus = 0, cv.sel = cv.nocc ? 0 : -1;
+        else jd_field_input(&cs.q);
+        return 1;
+    }
+    if (IsKeyPressed(KEY_ESCAPE)) {
+        if (cv.detail >= 0) cv.detail = -1;
+        else search_close();
+    } else if (IsKeyPressed(KEY_SLASH)) {
+        cs.focus = 1;
+        while (GetCharPressed()) {}
+    } else if (IsKeyPressed(KEY_J) || IsKeyPressed(KEY_DOWN)) {
+        if (cv.sel + 1 < cv.nocc) cv.sel++;
+    } else if (IsKeyPressed(KEY_K) || IsKeyPressed(KEY_UP)) {
+        if (cv.sel > 0) cv.sel--;
+        else cs.focus = 1;
+    } else if (IsKeyPressed(KEY_ENTER) && cv.sel >= 0) {
+        if (cv.detail >= 0) editor_edit(app, cv.occs[cv.detail].event);
+        else cv.detail = cv.sel;
+    } else if (IsKeyPressed(KEY_E) && cv.sel >= 0) editor_edit(app, cv.occs[cv.sel].event);
+    else {
+        /* a view, a day or today: back from the results to the calendar */
+        static const int leave[] = {KEY_ONE, KEY_TWO, KEY_THREE, KEY_FOUR, KEY_A, KEY_W, KEY_M, KEY_T, KEY_H, KEY_L};
+        for (int i = 0; i < (int)(sizeof leave / sizeof *leave); i++)
+            if (IsKeyPressed(leave[i])) search_close();
+        return 0;
+    }
+    return 1;
+}
+
 void calendar_keys(jd_app *app)
 {
     if (picker_keys(app)) return;
@@ -1342,9 +1525,20 @@ void calendar_keys(jd_app *app)
         editor_keys(app);
         return;
     }
+    /* the search field takes every key while it has the focus, Ctrl+V and the like too */
+    if (cs.open && cs.focus) {
+        search_keys(app);
+        return;
+    }
     int shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     int ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
     if (ctrl) return;
+    if (search_keys(app)) return;
+    if (IsKeyPressed(KEY_SLASH)) {
+        search_open();
+        while (GetCharPressed()) {}
+        return;
+    }
     if (IsKeyPressed(KEY_ESCAPE)) {
         if (shown_open) shown_open = 0;
         else if (cv.detail >= 0) cv.detail = -1;
@@ -1506,7 +1700,7 @@ static float header(jd_app *app, Rectangle r)
     for (int i = 0; i < 4; i++) segw += jd_text_width(ui, views[i], 13, 1) + 28;
     /* labels on Calendars and New where there is room; icons alone on a narrower page; on a phone's width the
        views and the title go on lines of their own */
-    float title_w = 230, icons_row = 44 + 44 + 46 + 46;
+    float title_w = 230, icons_row = 44 + 44 + 44 + 46 + 46;
     int labelled = r.width >= 160 + title_w + segw + 126 + 112 + icons_row - 84 + 40;
     int narrow = r.width < 160 + title_w + segw + icons_row + 40;
     float nw = labelled ? 112 : 40, nx = r.x + r.width - 16 - nw;
@@ -1527,7 +1721,13 @@ static float header(jd_app *app, Rectangle r)
     if (!labelled && CheckCollisionPointRec(GetMousePosition(), cals)) jd_tooltip("Show calendars", cals.x - 40, cals.y + 38);
     shown_box.x = cals.x + cals.width - 300 < r.x + 8 ? r.x + 8 : cals.x + cals.width - 300;
     shown_box.y = y + 38;
-    float sx = narrow ? x : cals.x - segw - 12, sy = narrow ? y + 40 : y;
+    Rectangle find = {cals.x - 44, y, 38, 32};
+    if (jd_icon_button(ui, "search", NULL, find, cs.open) && !app->dialog.kind) {
+        if (cs.open) search_close();
+        else search_open();
+    }
+    if (CheckCollisionPointRec(GetMousePosition(), find)) jd_tooltip("Search events (/)", find.x - 50, find.y + 38);
+    float sx = narrow ? x : find.x - segw - 12, sy = narrow ? y + 40 : y;
     int cur = 0;
     for (int i = 0; i < 4; i++)
         if (view_of[i] == cv.view) cur = i;
@@ -1548,6 +1748,13 @@ static float header(jd_app *app, Rectangle r)
         snprintf(title, sizeof title, "%s – %s", a, b);
     } else if (cv.view == V_DAY) fmt(cv.anchor, "%A %d %B %Y", title, sizeof title);
     else fmt(cv.anchor, "From %a %d %b %Y", title, sizeof title);
+    /* searching: the field in the title's place */
+    if (cs.open) {
+        cs.q.placeholder = "Search events: title, place, notes";
+        Rectangle f = narrow ? (Rectangle){x, y + 78, r.width - 32, 32} : (Rectangle){x + 160, y, sx - x - 172, 32};
+        if (jd_field_draw(ui, &cs.q, f, cs.focus)) cs.focus = 1;
+        return narrow ? y + 118 : y + 44;
+    }
     if (!narrow) {
         jd_text_fit(ui, title, x + 160, y + 7, sx - x - 170, 17, JD_NORD6, 1);
         return y + 44;
@@ -1562,7 +1769,7 @@ static void shown_list(jd_app *app, Rectangle page)
     if (!shown_open) return;
     jd_ui *ui = &app->ui;
     int n;
-    jd_calendar_row *c = app->view ? jd_store_calendars(app->view, &n) : NULL;
+    jd_calendar_row *c = cal_store ? jd_store_calendars(cal_store, &n) : NULL;
     /* each account with synced calendars: its name, then those calendars */
     int synced = 0, groups = 0;
     for (int a = 0; a < app->prefs.ncals; a++) {
@@ -1607,7 +1814,7 @@ static void shown_list(jd_app *app, Rectangle page)
             jd_text_fit(ui, c[i].name ? c[i].name : c[i].href, row.x + 40, mid_y(row, FS_EVENT), row.width - 48, FS_EVENT,
                         c[i].shown ? JD_NORD6 : JD_MUTED, 0);
             if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                jd_store_calendar_show(app->view, c[i].id, !c[i].shown);
+                jd_store_calendar_show(cal_store, c[i].id, !c[i].shown);
                 cv.stale = 1, rem_stale = 1;
                 share_changed(app);
             }
@@ -1778,6 +1985,119 @@ static void agenda(jd_app *app, Rectangle r)
     jd_scissor_end();
     jd_scrollbar(r, content + 20, &cv.scroll);
     free(rows);
+}
+
+/* the events holding the search's words (each, in any case) in their title, place or notes, into cv.occs; a
+   repeating event once, at its first date */
+static void search_run(jd_app *app)
+{
+    if (cs.found_for && strcmp(cs.found_for, cs.q.text) == 0) return;
+    free(cs.found_for);
+    cs.found_for = jd_strdup(cs.q.text);
+    occs_free(cv.occs, cv.nocc);
+    cv.occs = NULL, cv.nocc = 0, cv.sel = -1, cv.detail = -1, cv.scroll = 0;
+    cv.from = cv.to = 0;
+    char *words = jd_strdup(cs.q.text), *save = NULL;
+    char *first = strtok_r(words, " \t", &save);
+    if (!first || !cal_store) {
+        free(words);
+        return;
+    }
+    char *rest[16];
+    int nrest = 0;
+    for (char *t; nrest < 16 && (t = strtok_r(NULL, " \t", &save));) rest[nrest++] = t;
+    int n;
+    jd_event_row *rows = jd_store_events_search(cal_store, first, &n);
+    for (int i = 0; i < n; i++) {
+        jd_ical_event e = {.alarm = -1};
+        jd_ical_read(rows[i].ics, &e);
+        int ok = 1;
+        for (int w = -1; w < nrest && ok; w++) {
+            const char *word = w < 0 ? first : rest[w];
+            ok = (rows[i].summary && strcasestr(rows[i].summary, word)) ||
+                 (rows[i].location && strcasestr(rows[i].location, word)) ||
+                 (e.description && strcasestr(e.description, word));
+        }
+        jd_ical_event_free(&e);
+        if (!ok) continue;
+        occ x = {rows[i].id, rows[i].dtstart, rows[i].dtend, rows[i].all_day, rows[i].readonly, -1, rows[i].recurring,
+                 jd_strdup(rows[i].summary), jd_strdup(rows[i].location), hex_color(rows[i].color), 0, 0};
+        if (rows[i].recurring) {
+            /* a series still running shows at its next date */
+            jd_occurrence *o = NULL;
+            int k = 0;
+            int64_t now = jd_now();
+            jd_ical_expand(rows[i].ics, now, now + 400 * 86400LL, &o, &k);
+            if (k) x.start = o[0].start, x.end = o[0].end;
+            jd_occurrences_free(o, k);
+        }
+        x.day0 = first_day(&x);
+        x.day1 = end_day(&x);
+        cv.occs = jd_realloc(cv.occs, sizeof *cv.occs * (size_t)(cv.nocc + 1));
+        cv.occs[cv.nocc++] = x;
+    }
+    jd_event_rows_free(rows, n);
+    free(words);
+    /* latest first */
+    if (cv.nocc) qsort(cv.occs, (size_t)cv.nocc, sizeof *cv.occs, by_start);
+    for (int i = 0, j = cv.nocc - 1; i < j; i++, j--) {
+        occ t = cv.occs[i];
+        cv.occs[i] = cv.occs[j], cv.occs[j] = t;
+    }
+}
+
+/* the search's results, latest first: date, time, title and place */
+static void search_list(jd_app *app, Rectangle r)
+{
+    jd_ui *ui = &app->ui;
+    search_run(app);
+    if (!cs.q.len) {
+        jd_text(ui, "Type to search every event, past and future.", r.x + 24, r.y + 20, FS_TITLE, JD_MUTED, 0);
+        return;
+    }
+    if (!cv.nocc) {
+        jd_text(ui, "No events match.", r.x + 24, r.y + 20, FS_TITLE, JD_MUTED, 0);
+        return;
+    }
+    float content = 8 + (float)cv.nocc * AG_ROW;
+    if (CheckCollisionPointRec(GetMousePosition(), r) && !ed.open) cv.scroll -= jd_wheel_y(AG_ROW);
+    static int followed = -1;
+    if (cv.sel != followed && cv.sel >= 0) {
+        float sy = 8 + (float)cv.sel * AG_ROW;
+        if (sy < cv.scroll + 20) cv.scroll = sy - 20;
+        if (sy + AG_ROW + 20 > cv.scroll + r.height) cv.scroll = sy + AG_ROW + 20 - r.height;
+    }
+    followed = cv.sel;
+    if (cv.scroll > content - r.height + 20) cv.scroll = content - r.height + 20;
+    if (cv.scroll < 0) cv.scroll = 0;
+    jd_scissor(r.x, r.y, r.width, r.height);
+    float x = r.x + 16, w = r.width - 36;
+    for (int i = 0; i < cv.nocc; i++) {
+        Rectangle row = {x, r.y + 8 - cv.scroll + (float)i * AG_ROW, w, AG_ROW - 4};
+        if (row.y + row.height < r.y || row.y > r.y + r.height) continue;
+        occ *o = &cv.occs[i];
+        float fade = is_past(o) ? 0.45f : 1.0f;
+        int chosen = i == cv.sel || i == cv.detail;
+        int hover = CheckCollisionPointRec(GetMousePosition(), row) && CheckCollisionPointRec(GetMousePosition(), r) &&
+                    !ed.open && !app->dialog.kind;
+        if (chosen || hover) DrawRectangleRounded(row, 0.25f, 6, chosen ? JD_NORD2 : JD_NORD1);
+        char day[48], when[48];
+        fmt(o->all_day ? first_day(o) : o->start, "%a %d %b %Y", day, sizeof day);
+        time_range(o, when, sizeof when);
+        jd_text_fit(ui, day, row.x + 10, mid_y(row, FS_TITLE), 130, FS_TITLE, ColorAlpha(JD_NORD6, fade), 1);
+        jd_text_fit(ui, when, row.x + 150, mid_y(row, FS_TITLE), 116, FS_TITLE, ColorAlpha(JD_NORD4, fade), 0);
+        DrawCircle((int)(row.x + 280), (int)(row.y + row.height / 2), 5, ColorAlpha(o->color, fade));
+        char line[400];
+        snprintf(line, sizeof line, "%s%s%s%s", o->summary && o->summary[0] ? o->summary : "(no title)",
+                 o->location && o->location[0] ? "  ·  " : "", o->location ? o->location : "", o->recurring ? "  ·  repeats" : "");
+        jd_text_fit(ui, line, row.x + 296, mid_y(row, FS_TITLE), row.width - 306, FS_TITLE, ColorAlpha(JD_NORD6, fade), 0);
+        if (clicked(row, r, app)) {
+            if (jd_click_count() >= 2) editor_edit(app, o->event);
+            else cv.sel = i, cv.detail = i, cs.focus = 0;
+        }
+    }
+    jd_scissor_end();
+    jd_scrollbar(r, content + 20, &cv.scroll);
 }
 
 /* the columns d0..d1 (exclusive) of the shown days an occurrence covers, from first; 0 when it covers none */
@@ -2017,7 +2337,7 @@ static void details(jd_app *app, Rectangle page)
     if (cv.detail < 0 || cv.detail >= cv.nocc) return;
     jd_ui *ui = &app->ui;
     occ *o = &cv.occs[cv.detail];
-    jd_event_row *row = app->view ? jd_store_event(app->view, o->event) : NULL;
+    jd_event_row *row = cal_store ? jd_store_event(cal_store, o->event) : NULL;
     if (!row) {
         cv.detail = -1;
         return;
@@ -2026,7 +2346,17 @@ static void details(jd_app *app, Rectangle page)
     jd_ical_read(row->ics, &e);
     float w = page.width - 32 < 420 ? page.width - 32 : 420;
     float x = page.x + page.width - w - 16, y = header_bottom + 6;
-    float h = 170 + (e.description ? 60 : 0) + (o->location ? 22 : 0);
+    /* an event in another zone: its times as the clock there reads them too */
+    char there[160] = "";
+    if (e.tzid && !o->all_day && jd_tz_known(e.tzid) && strcmp(e.tzid, jd_local_tzid()) != 0) {
+        int y0, m0, d0, h0, i0, y1, m1, d1, h1, i1;
+        jd_tz_wall(e.tzid, o->start, &y0, &m0, &d0, &h0, &i0);
+        jd_tz_wall(e.tzid, o->end, &y1, &m1, &d1, &h1, &i1);
+        char city[64];
+        zone_city(e.tzid, city, sizeof city);
+        snprintf(there, sizeof there, "%02d:%02d – %02d:%02d in %s", h0, i0, h1, i1, city);
+    }
+    float h = 170 + (e.description ? 60 : 0) + (o->location ? 22 : 0) + (there[0] ? 22 : 0);
     Rectangle box = {x, y, w, h};
     detail_box = box;
     DrawRectangleRounded((Rectangle){x + 2, y + 3, w, h}, 0.04f, 6, ColorAlpha(BLACK, 0.3f));
@@ -2041,6 +2371,10 @@ static void details(jd_app *app, Rectangle page)
     snprintf(line, sizeof line, "%s, %s%s", day, when, o->recurring ? " · repeats" : "");
     jd_text_fit(ui, line, x + 20, ty, w - 40, 13, JD_NORD4, 0);
     ty += 22;
+    if (there[0]) {
+        jd_text_fit(ui, there, x + 20, ty, w - 40, 13, JD_NORD8, 0);
+        ty += 22;
+    }
     if (o->location) {
         jd_text_fit(ui, o->location, x + 20, ty, w - 40, 13, JD_NORD4, 0);
         ty += 22;
@@ -2079,7 +2413,8 @@ void calendar_draw(jd_app *app, Rectangle r)
     /* after the header: a view or day chosen there is drawn with its own events in this very frame */
     reload(app);
     Rectangle body = {r.x + 8, y, r.width - 16, r.y + r.height - y};
-    if (cv.view == V_AGENDA) agenda(app, body);
+    if (cs.open) search_list(app, body);
+    else if (cv.view == V_AGENDA) agenda(app, body);
     else if (cv.view == V_DAY) days_view(app, body, cv.anchor, 1);
     else if (cv.view == V_WEEK) days_view(app, body, week_start(cv.anchor), 7);
     else month(app, body);
@@ -2131,7 +2466,7 @@ float invite_card(jd_app *app, const char *ics, float x, float y, float w, Recta
     jd_text_fit(ui, who, x + 42, y + 56, w - 56, 12, JD_MUTED, 0);
     if (inv.method == JD_ITIP_REQUEST && inv.partstat) {
         const char *said = partstat_label(inv.partstat);
-        jd_event_row *have = app->view && inv.event.uid ? jd_store_event_by_uid(app->view, inv.event.uid) : NULL;
+        jd_event_row *have = cal_store && inv.event.uid ? jd_store_event_by_uid(cal_store, inv.event.uid) : NULL;
         char now_said[64] = "";
         if (have) {
             jd_invite mine;
@@ -2148,7 +2483,7 @@ float invite_card(jd_app *app, const char *ics, float x, float y, float w, Recta
             int over = CheckCollisionPointRec(GetMousePosition(), clip);
             if (jd_button(ui, labels[i], b, i == 0) && over && !app->dialog.kind) {
                 /* the calendar that has the event already, else the first synced one that can be written */
-                jd_event_row *had = app->view && inv.event.uid ? jd_store_event_by_uid(app->view, inv.event.uid) : NULL;
+                jd_event_row *had = cal_store && inv.event.uid ? jd_store_event_by_uid(cal_store, inv.event.uid) : NULL;
                 int64_t calendar = had ? had->calendar : first_writable(app, 0);
                 if (had) jd_event_rows_free(had, 1);
                 jd_calsync *w = calendar ? worker_of(app, calendar) : NULL;
@@ -2163,8 +2498,8 @@ float invite_card(jd_app *app, const char *ics, float x, float y, float w, Recta
         }
         const char *state = now_said[0] ? now_said : said;
         if (state) jd_text_fit(ui, state, bx + 6, y + 86, x + w - bx - 16, 13, JD_NORD4, 0);
-    } else if (inv.method == JD_ITIP_CANCEL && inv.event.uid && app->view) {
-        jd_event_row *have = jd_store_event_by_uid(app->view, inv.event.uid);
+    } else if (inv.method == JD_ITIP_CANCEL && inv.event.uid && cal_store) {
+        jd_event_row *have = jd_store_event_by_uid(cal_store, inv.event.uid);
         if (have) {
             int64_t id = have->id;
             jd_event_rows_free(have, 1);
@@ -2213,7 +2548,7 @@ static void save_caldav(jd_app *app)
         return;
     }
     jd_cal_account a = {1, cf[0].text, cf[1].text, 15};
-    char *key = secret_key(app, &a);
+    char *key = secret_key(&a);
     int saved = plat_secret_save(key, cf[2].text) == 0;
     free(key);
     if (!saved) {
@@ -2258,7 +2593,7 @@ static void signin_tick(jd_app *app)
         return;
     }
     jd_cal_account a = {2, NULL, cf[3].text, 15};
-    char *key = secret_key(app, &a);
+    char *key = secret_key(&a);
     int saved = plat_secret_save(key, refresh) == 0;
     free(key);
     jd_wipe(refresh, strlen(refresh));
@@ -2306,7 +2641,7 @@ static int of_account(jd_app *app, const jd_calendar_row *c, int i)
 static float calendar_list(jd_app *app, int a, float x, float y, float w, int *focus)
 {
     int n;
-    jd_calendar_row *c = app->view ? jd_store_calendars(app->view, &n) : NULL;
+    jd_calendar_row *c = cal_store ? jd_store_calendars(cal_store, &n) : NULL;
     for (int i = 0; c && i < n; i++) {
         if (!of_account(app, &c[i], a)) continue;
         Rectangle row = {x, y, w - 44, 32};
@@ -2319,7 +2654,7 @@ static float calendar_list(jd_app *app, int a, float x, float y, float w, int *f
         snprintf(label, sizeof label, "%s%s", c[i].name ? c[i].name : c[i].href, c[i].readonly ? "  (read-only)" : "");
         jd_text_fit(&app->ui, label, x + 50, mid_y(row, FS_EVENT), row.width - 58, FS_EVENT, JD_NORD6, 0);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-            jd_store_calendar_enable(app->view, c[i].id, !c[i].enabled);
+            jd_store_calendar_enable(cal_store, c[i].id, !c[i].enabled);
             cv.stale = 1, rem_stale = 1;
             /* a calendar just chosen is downloaded now, not at the next check */
             if (!c[i].enabled) sync_now(app);
@@ -2341,7 +2676,7 @@ static float account_card(jd_app *app, int a, float x, float y, float w, int *fo
     jd_ui *ui = &app->ui;
     jd_cal_account *ac = &app->prefs.cals[a];
     int n = 0, chosen = 0, all = 0;
-    jd_calendar_row *rows = app->view ? jd_store_calendars(app->view, &all) : NULL;
+    jd_calendar_row *rows = cal_store ? jd_store_calendars(cal_store, &all) : NULL;
     for (int i = 0; i < all; i++)
         if (of_account(app, &rows[i], a)) n++, chosen += rows[i].enabled;
     if (rows) jd_calendar_rows_free(rows, all);

@@ -862,6 +862,53 @@ static void bind_query(sqlite3_stmt *st, const jd_list_query *q, const char *p)
         }
 }
 
+int64_t jd_store_snoozed_folder(jd_store *s, char **name)
+{
+    char *prefix = jd_store_namespace(s);
+    char *full = jd_printf("%s%s", prefix, JD_SNOOZED_FOLDER);
+    free(prefix);
+    sqlite3_stmt *st = prep(s, "SELECT id FROM folders WHERE name = ?");
+    bind_text(st, 1, full);
+    int64_t id = run(st);
+    if (name) *name = full;
+    else free(full);
+    return id;
+}
+
+static int by_wake(const void *a, const void *b)
+{
+    const jd_snoozed *x = a, *y = b;
+    return x->at < y->at ? -1 : x->at > y->at;
+}
+
+jd_snoozed *jd_store_snoozed(jd_store *s, int64_t folder, int *n)
+{
+    *n = 0;
+    sqlite3_stmt *st = prep(s, "SELECT id, uid, keywords FROM messages WHERE folder_id = ? AND keywords LIKE ?"
+                               " ESCAPE '\\'");
+    sqlite3_bind_int64(st, 1, folder);
+    bind_text(st, 2, "%\\$Snoozed-%");
+    jd_snoozed *out = NULL;
+    while (st && sqlite3_step(st) == SQLITE_ROW) {
+        const char *kw = (const char *)sqlite3_column_text(st, 2);
+        const char *at = kw ? strstr(kw, JD_SNOOZE_KEYWORD) : NULL;
+        if (!at) continue;
+        size_t len = strcspn(at, " ");
+        out = jd_realloc(out, sizeof *out * (size_t)(*n + 1));
+        out[(*n)++] = (jd_snoozed){sqlite3_column_int64(st, 0), strtoll(at + strlen(JD_SNOOZE_KEYWORD), NULL, 10),
+                                   (uint32_t)sqlite3_column_int64(st, 1), jd_strndup(at, len)};
+    }
+    sqlite3_finalize(st);
+    if (*n) qsort(out, (size_t)*n, sizeof *out, by_wake);
+    return out;
+}
+
+void jd_snoozed_free(jd_snoozed *z, int n)
+{
+    for (int i = 0; i < n; i++) free(z[i].keyword);
+    free(z);
+}
+
 int64_t jd_store_settings_folder(jd_store *s, char **name)
 {
     char *prefix = jd_store_namespace(s);
@@ -1253,6 +1300,27 @@ void jd_store_calendar_show(jd_store *s, int64_t id, int on)
     run(st);
 }
 
+int jd_store_calendars_import(jd_store *s, const char *path)
+{
+    sqlite3_stmt *st = prep(s, "ATTACH DATABASE ? AS old");
+    bind_text(st, 1, path);
+    int attached = st && sqlite3_step(st) == SQLITE_DONE;
+    sqlite3_finalize(st);
+    if (!attached) return 0;
+    /* both stores at the same schema (each opened, and so brought up to date, before this) */
+    int n = (int)run(prep(s, "SELECT count(*) FROM old.sqlite_master WHERE type = 'table' AND name = 'calendars'"));
+    if (n) n = (int)run(prep(s, "SELECT count(*) FROM old.calendars"));
+    if (n) {
+        exec(s, "BEGIN IMMEDIATE;"
+                "INSERT INTO main.calendars SELECT * FROM old.calendars;"
+                "INSERT INTO main.events SELECT * FROM old.events;"
+                "DELETE FROM old.events; DELETE FROM old.calendars;"
+                "COMMIT;");
+    }
+    exec(s, "DETACH DATABASE old");
+    return n;
+}
+
 void jd_store_calendars_keep(jd_store *s, const char *account, char **hrefs, int n)
 {
     int nrows;
@@ -1316,6 +1384,19 @@ static jd_event_row *event_rows(sqlite3_stmt *st, int *n)
     }
     sqlite3_finalize(st);
     return out;
+}
+
+jd_event_row *jd_store_events_search(jd_store *s, const char *text, int *n)
+{
+    char *sql = jd_printf("%s WHERE c.enabled AND c.shown AND (e.summary LIKE ?1 ESCAPE '\\' OR e.location LIKE ?1"
+                          " ESCAPE '\\' OR e.ics LIKE ?1 ESCAPE '\\') ORDER BY e.dtstart DESC LIMIT 500", event_cols);
+    sqlite3_stmt *st = prep(s, sql);
+    free(sql);
+    char *like = like_of(text);
+    bind_text(st, 1, like);
+    jd_event_row *rows = event_rows(st, n);
+    free(like);
+    return rows;
 }
 
 jd_event_row *jd_store_events(jd_store *s, int64_t from, int64_t to, int *n)

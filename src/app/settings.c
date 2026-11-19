@@ -131,6 +131,7 @@ void settings_keys(jd_app *app)
         return;
     }
     if (calendar_settings_keys(app)) return;
+    if (vacation_keys(app, &app->settings_focus)) return;
     if (f >= 0 && f < F_COUNT) {
         if (IsKeyPressed(KEY_TAB)) app->settings_focus = (f + 1) % F_COUNT;
         else if (IsKeyPressed(KEY_ENTER)) form_submit(app);
@@ -235,9 +236,40 @@ static int stepper(jd_app *app, float x, float y, int *value, int step, int min,
 
 static void account(jd_app *app, float x, float y, float w)
 {
-    y = heading(app, x, y, "Account", plat_secret_available() ? "The password lives in the system keystore. Leave it empty to keep it."
-                                                               : "No keystore: the password lasts until jackdaw quits.");
+    jd_ui *ui = &app->ui;
     float fw = w > 560 ? 560 : w;
+    if (app->have_account) {
+        /* every account: the open one marked, the others to open; then one more */
+        y = heading(app, x, y, "Accounts", "Each syncs in the background; one is open at a time (also from the top of the sidebar).");
+        int n = accounts_count(app);
+        for (int i = 0; i < n; i++) {
+            const jd_account *a = account_at(app, i);
+            const jd_slot *s = app->nslots ? &app->slots[i] : NULL;
+            int open = i == app->cur;
+            Rectangle row = {x, y, fw, 44};
+            DrawRectangleRounded(row, 0.2f, 6, open ? JD_NORD2 : JD_NORD1);
+            jd_icon(open ? "check" : "mail", x + 12, y + 14, 16, open ? JD_NORD8 : JD_NORD4);
+            char line[400];
+            snprintf(line, sizeof line, "%s%s", a->address ? a->address : "?", s && s->refused ? "  (sign in)" : "");
+            jd_text_fit(ui, line, x + 38, y + 14, fw - 38 - 110, 14, JD_NORD6, open);
+            if (open) jd_text(ui, "Open", x + fw - 60, y + 15, 13, JD_MUTED, 0);
+            else if (jd_button(ui, "Open", (Rectangle){x + fw - 86, y + 6, 78, 32}, 0) && !app->dialog.kind) {
+                account_switch(app, i);
+                return;
+            }
+            y += 50;
+        }
+        if (jd_icon_button(ui, "user", "Add an account", (Rectangle){x, y + 4, 180, 36}, 0) && !app->dialog.kind) {
+            account_add_open(app);
+            return;
+        }
+        y = divider(x, y + 56, w);
+        reach(y);
+    }
+    char head[300];
+    snprintf(head, sizeof head, "%s", app->have_account && app->account.address ? app->account.address : "Account");
+    y = heading(app, x, y, head, plat_secret_available() ? "The open account's servers. The password lives in the system keystore; leave it empty to keep it."
+                                                          : "No keystore: the password lasts until jackdaw quits.");
     int focus = app->settings_focus;
     y = form_fields_draw(app, x, y, fw, &focus);
     reach(y + 50);
@@ -489,6 +521,15 @@ static void compose(jd_app *app, float x, float y, float w)
     cx = label(app, x, &y, "List attachments in the message", "A numbered \"[1] name\" list below what you write");
     if (jd_switch(ui, cx, y + 10, p->attachment_list)) p->attachment_list = !p->attachment_list, changed(app);
     y = divider(x, y + row_h, w);
+    cx = label(app, x, &y, "Undo send", "A sent message waits this long, with Undo, before it goes");
+    static const char *const waits[] = {"Off", "5 s", "10 s", "20 s", "30 s"};
+    static const int wait_s[] = {0, 5, 10, 20, 30};
+    int cur = 2;
+    for (int i = 0; i < 5; i++)
+        if (wait_s[i] == p->undo_seconds) cur = i;
+    int pick = jd_segmented(ui, cx, y + 6, waits, 5, cur);
+    if (pick != cur) p->undo_seconds = wait_s[pick], changed(app);
+    y = divider(x, y + row_h, w);
     y = para(app, "Signatures go below what you write, after a \"-- \" line (RFC 3676).", x, y, w, 14, JD_MUTED) + 14;
     float fw = w > 640 ? 640 : w;
     jd_text(ui, "New messages", x, y, 15, JD_NORD6, 1);
@@ -717,6 +758,8 @@ static void calendar(jd_app *app, float x, float y, float w)
     }
 }
 
+static void vacation(jd_app *app, float x, float y, float w);
+
 static void server_filters(jd_app *app, float x, float y, float w)
 {
     y = heading(app, x, y, "Server filters", "Sieve scripts (RFC 5228) run by the server, even while jackdaw is closed.");
@@ -724,8 +767,56 @@ static void server_filters(jd_app *app, float x, float y, float w)
     snprintf(line, sizeof line, "ManageSieve on %s, port %d.", app->account.imap.host ? app->account.imap.host : "the IMAP host",
              app->account.sieve_port ? app->account.sieve_port : 4190);
     y = para(app, line, x, y, w, 14, JD_NORD4);
-    reach(y + 60);
     if (jd_button(&app->ui, "Edit server filters", (Rectangle){x, y + 14, 200, 36}, 1)) filters_open(app);
+    y = divider(x, y + 64, w);
+    vacation(app, x, y, w);
+}
+
+/* the vacation reply's form: on and off, the dates, the subject, the reply and how often */
+static void vacation(jd_app *app, float x, float y, float w)
+{
+    jd_ui *ui = &app->ui;
+    jd_vacation_form *v = vacation_form(app);
+    int *focus = &app->settings_focus;
+    float cx = label(app, x, &y, "Vacation reply", "Answers mail on the server while you are away, even while jackdaw is closed");
+    if (v->state <= 1) {
+        jd_text_fit(ui, v->state < 0 ? v->message : "Reading the server's filters...", cx, y + 18, w - (cx - x), 14,
+                    v->state < 0 ? JD_NORD11 : JD_NORD4, 0);
+        reach(y + row_h);
+        return;
+    }
+    if (jd_switch(ui, cx, y + 10, v->on)) v->on = !v->on;
+    y = divider(x, y + row_h, w);
+    float fw = w - (cx - x) > 420 ? 420 : w - (cx - x);
+    if (v->on) {
+        cx = label(app, x, &y, "From and until", "Empty: from now, until it is turned off. Written 2026-12-24");
+        float half = (fw - 10) / 2;
+        v->f[VF_FROM].placeholder = "From now";
+        v->f[VF_UNTIL].placeholder = "Until turned off";
+        if (jd_field_draw(ui, &v->f[VF_FROM], (Rectangle){cx, y + 6, half, 34}, *focus == FOCUS_VAC + VF_FROM))
+            *focus = FOCUS_VAC + VF_FROM;
+        if (jd_field_draw(ui, &v->f[VF_UNTIL], (Rectangle){cx + half + 10, y + 6, half, 34}, *focus == FOCUS_VAC + VF_UNTIL))
+            *focus = FOCUS_VAC + VF_UNTIL;
+        y = divider(x, y + row_h, w);
+        cx = label(app, x, &y, "Subject", "Empty: \"Auto:\" and the subject of their message");
+        v->f[VF_SUBJECT].placeholder = "Away until 6 January";
+        if (jd_field_draw(ui, &v->f[VF_SUBJECT], (Rectangle){cx, y + 6, fw, 34}, *focus == FOCUS_VAC + VF_SUBJECT))
+            *focus = FOCUS_VAC + VF_SUBJECT;
+        y = divider(x, y + row_h, w);
+        cx = label(app, x, &y, "Reply", "What each sender gets back");
+        if (jd_editor_draw(ui, &v->text, (Rectangle){cx, y + 6, fw, 120}, *focus == FOCUS_VAC + VF_COUNT))
+            *focus = FOCUS_VAC + VF_COUNT;
+        if (!v->text.len && *focus != FOCUS_VAC + VF_COUNT) jd_text(ui, "I am away until...", cx + 10, y + 15, 14, JD_MUTED, 0);
+        reach(y + 136);
+        y = divider(x, y + (row_h > 136 ? row_h : 136), w);
+        cx = label(app, x, &y, "To each sender", "Once in this many days, however often they write");
+        stepper(app, cx, y + 6, &v->days, 1, 1, 30, " days");
+        y = divider(x, y + row_h, w);
+    }
+    int failed = v->message[0] && strncmp(v->message, "Saved", 5) != 0 && strncmp(v->message, "Checking", 8) != 0;
+    if (jd_button(ui, v->saving ? "Saving..." : "Save vacation reply", (Rectangle){x, y, 190, 36}, 1)) vacation_save(app);
+    jd_text_fit(ui, v->message, x + 204, y + 11, w - 204, 13, failed ? JD_NORD11 : JD_NORD4, 0);
+    reach(y + 50);
 }
 
 void settings_draw(jd_app *app, Rectangle r)
@@ -921,9 +1012,18 @@ static char *new_device_id(void)
     return jd_strdup(hex);
 }
 
+/* the first account's store, worker, folder and account, open or in the background: its folder carries the copy */
+static struct {
+    jd_store *view;
+    jd_sync *sync;
+    const char *dir;
+    const jd_account *account;
+} first;
+
 static char *base_path(jd_app *app)
 {
-    return jd_printf("%s/shared-settings.toml", app->dir);
+    (void)app;
+    return jd_printf("%s/shared-settings.toml", first.dir);
 }
 
 static char *copy_text(jd_app *app, const jd_toml *t, int g)
@@ -1012,10 +1112,10 @@ static void forget_base(void)
 
 static void load_base(jd_app *app)
 {
-    if (sh.dir && jd_streq(sh.dir, app->dir) && sh.view == app->view) return;
+    if (sh.dir && jd_streq(sh.dir, first.dir) && sh.view == first.view) return;
     forget_base();
-    sh.dir = jd_strdup(app->dir);
-    sh.view = app->view;
+    sh.dir = jd_strdup(first.dir);
+    sh.view = first.view;
     char *path = base_path(app);
     jd_toml *t = jd_toml_load(path, NULL, 0);
     free(path);
@@ -1046,33 +1146,36 @@ static void load_base(jd_app *app)
 
 static int share_on(jd_app *app)
 {
-    return app->prefs.share && app->have_account && app->view && app->dir;
+    if (!app->prefs.share || !app->have_account) return 0;
+    account_first(app, &first.view, &first.sync, &first.dir, &first.account);
+    return first.view && first.dir;
 }
 
 /* the server copy's text, NULL when not here yet (asked for) or there is none (*uid 0) */
 static char *server_copy(jd_app *app, uint32_t *uid)
 {
     *uid = 0;
-    int64_t folder = jd_store_settings_folder(app->view, NULL);
+    int64_t folder = jd_store_settings_folder(first.view, NULL);
     if (!folder) return NULL;
     int n;
-    uint32_t *uids = jd_folder_uids(app->view, folder, &n);
+    uint32_t *uids = jd_folder_uids(first.view, folder, &n);
     if (n) *uid = uids[n - 1];
     free(uids);
     if (!*uid) return NULL;
     jd_folder_state st;
-    int64_t id = jd_message_id(app->view, folder, *uid);
+    int64_t id = jd_message_id(first.view, folder, *uid);
     char *raw = NULL;
     size_t len = 0;
-    if (id && jd_folder_state_get(app->view, folder, &st) == 0) {
-        char *path = jd_body_path(app->dir, folder, st.uidvalidity, *uid);
+    if (id && jd_folder_state_get(first.view, folder, &st) == 0) {
+        char *path = jd_body_path(first.dir, folder, st.uidvalidity, *uid);
         raw = jd_read_file(path, &len);
         free(path);
     }
     if (!raw) {
-        if (id && sh.fetching != id && app->sync) jd_sync_fetch_body(app->sync, id), sh.fetching = id;
+        if (id && sh.fetching != id && first.sync) jd_sync_fetch_body(first.sync, id), sh.fetching = id;
         return NULL;
     }
+    (void)app;
     char *text = jd_mime_body_text(raw, len);
     free(raw);
     return text;
@@ -1080,19 +1183,20 @@ static char *server_copy(jd_app *app, uint32_t *uid)
 
 static void push(jd_app *app, uint32_t merged_with)
 {
-    if (!app->sync || sh.pushed_for == merged_with) return;
+    if (!first.sync || sh.pushed_for == merged_with) return;
+    (void)app;
     int64_t stamps[JD_SHARE_COUNT];
     for (int g = 0; g < JD_SHARE_COUNT; g++) stamps[g] = sh.pending[g] ? sh.pending[g] : sh.stamp[g];
     char *doc = copy_doc(0, stamps, sh.local);
     char err[200], **rcpts = NULL;
     int nrcpts = 0;
     size_t len;
-    char *msg = jd_message_build(&app->account,
-                                 &(jd_outgoing){.to = app->account.address, .subject = "jackdaw settings", .body = doc},
+    char *msg = jd_message_build(first.account,
+                                 &(jd_outgoing){.to = first.account->address, .subject = "jackdaw settings", .body = doc},
                                  &len, &rcpts, &nrcpts, err, sizeof err);
     jd_rcpts_free(rcpts, nrcpts);
     if (msg) {
-        jd_sync_put_settings(app->sync, msg, len, merged_with);
+        jd_sync_put_settings(first.sync, msg, len, merged_with);
         sh.pushed_for = merged_with;
     }
     free(msg), free(doc);
@@ -1161,7 +1265,7 @@ void share_check(jd_app *app)
     }
     if (prefs_changed) {
         apply_prefs(app);
-        jd_settings_save(&app->account, &app->prefs);
+        settings_write(app);
     }
     /* a forgotten device stays out until it writes itself in again */
     if (rt && (uid != sh.merged_uid || !sh.devices_dirty)) devices_read(rt), sh.devices_dirty = 0;
@@ -1212,7 +1316,8 @@ static float devices_draw(jd_app *app, float x, float y, float w)
         snprintf(line, sizeof line, "%s%s", name, mine ? "  (this device)" : "");
         Rectangle row = {x, y, w, 40};
         DrawRectangleRounded(row, 0.2f, 6, JD_NORD1);
-        jd_text_fit(ui, line, x + 14, y + 11, w - 14 - 240, 14, JD_NORD6, mine);
+        jd_icon(jd_streq(name, "Android") ? "smartphone" : "monitor", x + 12, y + 12, 16, JD_NORD8);
+        jd_text_fit(ui, line, x + 38, y + 11, w - 38 - 240, 14, JD_NORD6, mine);
         snprintf(line, sizeof line, "Last shared %s", when);
         jd_text_fit(ui, line, x + w - 230, y + 12, mine ? 220 : 130, 13, JD_MUTED, 0);
         free(host);

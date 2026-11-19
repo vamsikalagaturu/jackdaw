@@ -12,12 +12,15 @@ public class MailJobService extends JobService {
     private static final int JOB_ID = 1;
     private static final long PERIOD_MS = 15 * 60 * 1000;
 
-    /* the account's address, from the settings in files; null without an account */
-    private static native String nativeAccount(String files);
+    /* every account's address, one a line, from the settings in files; null without an account */
+    private static native String nativeAccounts(String files);
 
-    static String account(String files) { return nativeAccount(files); }
-    /* a line per notification, "id\ttitle\ttext"; null when notifications are off or it failed */
-    private static native String nativeCheck(String files, String password);
+    static String[] accounts(String files) {
+        String all = nativeAccounts(files);
+        return all == null ? new String[0] : all.split("\n");
+    }
+    /* account's lines, one per notification, "tag\ttitle\ttext"; null when notifications are off or it failed */
+    private static native String nativeCheck(String files, String account, String password);
     private static native long nativeNextSend(String files);
 
     /* a scheduled draft due (SendAlarm), or after a reboot, which forgets alarms */
@@ -66,14 +69,16 @@ public class MailJobService extends JobService {
             try {
                 System.loadLibrary("jackdaw");
                 String files = getFilesDir().getAbsolutePath();
-                String account = nativeAccount(files);
-                String password = account == null ? null : JackdawActivity.passwordFor(getFilesDir(), account);
-                String found = password == null ? null : nativeCheck(files, password);
-                if (found != null)
-                    for (String line : found.split("\n")) {
-                        String[] f = line.split("\t", 3);
-                        if (f.length == 3) Notifier.post(this, f[1], f[2], Long.parseLong(f[0]));
-                    }
+                /* every account in turn; the tags of the lines say whose */
+                for (String account : accounts(files)) {
+                    String password = JackdawActivity.passwordFor(getFilesDir(), account);
+                    String found = password == null ? null : nativeCheck(files, account, password);
+                    if (found != null)
+                        for (String line : found.split("\n")) {
+                            String[] f = line.split("\t", 3);
+                            if (f.length == 3) Notifier.post(this, f[1], f[2], Long.parseLong(f[0]));
+                        }
+                }
                 SendAlarm.set(this, nativeNextSend(files));
             } catch (Throwable e) {
                 /* a failed check waits for the next period */

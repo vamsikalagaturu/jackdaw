@@ -44,7 +44,7 @@ void save_prefs(jd_app *app)
     app->prefs.sidebar_width = (int)app->side_w;
     app->prefs.list_width = (int)app->list_w;
     app->prefs.list_height = (int)app->list_h;
-    jd_settings_save(app->have_account ? &app->account : NULL, &app->prefs);
+    settings_write(app);
     share_changed(app);
 }
 
@@ -111,6 +111,26 @@ void apply_prefs(jd_app *app)
         c->plain = app->prefs.prefer_plain;
         for (int i = 0; i < c->n; i++) c->reading[i].wrapped_for = c->reading[i].html_w = 0;
     }
+}
+
+void mail_view_reset(jd_app *app)
+{
+    reader_close(app);
+    jd_folder_rows_free(app->folders, app->nfolders);
+    jd_thread_rows_free(app->rows, app->nrows);
+    app->folders = NULL;
+    app->rows = NULL;
+    app->nfolders = app->folder = app->nrows = app->row = 0;
+    free(app->status), free(app->error), free(app->query), free(app->server_hits), free(app->filter_from);
+    app->status = app->error = app->query = app->filter_from = NULL;
+    app->server_hits = NULL;
+    app->nserver_hits = 0;
+    free(app->picked);
+    app->picked = NULL;
+    app->npicked = 0;
+    app->list_scroll = app->side_scroll = 0;
+    free(app->dialog.ids);
+    app->dialog = (jd_dialog){0};
 }
 
 void mail_reload(jd_app *app)
@@ -507,6 +527,7 @@ static void tab_keys(jd_app *app)
         if (conv_keys(app, &t->conv)) {
         } else if (IsKeyPressed(KEY_ESCAPE)) tab_close(app, app->tab);
         else if (IsKeyPressed(KEY_R)) compose_open(app, shift ? COMPOSE_REPLY_ALL : COMPOSE_REPLY, last);
+        else if (IsKeyPressed(KEY_B) && last) message_snooze(app, last);
         else if (IsKeyPressed(KEY_F) && shift) compose_open(app, COMPOSE_FORWARD, last);
     } else if (t->kind == TAB_FILTERS) filters_keys(app);
     else if (t->kind == TAB_SETTINGS) settings_keys(app);
@@ -518,9 +539,14 @@ void mail_frame(jd_app *app)
 {
     float sw = jd_screen_w(), sh = jd_screen_h();
     pending_tick(app, 0);
+    compose_held_tick(app);
     int shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     int ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
-    int free_keys = !app->dialog.kind && !app->menu.open && !app->help;
+    int free_keys = !app->dialog.kind && !app->menu.open && !app->help && !snooze_open_now() && !accounts_menu_open();
+    /* Ctrl+Shift+1..9: that account */
+    if (free_keys && ctrl && shift && current_mode(app) != MODE_INSERT)
+        for (int k = 0; k < 9; k++)
+            if (IsKeyPressed(KEY_ONE + k)) account_switch(app, k);
     if (free_keys && current_mode(app) != MODE_INSERT && IsKeyPressed(KEY_SLASH) && shift) {
         app->help = 1;
         GetCharPressed();
@@ -707,7 +733,11 @@ void mail_frame(jd_app *app)
     footer(app, sw, sh);
     jd_tooltip_draw(&app->ui);
     toast(app, sh);
+    /* above the undo toast when that shows too */
+    compose_held_draw(app, app->pending.ids && app->pending.due >= 0 ? sh - BAR_H - 62 - 4 : sh - BAR_H - 10);
     menu_draw(app);
+    snooze_draw(app);
+    accounts_menu_draw(app);
     dialog_draw(app);
     help_draw(app);
     if (plat_touch() && !app->prefs.sidebar_rail && app->tabs[app->tab].kind == TAB_MAIL) drawer_capture();

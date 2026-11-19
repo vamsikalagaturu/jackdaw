@@ -55,7 +55,28 @@ int main(void)
     CHECK(e.start == T0 && e.end == T0 + 1800 && !e.all_day);
     CHECK(e.rrule && strstr(e.rrule, "FREQ=WEEKLY"));
     CHECK(e.alarm == 10);
+    CHECK(e.tzid && strcmp(e.tzid, "Europe/Berlin") == 0);
     jd_ical_event_free(&e);
+
+    /* an event in its own zone: typed as New York's wall clock, written with that TZID and its VTIMEZONE */
+    if (jd_tz_known("America/New_York")) {
+        int64_t at = jd_tz_time("America/New_York", 2026, 12, 3, 14, 0);
+        CHECK(at == 1796324400LL); /* 2026-12-03 19:00 UTC (EST, -5) */
+        int y, m, d, hh, mm;
+        jd_tz_wall("America/New_York", at, &y, &m, &d, &hh, &mm);
+        CHECK(y == 2026 && m == 12 && d == 3 && hh == 14 && mm == 0);
+        jd_ical_event ny = {.summary = "Call", .start = at, .end = at + 3600, .alarm = -1, .tzid = "America/New_York"};
+        char *ics = jd_ical_write(NULL, &ny);
+        CHECK(ics && strstr(ics, "DTSTART;TZID=America/New_York:20261203T140000"));
+        CHECK(ics && strstr(ics, "BEGIN:VTIMEZONE"));
+        jd_ical_event back;
+        CHECK(jd_ical_read(ics, &back) == 0);
+        CHECK(back.start == at && back.end == at + 3600 && back.tzid && strcmp(back.tzid, "America/New_York") == 0);
+        jd_ical_event_free(&back);
+        free(ics);
+        int nz;
+        CHECK(jd_tz_names(&nz) && nz > 300);
+    }
 
     jd_occurrence *o = NULL;
     int n = 0;

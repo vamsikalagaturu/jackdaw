@@ -469,6 +469,27 @@ int jd_imap_set_flag(jd_imap *m, const uint32_t *uids, int n, int flag, int on)
     return ok(r) ? JD_IMAP_OK : JD_IMAP_ERROR;
 }
 
+int jd_imap_set_keyword(jd_imap *m, const uint32_t *uids, int n, const char *keyword, int on, int seen)
+{
+    if (n <= 0) return JD_IMAP_OK;
+    struct mailimap_flag_list *flags = mailimap_flag_list_new_empty();
+    mailimap_flag_list_add(flags, mailimap_flag_new_flag_keyword(jd_strdup(keyword)));
+    struct mailimap_set *set = uid_set(uids, n);
+    struct mailimap_store_att_flags *att = on ? mailimap_store_att_flags_new_add_flags_silent(flags)
+                                              : mailimap_store_att_flags_new_remove_flags_silent(flags);
+    int r = mailimap_uid_store(m->s, set, att);
+    mailimap_store_att_flags_free(att);
+    if (ok(r) && seen) {
+        struct mailimap_flag_list *sf = mailimap_flag_list_new_empty();
+        mailimap_flag_list_add(sf, mailimap_flag_new_seen());
+        att = seen > 0 ? mailimap_store_att_flags_new_add_flags_silent(sf) : mailimap_store_att_flags_new_remove_flags_silent(sf);
+        r = mailimap_uid_store(m->s, set, att);
+        mailimap_store_att_flags_free(att);
+    }
+    mailimap_set_free(set);
+    return ok(r) ? JD_IMAP_OK : JD_IMAP_ERROR;
+}
+
 int jd_imap_claim(jd_imap *m, uint32_t uid, uint64_t modseq, const char *keyword, int *claimed)
 {
     *claimed = 0;

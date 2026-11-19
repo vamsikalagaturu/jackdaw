@@ -13,6 +13,8 @@ typedef struct {
     int all_day;
     char *rrule;  /* the RRULE value ("FREQ=WEEKLY;BYDAY=TU"), NULL when it does not repeat */
     int alarm;    /* minutes before the start of its first reminder (VALARM with a relative TRIGGER), -1 none */
+    char *tzid;   /* the zone its start is in ("America/New_York"); NULL for all-day, floating and UTC times, and when
+                     written: the local zone */
 } jd_ical_event;
 
 /* the event of an object; -1 when it holds none */
@@ -59,6 +61,12 @@ char *jd_itip_keep(const char *ics, const char *me, const char *partstat, int cl
 
 /* the local time zone's IANA name ("Europe/Berlin"), "UTC" when unknown */
 const char *jd_local_tzid(void);
+/* The zones the system's zoneinfo knows, by IANA name; *n 0 where libical finds none (then only local time). A
+   wall time in zone tzid as Unix seconds, and back; tzid NULL or unknown: local time. */
+const char *const *jd_tz_names(int *n);
+int jd_tz_known(const char *tzid);
+int64_t jd_tz_time(const char *tzid, int y, int m, int d, int hh, int mm);
+void jd_tz_wall(const char *tzid, int64_t t, int *y, int *m, int *d, int *hh, int *mm);
 /* days since 1970-01-01 of a civil date, and back (H. Hinnant's algorithms) */
 int64_t jd_days_from_civil(int y, int m, int d);
 void jd_civil_from_days(int64_t z, int *y, int *m, int *d);

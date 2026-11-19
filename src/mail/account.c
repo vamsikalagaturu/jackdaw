@@ -31,40 +31,78 @@ int jd_default_port(int imap, jd_security security)
     return security == JD_SEC_TLS ? 465 : 587;
 }
 
-static int load_server(const jd_toml *t, const char *prefix, jd_server *s, int imap)
+static int load_server(const jd_toml *t, const char *table, const char *prefix, jd_server *s, int imap)
 {
     char key[32];
     snprintf(key, sizeof key, "%s_host", prefix);
-    s->host = jd_strdup(jd_toml_str(t, "account", key));
+    s->host = jd_strdup(jd_toml_str(t, table, key));
     snprintf(key, sizeof key, "%s_security", prefix);
-    const char *sec = jd_toml_str(t, "account", key);
+    const char *sec = jd_toml_str(t, table, key);
     if (!sec || jd_streq(sec, "tls")) s->security = JD_SEC_TLS;
     else if (jd_streq(sec, "starttls")) s->security = JD_SEC_STARTTLS;
     else return -1;
     snprintf(key, sizeof key, "%s_port", prefix);
     long long port;
-    s->port = jd_toml_int(t, "account", key, &port) == 0 ? (int)port : jd_default_port(imap, s->security);
+    s->port = jd_toml_int(t, table, key, &port) == 0 ? (int)port : jd_default_port(imap, s->security);
     return s->host && s->host[0] && s->port > 0 && s->port < 65536 ? 0 : -1;
+}
+
+/* the account of table ("account", or "account.i" of [[account]]); 0 when complete */
+static int account_of(const jd_toml *t, const char *table, jd_account *a)
+{
+    *a = (jd_account){0};
+    a->name = jd_strdup(jd_toml_str(t, table, "name"));
+    a->address = jd_strdup(jd_toml_str(t, table, "address"));
+    a->username = jd_strdup(jd_toml_str(t, table, "username"));
+    if (!a->username) a->username = jd_strdup(a->address);
+    int bad = load_server(t, table, "imap", &a->imap, 1) | load_server(t, table, "smtp", &a->smtp, 0);
+    long long sieve;
+    a->sieve_port = jd_toml_int(t, table, "sieve_port", &sieve) == 0 && sieve > 0 && sieve < 65536 ? (int)sieve : 4190;
+    if (bad || !a->address || !strchr(a->address, '@')) {
+        jd_account_free(a);
+        return -1;
+    }
+    if (!a->name) a->name = jd_strdup(a->address);
+    return 0;
+}
+
+int jd_accounts_load(jd_account **out, int *n, char *err, int errlen)
+{
+    *out = NULL, *n = 0;
+    jd_toml *t = jd_toml_load(jd_settings_path(), err, (size_t)errlen);
+    if (!t) return -1;
+    int count = jd_toml_count(t, "account");
+    *out = jd_alloc(sizeof **out * (size_t)(count + 1));
+    for (int i = 0; i < (count ? count : 1); i++) {
+        char table[32];
+        snprintf(table, sizeof table, count ? "account.%d" : "account", i);
+        if (account_of(t, table, &(*out)[*n]) == 0) (*n)++;
+    }
+    jd_toml_free(t);
+    if (!*n) {
+        if (err) snprintf(err, (size_t)errlen, "no complete [[account]] in %s", jd_settings_path());
+        free(*out);
+        *out = NULL;
+        return -1;
+    }
+    return 0;
+}
+
+void jd_accounts_free(jd_account *a, int n)
+{
+    for (int i = 0; i < n; i++) jd_account_free(&a[i]);
+    free(a);
 }
 
 int jd_account_load(jd_account *a, char *err, int errlen)
 {
+    jd_account *all;
+    int n;
     *a = (jd_account){0};
-    jd_toml *t = jd_toml_load(jd_settings_path(), err, (size_t)errlen);
-    if (!t) return -1;
-    a->name = jd_strdup(jd_toml_str(t, "account", "name"));
-    a->address = jd_strdup(jd_toml_str(t, "account", "address"));
-    a->username = jd_strdup(jd_toml_str(t, "account", "username"));
-    if (!a->username) a->username = jd_strdup(a->address);
-    int bad = load_server(t, "imap", &a->imap, 1) | load_server(t, "smtp", &a->smtp, 0);
-    long long sieve;
-    a->sieve_port = jd_toml_int(t, "account", "sieve_port", &sieve) == 0 && sieve > 0 && sieve < 65536 ? (int)sieve : 4190;
-    jd_toml_free(t);
-    if (bad || !a->address || !strchr(a->address, '@')) {
-        if (err) snprintf(err, (size_t)errlen, "incomplete [account] in %s", jd_settings_path());
-        return -1;
-    }
-    if (!a->name) a->name = jd_strdup(a->address);
+    if (jd_accounts_load(&all, &n, err, errlen) != 0) return -1;
+    *a = all[0];
+    for (int i = 1; i < n; i++) jd_account_free(&all[i]);
+    free(all);
     return 0;
 }
 
@@ -75,15 +113,25 @@ static void put(jd_buf *b, const char *key, const char *value)
     jd_buf_adds(b, "\n");
 }
 
+/* [compose] undo_seconds, one of the offered waits; 10 when absent or another */
+static int undo_of(const jd_toml *t)
+{
+    long long v;
+    if (jd_toml_int(t, "compose", "undo_seconds", &v) != 0) return 10;
+    return v == 0 || v == 5 || v == 10 || v == 20 || v == 30 ? (int)v : 10;
+}
+
 void jd_prefs_load(jd_prefs *p)
 {
     *p = (jd_prefs){.conversations = 1, .scale = 100, .snippets = 1, .mark_read = 1, .notify = 1, .notify_focused = 1, .push = 1, .update_check = 1,
                     .prefetch_days = 30, .check_minutes = 5, .list_text = 15, .reader_text = 15,
-                    .attachment_list = 1, .markdown = 1, .cal_reminders = 1, .cal_view = -1, .share = 1};
+                    .attachment_list = 1, .markdown = 1, .cal_reminders = 1, .cal_view = -1, .share = 1,
+                    .undo_seconds = 10};
     jd_toml *t = jd_toml_load(jd_settings_path(), NULL, 0);
     if (!t) return;
     p->attachment_list = jd_toml_bool(t, "compose", "attachment_list", 1);
     p->markdown = jd_toml_bool(t, "compose", "markdown", 1);
+    p->undo_seconds = undo_of(t);
     p->conversations = jd_toml_bool(t, "view", "conversations", 1);
     const char *reader = jd_toml_str(t, "view", "reader");
     p->reader_pos = jd_streq(reader, "bottom") ? 1 : jd_streq(reader, "off") ? 2 : 0;
@@ -247,6 +295,7 @@ static void compose_text(jd_buf *b, const jd_prefs *p)
     jd_buf_adds(b, "\n[compose]\n");
     put_bool(b, "attachment_list", p->attachment_list);
     put_bool(b, "markdown", p->markdown);
+    jd_buf_addf(b, "undo_seconds = %d\n", p->undo_seconds);
 }
 
 static void signature_text(jd_buf *b, const jd_prefs *p)
@@ -332,6 +381,7 @@ void jd_share_apply(jd_prefs *p, int g, const jd_toml *t)
     case JD_SHARE_COMPOSE:
         p->attachment_list = jd_toml_bool(t, "compose", "attachment_list", 1);
         p->markdown = jd_toml_bool(t, "compose", "markdown", 1);
+        p->undo_seconds = undo_of(t);
         break;
     case JD_SHARE_SIGNATURE:
         set_str(&p->signature_new, jd_toml_str(t, "signature", "new"));
@@ -376,12 +426,14 @@ void jd_share_apply(jd_prefs *p, int g, const jd_toml *t)
     }
 }
 
-int jd_settings_save(const jd_account *a, const jd_prefs *p)
+int jd_settings_save(const jd_account *const *accounts, int naccounts, const jd_prefs *p)
 {
     jd_buf b = {0};
-    jd_buf_adds(&b, "# jackdaw settings. The password is kept in the system keystore, not here.\n");
-    if (a && a->address) {
-        jd_buf_adds(&b, "\n[account]\n");
+    jd_buf_adds(&b, "# jackdaw settings. Passwords are kept in the system keystore, not here.\n");
+    for (int i = 0; i < naccounts; i++) {
+        const jd_account *a = accounts[i];
+        if (!a || !a->address) continue;
+        jd_buf_adds(&b, "\n[[account]]\n");
         put(&b, "name", a->name);
         put(&b, "address", a->address);
         put(&b, "username", a->username);

@@ -179,8 +179,33 @@ static void setup_env(const char *files)
 
 /* Runs on the sync thread: Android stops the frame loop in the background. Attached to the JVM for the call
    only, as a native thread that exits attached aborts the process. */
-static void on_new_mail(const char *from, const char *subject, int64_t id, int count)
+/* The account of settings.toml with this address, and its place in [[account]] (notification tags carry it,
+   notify_tag); the first when address is NULL. 0 when found. */
+static int account_named(const char *address, jd_account *out, int *index)
 {
+    jd_account *all;
+    int n;
+    char err[256];
+    *out = (jd_account){0};
+    if (jd_accounts_load(&all, &n, err, sizeof err) != 0) return -1;
+    int found = -1;
+    for (int i = 0; i < n && found < 0; i++)
+        if (!address || (all[i].address && strcasecmp(all[i].address, address) == 0)) found = i;
+    if (found >= 0) {
+        *out = all[found];
+        all[found] = (jd_account){0};
+        if (index) *index = found;
+    }
+    jd_accounts_free(all, n);
+    return found >= 0 ? 0 : -1;
+}
+
+static void on_new_mail(const char *account, const char *from, const char *subject, int64_t id, int count)
+{
+    jd_account a;
+    int index = 0;
+    if (account_named(account, &a, &index) == 0) jd_account_free(&a);
+    id = notify_tag(index, id);
     jd_prefs p;
     jd_prefs_load(&p);
     int notify = p.notify, focused = p.notify_focused;
@@ -304,17 +329,24 @@ static int64_t next_send(jd_store *view, const char *account_dir)
 
 /* ---- the background check (MailJobService) ---- */
 
-JNIEXPORT jstring JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_nativeAccount(JNIEnv *e, jclass cls,
-                                                                                               jstring files)
+/* every account's address, one a line; NULL when there is none */
+JNIEXPORT jstring JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_nativeAccounts(JNIEnv *e, jclass cls,
+                                                                                                jstring files)
 {
     char *dir = jstr(e, files);
     if (!dir) return NULL;
     setup_env(dir);
     free(dir);
-    jd_account a = {0};
+    jd_account *all;
+    int n;
     char err[256];
-    jstring out = jd_account_load(&a, err, sizeof err) == 0 && a.address ? (*e)->NewStringUTF(e, a.address) : NULL;
-    jd_account_free(&a);
+    if (jd_accounts_load(&all, &n, err, sizeof err) != 0) return NULL;
+    jd_buf b = {0};
+    for (int i = 0; i < n; i++)
+        if (all[i].address) jd_buf_addf(&b, "%s%s", b.len ? "\n" : "", all[i].address);
+    jstring out = b.len ? (*e)->NewStringUTF(e, b.s) : NULL;
+    jd_buf_free(&b);
+    jd_accounts_free(all, n);
     return out;
 }
 
@@ -325,19 +357,21 @@ static volatile int push_quit;
 /* Stopped while JackdawActivity.running: one sync at a time, or the first to store a message would leave the
    other nothing new to notify. */
 JNIEXPORT void JNICALL Java_io_github_vamsikalagaturu_jackdaw_PushService_nativePush(JNIEnv *e, jclass cls,
-                                                                                     jstring files, jstring pw)
+                                                                                     jstring files, jstring addr,
+                                                                                     jstring pw)
 {
-    char *dir_files = jstr(e, files), *password = jstr(e, pw);
+    char *dir_files = jstr(e, files), *password = jstr(e, pw), *address = jstr(e, addr);
     jd_account a = {0};
+    int index = 0;
     char err[256];
     push_quit = 0;
     jclass activity = (*e)->FindClass(e, "io/github/vamsikalagaturu/jackdaw/JackdawActivity");
     jfieldID app_running = activity ? (*e)->GetStaticFieldID(e, activity, "running", "Z") : NULL;
     jmethodID posted = (*e)->GetStaticMethodID(e, cls, "posted", "(Ljava/lang/String;Ljava/lang/String;J)V");
     if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
-    if (!dir_files || !password || !app_running || !posted) goto done;
+    if (!dir_files || !password || !address || !app_running || !posted) goto done;
     setup_env(dir_files);
-    if (jd_account_load(&a, err, sizeof err) != 0) goto done;
+    if (account_named(address, &a, &index) != 0) goto done;
     char *dir = jd_account_dir(&a), *db = jd_printf("%s/mail.db", dir);
     jd_store *view = jd_store_open(db, err, sizeof err);
     jd_sync *s = NULL;
@@ -361,7 +395,7 @@ JNIEXPORT void JNICALL Java_io_github_vamsikalagaturu_jackdaw_PushService_native
                                            : jd_printf("%s: %s", ev.text ? ev.text : "", ev.text2 ? ev.text2 : "");
                 (*e)->PushLocalFrame(e, 4);
                 (*e)->CallStaticVoidMethod(e, cls, posted, (*e)->NewStringUTF(e, title), (*e)->NewStringUTF(e, text),
-                                           (jlong)ev.id);
+                                           (jlong)notify_tag(index, ev.id));
                 if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
                 (*e)->PopLocalFrame(e, NULL);
                 free(title), free(text);
@@ -385,7 +419,7 @@ JNIEXPORT void JNICALL Java_io_github_vamsikalagaturu_jackdaw_PushService_native
     free(dir), free(db);
 done:
     if (password) jd_wipe(password, strlen(password));
-    free(password), free(dir_files);
+    free(password), free(dir_files), free(address);
     jd_account_free(&a);
 }
 
@@ -398,19 +432,21 @@ JNIEXPORT void JNICALL Java_io_github_vamsikalagaturu_jackdaw_PushService_native
 #define CHECK_S 120.0
 
 JNIEXPORT jstring JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_nativeCheck(JNIEnv *e, jclass cls,
-                                                                                             jstring files, jstring pw)
+                                                                                             jstring files, jstring addr,
+                                                                                             jstring pw)
 {
-    char *dir_files = jstr(e, files), *password = jstr(e, pw);
+    char *dir_files = jstr(e, files), *password = jstr(e, pw), *address = jstr(e, addr);
     jstring out = NULL;
     jd_prefs p;
     jd_account a = {0};
+    int index = 0;
     char err[256];
-    if (!dir_files || !password) goto done;
+    if (!dir_files || !password || !address) goto done;
     setup_env(dir_files);
     jd_prefs_load(&p);
     int notify = p.notify;
     jd_prefs_free(&p);
-    if (jd_account_load(&a, err, sizeof err) != 0) goto done;
+    if (account_named(address, &a, &index) != 0) goto done;
     char *dir = jd_account_dir(&a), *db = jd_printf("%s/mail.db", dir);
     /* opened here first, as the app does, so the schema exists before the worker writes */
     jd_store *view = jd_store_open(db, err, sizeof err);
@@ -435,9 +471,9 @@ JNIEXPORT jstring JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_
                         if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
                     for (char *c = subject; *c; c++)
                         if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
-                    if (ev.count == 1) jd_buf_addf(&lines, "%lld\t%s\t%s\n", (long long)ev.id, from, subject);
-                    else
-                        jd_buf_addf(&lines, "%lld\t%d new messages\t%s: %s\n", (long long)ev.id, ev.count, from, subject);
+                    long long tag = (long long)notify_tag(index, ev.id);
+                    if (ev.count == 1) jd_buf_addf(&lines, "%lld\t%s\t%s\n", tag, from, subject);
+                    else jd_buf_addf(&lines, "%lld\t%d new messages\t%s: %s\n", tag, ev.count, from, subject);
                     free(from), free(subject);
                 } else if (ev.kind == JD_EV_SCHEDULED) {
                     char *title, *text;
@@ -461,7 +497,7 @@ JNIEXPORT jstring JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_
     free(dir), free(db);
 done:
     if (password) jd_wipe(password, strlen(password));
-    free(password), free(dir_files);
+    free(password), free(dir_files), free(address);
     jd_account_free(&a);
     return out;
 }
@@ -471,18 +507,23 @@ JNIEXPORT jlong JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_na
                                                                                              jstring files)
 {
     char *dir_files = jstr(e, files);
-    jd_account a = {0};
+    jd_account *all = NULL;
+    int n = 0;
     char err[256];
     int64_t at = 0;
     if (dir_files) setup_env(dir_files);
-    if (dir_files && jd_account_load(&a, err, sizeof err) == 0) {
-        char *dir = jd_account_dir(&a), *db = jd_printf("%s/mail.db", dir);
-        jd_store *view = jd_store_open(db, err, sizeof err);
-        if (view) at = next_send(view, dir);
-        jd_store_close(view);
-        free(dir), free(db);
+    /* the soonest of every account's */
+    if (dir_files && jd_accounts_load(&all, &n, err, sizeof err) == 0) {
+        for (int i = 0; i < n; i++) {
+            char *dir = jd_account_dir(&all[i]), *db = jd_printf("%s/mail.db", dir);
+            jd_store *view = jd_store_open(db, err, sizeof err);
+            int64_t next = view ? next_send(view, dir) : 0;
+            if (next && (!at || next < at)) at = next;
+            jd_store_close(view);
+            free(dir), free(db);
+        }
+        jd_accounts_free(all, n);
     }
-    jd_account_free(&a);
     free(dir_files);
     return (jlong)at;
 }
