@@ -97,7 +97,7 @@ void compose_set_to(struct jd_compose *c, const char *mailto)
 
 const char *compose_title(struct jd_compose *c)
 {
-    return c->fields[C_SUBJECT].len ? c->fields[C_SUBJECT].text : "New message";
+    return c->fields[C_SUBJECT].len ? jd_field_text(&c->fields[C_SUBJECT]) : "New message";
 }
 
 void compose_free(jd_app *app, struct jd_compose *c)
@@ -105,6 +105,7 @@ void compose_free(jd_app *app, struct jd_compose *c)
     if (!c) return;
     if (c->holding && app->sync) jd_sync_hold(app->sync, c->msgid, 0);
     jd_editor_free(&c->body);
+    for (int i = 0; i <= C_SUBJECT; i++) jd_field_free(&c->fields[i]);
     free(c->msgid), free(c->in_reply_to), free(c->references);
     free(c->quote_html), free(c->attribution), free(c->quote_text);
     for (int i = 0; i < c->nrelated; i++) free(c->related[i].type), free(c->related[i].data), free(c->related[i].cid);
@@ -494,8 +495,8 @@ static void quote_toggle(struct jd_compose *c)
 static char *build(jd_app *app, struct jd_compose *c, int draft, size_t *len, char ***rcpts, int *n)
 {
     jd_outgoing o = {
-        .to = c->fields[C_TO].text, .cc = c->fields[C_CC].text, .bcc = c->fields[C_BCC].text,
-        .subject = c->fields[C_SUBJECT].text, .body = c->body.text ? c->body.text : "",
+        .to = jd_field_text(&c->fields[C_TO]), .cc = jd_field_text(&c->fields[C_CC]),
+        .bcc = jd_field_text(&c->fields[C_BCC]), .subject = jd_field_text(&c->fields[C_SUBJECT]), .body = c->body.text ? c->body.text : "",
         .in_reply_to = c->in_reply_to, .references = c->references, .message_id = c->msgid,
         .parts = c->parts, .nparts = c->nparts, .draft = draft, .send_at = draft ? c->send_at : 0,
     };
@@ -602,7 +603,7 @@ float compose_held_draw(jd_app *app, float y)
     for (int k = nheld - 1; k >= 0; k--) {
         if (held[k].until <= 0) continue;
         int left = (int)(held[k].until - GetTime() + 0.999);
-        const char *subject = held[k].c->fields[C_SUBJECT].len ? held[k].c->fields[C_SUBJECT].text : "(no subject)";
+        const char *subject = held[k].c->fields[C_SUBJECT].len ? jd_field_text(&held[k].c->fields[C_SUBJECT]) : "(no subject)";
         char label[600];
         snprintf(label, sizeof label, "Sending \"%.500s\" in %d s", subject, left < 1 ? 1 : left);
         float maxw = jd_screen_w() - 200, tw = jd_text_width(ui, label, 14, 0);
@@ -805,8 +806,8 @@ int compose_may_close(jd_app *app, struct jd_compose *c, int tab)
 /* the part of an address field after the last comma */
 static const char *current_token(const jd_field *f)
 {
-    const char *comma = strrchr(f->text, ',');
-    const char *t = comma ? comma + 1 : f->text;
+    const char *comma = strrchr(jd_field_text(f), ',');
+    const char *t = comma ? comma + 1 : jd_field_text(f);
     while (*t == ' ') t++;
     return t;
 }
@@ -830,8 +831,8 @@ static void accept_suggestion(struct jd_compose *c, int i)
 {
     jd_field *f = &c->fields[c->focus];
     const jd_contact *k = &c->sugg[i];
-    size_t keep = (size_t)(current_token(f) - f->text);
-    char *head = jd_strndup(f->text, keep);
+    size_t keep = (size_t)(current_token(f) - jd_field_text(f));
+    char *head = jd_strndup(jd_field_text(f), keep);
     char *entry = k->name && k->name[0] ? jd_printf("%s <%s>", k->name, k->addr) : jd_strdup(k->addr);
     char *value = jd_printf("%s%s%s, ", head, keep && head[keep - 1] != ' ' ? " " : "", entry);
     jd_field_set(f, value);

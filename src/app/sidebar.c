@@ -13,6 +13,14 @@
 /* the accounts list under the sidebar's account (accounts_menu_draw draws it over everything) */
 static jd_popup accounts_menu;
 
+/* on a phone the full sidebar is a drawer (mail_frame): whatever is chosen in it closes it */
+static void drawer_done(jd_app *app)
+{
+    if (!plat_touch() || app->prefs.sidebar_rail) return;
+    app->prefs.sidebar_rail = 1;
+    save_prefs(app);
+}
+
 int accounts_menu_open(void)
 {
     return accounts_menu.open;
@@ -42,6 +50,7 @@ void accounts_menu_draw(jd_app *app)
     items[n] = (jd_popup_item){NULL, NULL, NULL, 0};
     items[n + 1] = (jd_popup_item){"Add an account...", "user", NULL, 0};
     int k = jd_popup_draw(&app->ui, &accounts_menu, items, n + 2);
+    if (k >= 0) drawer_done(app);
     if (k >= 0 && k < n) account_switch(app, k);
     else if (k == n + 1) account_add_open(app);
 }
@@ -98,14 +107,6 @@ static void toggle_collapsed(jd_app *app, int i)
     jd_folder_row *f = &app->folders[i];
     f->collapsed = !f->collapsed;
     jd_folder_set_collapsed(app->view, f->id, f->collapsed);
-}
-
-/* on a phone the full sidebar is a drawer (mail_frame): whatever is chosen in it closes it */
-static void drawer_done(jd_app *app)
-{
-    if (!plat_touch() || app->prefs.sidebar_rail) return;
-    app->prefs.sidebar_rail = 1;
-    save_prefs(app);
 }
 
 static void select_folder(jd_app *app, int i)
@@ -315,7 +316,8 @@ void sidebar_draw(jd_app *app, Rectangle r)
 {
     jd_ui *ui = &app->ui;
     const float row = 30;
-    int free_input = !app->dialog.kind && !app->menu.open;
+    /* the accounts list lies over the rows: a tap on it is not theirs */
+    int free_input = !app->dialog.kind && !app->menu.open && !accounts_menu.open;
     if (app->prefs.sidebar_rail) {
         /* the rail's panel starts level with the list's search field, its top corner rounded */
         Rectangle panel = {r.x, r.y + 14, r.width, r.height - 14};
@@ -354,10 +356,16 @@ void sidebar_draw(jd_app *app, Rectangle r)
         if (i != app->cur) elsewhere += app->slots[i].unread;
     jd_icon(accounts_menu.open ? "chevron-down" : "chevron-right", who.x + who.width - 22, who.y + 13, 16, JD_NORD4);
     if (elsewhere) DrawCircleV((Vector2){who.x + who.width - 28, who.y + 12}, 4, JD_NORD8);
-    /* on release: the press that opens it would otherwise count as a click outside it, and shut it */
-    if (hover_who && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
-        jd_popup_open(&accounts_menu);
-        accounts_menu.at = (Vector2){who.x, who.y + who.height + 4};
+    /* on release: the press that opens it would otherwise count as a click outside it, and shut it. The press
+       must have been on it too: the tap that opens the phone's drawer lifts over the account as it slides out. */
+    static int who_pressed;
+    if (hover_who && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) who_pressed = 1;
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+        if (who_pressed && hover_who) {
+            jd_popup_open(&accounts_menu);
+            accounts_menu.at = (Vector2){who.x, who.y + who.height + 4};
+        }
+        who_pressed = 0;
     }
 
     Rectangle write = {r.x + 12, r.y + 102, r.width - 24, 38};
@@ -391,12 +399,17 @@ void sidebar_draw(jd_app *app, Rectangle r)
             continue;
         }
         int hover = CheckCollisionPointRec(GetMousePosition(), box) && over && free_input;
+        float indent = 22 + 16 * (float)depth_of(f);
+        Rectangle arrow = {box.x + indent - 20, y, 18, row - 2};
+        int expander = has_children(app, i), on_arrow = expander && hover && CheckCollisionPointRec(GetMousePosition(), arrow);
         if (i == app->folder && app->tab == 0) {
             DrawRectangleRounded(box, 0.25f, 6, ColorAlpha(JD_NORD10, 0.45f));
             if (app->pane == PANE_FOLDERS && !plat_touch()) DrawRectangleRoundedLinesEx(box, 0.25f, 6, 1.5f, JD_NORD8);
         }
         else if (hover && !plat_touch()) DrawRectangleRounded(box, 0.25f, 6, JD_NORD3);
-        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        /* the arrow only opens or closes the folder: choosing it would also shut the phone's drawer */
+        if (on_arrow && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) toggle_collapsed(app, i);
+        else if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             app->pane = PANE_FOLDERS;
             select_folder(app, i);
         }
@@ -404,13 +417,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
             select_folder(app, i);
             app->menu = (jd_menu){.open = 1, .at = GetMousePosition(), .on_folder = 1, .index = i};
         }
-        float indent = 22 + 16 * (float)depth_of(f);
-        if (has_children(app, i)) {
-            Rectangle arrow = {box.x + indent - 20, y, 18, row - 2};
-            jd_icon(f->collapsed ? "chevron-right" : "chevron-down", arrow.x + 2, y + 7, 14, JD_NORD4);
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && over && CheckCollisionPointRec(GetMousePosition(), arrow))
-                toggle_collapsed(app, i);
-        }
+        if (expander) jd_icon(f->collapsed ? "chevron-right" : "chevron-down", arrow.x + 2, y + 7, 14, JD_NORD4);
         jd_icon(folder_icon(f), box.x + indent, y + 6, 16, i == app->folder ? JD_NORD8 : JD_NORD4);
         indent += 24;
         char count[16] = "";

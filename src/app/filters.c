@@ -122,7 +122,7 @@ static char *vac_script(const char *script)
     if (vac.on) {
         if (at > r && at[-1] != '\n') jd_buf_adds(&out, "\n");
         jd_buf_adds(&out, VAC_BEGIN "\nrequire [\"vacation\", \"date\", \"relational\"];\n");
-        const char *from = vac.f[VF_FROM].text, *until = vac.f[VF_UNTIL].text;
+        const char *from = jd_field_text(&vac.f[VF_FROM]), *until = jd_field_text(&vac.f[VF_UNTIL]);
         if (from[0] && until[0]) {
             jd_buf_adds(&out, "if allof (currentdate :value \"ge\" \"date\" ");
             sieve_quote(&out, from);
@@ -139,7 +139,7 @@ static char *vac_script(const char *script)
         jd_buf_addf(&out, "    vacation :days %d", vac.days);
         if (vac.f[VF_SUBJECT].len) {
             jd_buf_adds(&out, " :subject ");
-            sieve_quote(&out, vac.f[VF_SUBJECT].text);
+            sieve_quote(&out, jd_field_text(&vac.f[VF_SUBJECT]));
         }
         jd_buf_adds(&out, " ");
         sieve_quote(&out, vac.text.text ? vac.text.text : "");
@@ -160,7 +160,7 @@ static int is_date(const char *s)
 static void vac_save(jd_app *app)
 {
     if (vac.state != 2 || vac.saving || !app->sync) return;
-    const char *from = vac.f[VF_FROM].text, *until = vac.f[VF_UNTIL].text;
+    const char *from = jd_field_text(&vac.f[VF_FROM]), *until = jd_field_text(&vac.f[VF_UNTIL]);
     if (vac.on && ((from[0] && !is_date(from)) || (until[0] && !is_date(until)))) {
         snprintf(vac.message, sizeof vac.message, "Dates are written 2026-12-24, or left empty.");
         return;
@@ -186,6 +186,7 @@ jd_vacation_form *vacation_form(jd_app *app)
     if (!jd_streq(vac.of, app->account.address) && !vac.saving) {
         free(vac.script), free(vac.name), free(vac.sent), free(vac.of);
         jd_editor_free(&vac.text);
+        for (int i = 0; i < VF_COUNT; i++) jd_field_free(&vac.f[i]);
         vac = (jd_vacation_form){.days = 7, .of = jd_strdup(app->account.address)};
     }
     if (vac.state == 0 && app->sync) {
@@ -279,7 +280,7 @@ void filters_saved(jd_app *app, const char *error)
         /* the vacation form reads the script it saved */
         free(vac.script);
         vac.script = jd_strdup(f->script.text ? f->script.text : "");
-        if (f->name.len) free(vac.name), vac.name = jd_strdup(f->name.text);
+        if (f->name.len) free(vac.name), vac.name = jd_strdup(jd_field_text(&f->name));
         vac.state = 2;
         vac_read(vac.script);
     }
@@ -291,7 +292,7 @@ static void save(jd_app *app)
     if (f->state != 1 || f->saving || !app->sync) return;
     f->saving = 1;
     snprintf(f->message, sizeof f->message, "Checking and saving...");
-    jd_sync_sieve_put(app->sync, f->name.len ? f->name.text : "jackdaw", f->script.text ? f->script.text : "");
+    jd_sync_sieve_put(app->sync, f->name.len ? jd_field_text(&f->name) : "jackdaw", f->script.text ? f->script.text : "");
 }
 
 void filters_keys(jd_app *app)

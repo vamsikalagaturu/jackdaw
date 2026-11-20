@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "core/util.h"
 #include "icons.h"
 #include "platform.h"
 
@@ -103,14 +104,39 @@ void jd_text_fit(jd_ui *ui, const char *s, float x, float y, float width, float 
     jd_text(ui, buf, x, y, size, c, bold);
 }
 
+/* room for n bytes and the terminating 0; a secret's old buffer is wiped before it is let go */
+static void field_room(jd_field *f, int n)
+{
+    if (f->text && n < f->cap) return;
+    int cap = f->cap ? f->cap : 64;
+    while (cap <= n) cap *= 2;
+    char *grown = jd_alloc((size_t)cap);
+    if (f->text) {
+        memcpy(grown, f->text, (size_t)f->len + 1);
+        if (f->secret) jd_wipe(f->text, (size_t)f->cap);
+        free(f->text);
+    }
+    f->text = grown;
+    f->cap = cap;
+}
+
 void jd_field_set(jd_field *f, const char *s)
 {
-    size_t n = s ? strlen(s) : 0;
-    if (n >= sizeof f->text) n = sizeof f->text - 1;
-    memcpy(f->text, s ? s : "", n);
+    int n = s ? (int)strlen(s) : 0;
+    field_room(f, n);
+    if (f->secret) jd_wipe(f->text, (size_t)f->cap);
+    memcpy(f->text, s ? s : "", (size_t)n);
     f->text[n] = 0;
-    f->len = f->cursor = (int)n;
+    f->len = f->cursor = n;
     f->selecting = 0;
+}
+
+void jd_field_free(jd_field *f)
+{
+    if (f->text && f->secret) jd_wipe(f->text, (size_t)f->cap);
+    free(f->text);
+    f->text = NULL;
+    f->len = f->cursor = f->cap = f->selecting = f->anchor = 0;
 }
 
 static float span_width(jd_ui *ui, const char *s, int from, int to, float size);
@@ -161,7 +187,7 @@ static void field_move(jd_field *f, int pos, int shift)
 static void insert(jd_field *f, const char *s, int n)
 {
     delete_selection(f);
-    if (f->len + n >= (int)sizeof f->text) return;
+    field_room(f, f->len + n);
     memmove(f->text + f->cursor + n, f->text + f->cursor, (size_t)(f->len - f->cursor + 1));
     memcpy(f->text + f->cursor, s, (size_t)n);
     f->len += n;
@@ -188,10 +214,9 @@ void jd_field_input(jd_field *f)
         return;
     }
     if (ctrl && (IsKeyPressed(KEY_C) || IsKeyPressed(KEY_X)) && sel && !f->secret) {
-        char copy[sizeof f->text];
-        memcpy(copy, f->text + from, (size_t)(to - from));
-        copy[to - from] = 0;
+        char *copy = jd_strndup(f->text + from, (size_t)(to - from));
         SetClipboardText(copy);
+        free(copy);
         if (IsKeyPressed(KEY_X)) delete_selection(f);
         return;
     }
@@ -266,24 +291,22 @@ int jd_field_draw(jd_ui *ui, jd_field *f, Rectangle r, int focused)
         DrawRectangleRounded(r, 0.2f, 6, JD_NORD1);
         DrawRectangleRoundedLinesEx(r, 0.2f, 6, 1.5f, focused ? JD_NORD8 : JD_NORD2);
     }
-    char shown[sizeof f->text * 3];
-    const char *text = f->text;
+    /* a secret shows one '*' per character */
+    char *shown = NULL;
+    const char *text = jd_field_text(f);
     if (f->secret) {
         int n = 0;
+        shown = jd_alloc((size_t)f->len + 1);
         for (int i = 0; i < f->len; i = utf8_next(f->text, f->len, i)) shown[n++] = '*';
-        shown[n] = 0;
         text = shown;
     }
     float ty = r.y + (r.height - size) / 2;
     jd_scissor(r.x, r.y, r.width, r.height);
     if (!f->len && f->placeholder) jd_text(ui, f->placeholder, r.x + pad, ty, size, JD_MUTED, 0);
-    char before[sizeof shown];
     int cut = f->secret ? 0 : f->cursor;
     if (f->secret)
         for (int i = 0; i < f->cursor; i = utf8_next(f->text, f->len, i)) cut++;
-    memcpy(before, text, (size_t)cut);
-    before[cut] = 0;
-    float cx = jd_text_width(ui, before, size, 0);
+    float cx = span_width(ui, text, 0, cut, size);
     float shift = cx > r.width - 2 * pad ? cx - (r.width - 2 * pad) : 0;
     int sf, st;
     if (focused && field_selection(f, &sf, &st)) {
@@ -306,6 +329,7 @@ int jd_field_draw(jd_ui *ui, jd_field *f, Rectangle r, int focused)
     if (over && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
         field_menu.f = f, field_menu.seen = 1;
         jd_popup_open(&field_menu.pop);
+        free(shown);
         return 1;
     }
     /* the byte of f->text under the mouse: the character whose middle is right of it */
@@ -322,6 +346,7 @@ int jd_field_draw(jd_ui *ui, jd_field *f, Rectangle r, int focused)
             i = pos = next;
         }
     }
+    free(shown);
     /* a press puts the cursor, a drag selects, a double press selects the word, a triple one everything */
     if (dragging == f) {
         if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) f->cursor = pos;
@@ -368,10 +393,9 @@ void jd_field_menu_draw(jd_ui *ui)
     int from, to;
     if (!field_selection(f, &from, &to)) from = 0, to = f->len;
     if (k == 1 || k == 2) {
-        char copy[sizeof f->text];
-        memcpy(copy, f->text + from, (size_t)(to - from));
-        copy[to - from] = 0;
+        char *copy = jd_strndup(jd_field_text(f) + from, (size_t)(to - from));
         SetClipboardText(copy);
+        free(copy);
     }
     if (k == 2) {
         f->selecting = 1, f->anchor = from, f->cursor = to;

@@ -331,7 +331,7 @@ static char **font_pref(jd_prefs *p, int role)
 
 static int font_matches(const char *family)
 {
-    return !font_filter.len || strcasestr(family, font_filter.text);
+    return !font_filter.len || strcasestr(family, jd_field_text(&font_filter));
 }
 
 static void font_pick(jd_app *app, int role, const char *family)
@@ -907,7 +907,7 @@ void settings_draw(jd_app *app, Rectangle r)
         keys_filter.placeholder = "Type to find a key or an action";
         if (jd_field_draw(ui, &keys_filter, (Rectangle){x, top + 76, w, 34}, app->settings_focus == FOCUS_KEYS))
             app->settings_focus = FOCUS_KEYS;
-        reach(help_content(app, x, top + 124, w, keys_filter.text) + 20);
+        reach(help_content(app, x, top + 124, w, jd_field_text(&keys_filter)) + 20);
         break;
     }
     jd_scissor_end();

@@ -9,6 +9,7 @@
 void dialog_open(jd_app *app, dialog_kind kind, action act, const char *title, const char *value)
 {
     free(app->dialog.ids);
+    jd_field_free(&app->dialog.field);
     app->dialog = (jd_dialog){.kind = kind, .act = act};
     snprintf(app->dialog.title, sizeof app->dialog.title, "%s", title);
     jd_field_set(&app->dialog.field, value);
@@ -19,6 +20,7 @@ void dialog_open(jd_app *app, dialog_kind kind, action act, const char *title, c
 static void close_dialog(jd_app *app)
 {
     free(app->dialog.ids);
+    jd_field_free(&app->dialog.field);
     app->dialog = (jd_dialog){0};
 }
 
@@ -30,14 +32,14 @@ static int matches(const jd_folder_row *f, const char *filter)
 static int pick_count(jd_app *app)
 {
     int n = 0;
-    for (int i = 0; i < app->nfolders; i++) n += matches(&app->folders[i], app->dialog.field.text);
+    for (int i = 0; i < app->nfolders; i++) n += matches(&app->folders[i], jd_field_text(&app->dialog.field));
     return n;
 }
 
 static const jd_folder_row *picked(jd_app *app)
 {
     for (int i = 0, k = 0; i < app->nfolders; i++)
-        if (matches(&app->folders[i], app->dialog.field.text) && k++ == app->dialog.selected) return &app->folders[i];
+        if (matches(&app->folders[i], jd_field_text(&app->dialog.field)) && k++ == app->dialog.selected) return &app->folders[i];
     return NULL;
 }
 
@@ -66,7 +68,7 @@ static void confirm(jd_app *app)
         return;
     }
     if (d->act == ACT_SEND_LATER) {
-        char *typed = jd_strdup(d->field.text);
+        char *typed = jd_strdup(jd_field_text(&d->field));
         close_dialog(app);
         compose_schedule_typed(app, typed);
         free(typed);
@@ -83,7 +85,7 @@ static void confirm(jd_app *app)
         return;
     }
     if (d->act == ACT_SNOOZE_AT) {
-        char *typed = jd_strdup(d->field.text);
+        char *typed = jd_strdup(jd_field_text(&d->field));
         close_dialog(app);
         snooze_typed(app, typed);
         free(typed);
@@ -102,14 +104,14 @@ static void confirm(jd_app *app)
     case ACT_SNOOZE_AT: break;
     case ACT_CREATE_FOLDER:
         if (d->field.len) {
-            char *name = server_name(app, NULL, d->field.text);
+            char *name = server_name(app, NULL, jd_field_text(&d->field));
             jd_sync_create_folder(app->sync, name);
             free(name);
         }
         break;
     case ACT_RENAME_FOLDER:
-        if (d->field.len && current && !jd_streq(d->field.text, current->path)) {
-            char *name = server_name(app, current, d->field.text);
+        if (d->field.len && current && !jd_streq(jd_field_text(&d->field), current->path)) {
+            char *name = server_name(app, current, jd_field_text(&d->field));
             jd_sync_rename_folder(app->sync, current->name, name);
             free(name);
         }
@@ -142,9 +144,9 @@ static void confirm(jd_app *app)
     {
         char *match = search_full_query(app, 0);
         if (d->field.len && match && match[0]) {
-            jd_prefs_add_rule(&app->prefs, match, d->field.text);
+            jd_prefs_add_rule(&app->prefs, match, jd_field_text(&d->field));
             save_prefs(app);
-            notify_user(app, "Rule added: %s -> %s", match, d->field.text);
+            notify_user(app, "Rule added: %s -> %s", match, jd_field_text(&d->field));
         }
         free(match);
         break;
@@ -249,7 +251,7 @@ void dialog_draw(jd_app *app)
     }
     for (int i = 0, k = 0; i < app->nfolders && y < box.y + box.height - 30; i++) {
         const jd_folder_row *f = &app->folders[i];
-        if (!matches(f, d->field.text)) continue;
+        if (!matches(f, jd_field_text(&d->field))) continue;
         Rectangle row = {x - 6, y - 4, w - 28, 26};
         if (k == d->selected) DrawRectangleRounded(row, 0.2f, 6, JD_NORD2);
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), row)) {

@@ -658,7 +658,7 @@ static void set_query(jd_app *app)
 {
     jd_buf b = {0};
     for (int i = 0; i < app->npills; i++) jd_buf_addf(&b, "%s%s", b.len ? " " : "", app->pills[i]);
-    if (app->search.len) jd_buf_addf(&b, "%s%s", b.len ? " " : "", app->search.text);
+    if (app->search.len) jd_buf_addf(&b, "%s%s", b.len ? " " : "", jd_field_text(&app->search));
     /* without the scope pill even quick filters alone search every folder */
     if (!b.s && !app->search_here) b.s = jd_strdup("");
     free(app->query);
@@ -677,7 +677,7 @@ char *search_full_query(jd_app *app, int with_scope)
             const char *name = app->folders[app->folder].name;
             jd_buf_addf(&b, strchr(name, ' ') ? "%sin:\"%s\"" : "%sin:%s", b.len ? " " : "", name);
         }
-    if (app->search.len) jd_buf_addf(&b, "%s%s", b.len ? " " : "", app->search.text);
+    if (app->search.len) jd_buf_addf(&b, "%s%s", b.len ? " " : "", jd_field_text(&app->search));
     return b.s;
 }
 
@@ -740,7 +740,7 @@ static int pill_from_token(jd_app *app, const char *tok)
    (Enter). The words around them stay in the field. */
 static int absorb(jd_app *app, int all)
 {
-    const char *t = app->search.text;
+    const char *t = jd_field_text(&app->search);
     jd_buf keep = {0};
     int took = 0, i = 0, len = app->search.len;
     while (i < len) {
@@ -783,7 +783,7 @@ static void pill_remove(jd_app *app, const pill *p, int edit)
     case P_USER: {
         /* Backspace on a pill puts it back into the field, to change */
         if (edit) {
-            char *back = jd_printf("%s%s%s", app->pills[p->index], app->search.len ? " " : "", app->search.text);
+            char *back = jd_printf("%s%s%s", app->pills[p->index], app->search.len ? " " : "", jd_field_text(&app->search));
             jd_field_set(&app->search, back);
             free(back);
             app->search.cursor = (int)strlen(p->text);
@@ -1218,7 +1218,7 @@ static char hints_for[300] = "\x01";
 static const char *typed_word(jd_app *app)
 {
     if (app->search.cursor != app->search.len) return NULL;
-    const char *t = app->search.text, *word = t;
+    const char *t = jd_field_text(&app->search), *word = t;
     int quoted = 0;
     for (const char *p = t; *p; p++) {
         if (*p == '"') quoted = !quoted;
@@ -1332,9 +1332,9 @@ static void hint_accept(jd_app *app, int i)
 {
     const char *word = typed_word(app);
     if (!word || i < 0 || i >= nhints) return;
-    char text[600];
-    snprintf(text, sizeof text, "%.*s%s", (int)(word - app->search.text), app->search.text, hints[i].insert);
+    char *text = jd_printf("%.*s%s", (int)(word - jd_field_text(&app->search)), jd_field_text(&app->search), hints[i].insert);
     jd_field_set(&app->search, text);
+    free(text);
     if (absorb(app, 0)) {
         if (app->query) set_query(app);
         list_reload(app);

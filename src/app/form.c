@@ -339,7 +339,7 @@ static void toggle_security(jd_app *app, int imap)
 {
     jd_security *sec = imap ? &app->imap_sec : &app->smtp_sec;
     jd_field *port = &app->fields[imap ? F_IMAP_PORT : F_SMTP_PORT];
-    int was_default = atoi(port->text) == jd_default_port(imap, *sec);
+    int was_default = atoi(jd_field_text(port)) ==jd_default_port(imap, *sec);
     *sec = *sec == JD_SEC_TLS ? JD_SEC_STARTTLS : JD_SEC_TLS;
     if (was_default || !port->len) {
         char buf[16];
@@ -351,7 +351,7 @@ static void toggle_security(jd_app *app, int imap)
 static int port_of(const jd_field *f)
 {
     char *end;
-    long p = strtol(f->text, &end, 10);
+    long p = strtol(jd_field_text(f), &end, 10);
     return *end || p <= 0 || p > 65535 ? 0 : (int)p;
 }
 
@@ -360,18 +360,18 @@ int form_submit(jd_app *app)
 {
     jd_field *f = app->fields;
     const char *why = NULL;
-    if (!strchr(f[F_ADDRESS].text, '@')) why = "The address needs an @.";
+    if (!strchr(jd_field_text(&f[F_ADDRESS]), '@')) why = "The address needs an @.";
     else if (!f[F_IMAP_HOST].len || !f[F_SMTP_HOST].len) why = "Both servers are needed.";
     else if (!port_of(&f[F_IMAP_PORT]) || !port_of(&f[F_SMTP_PORT])) why = "Ports are numbers from 1 to 65535.";
     else if (!f[F_PASSWORD].len && (app->adding || !app->password)) why = "The password is needed.";
     for (int i = 0; !why && app->adding && i < accounts_count(app); i++)
-        if (account_at(app, i)->address && strcasecmp(account_at(app, i)->address, f[F_ADDRESS].text) == 0)
+        if (account_at(app, i)->address && strcasecmp(account_at(app, i)->address, jd_field_text(&f[F_ADDRESS])) == 0)
             why = "That account is here already.";
     if (why) {
         snprintf(app->form_error, sizeof app->form_error, "%s", why);
         return -1;
     }
-    char *password = jd_strdup(f[F_PASSWORD].len ? f[F_PASSWORD].text : app->password);
+    char *password = jd_strdup(f[F_PASSWORD].len ? jd_field_text(&f[F_PASSWORD]) : app->password);
     int sieve_port = !app->adding && app->account.sieve_port ? app->account.sieve_port : 4190;
     if (app->adding && app->have_account) {
         /* the open account goes on in the background; the new one gets a slot of its own and opens */
@@ -397,11 +397,11 @@ int form_submit(jd_app *app)
     }
     app->adding = 0;
     jd_account *a = &app->account;
-    a->address = jd_strdup(f[F_ADDRESS].text);
-    a->name = jd_strdup(f[F_NAME].len ? f[F_NAME].text : f[F_ADDRESS].text);
-    a->username = jd_strdup(f[F_USERNAME].len ? f[F_USERNAME].text : f[F_ADDRESS].text);
-    a->imap = (jd_server){jd_strdup(f[F_IMAP_HOST].text), port_of(&f[F_IMAP_PORT]), app->imap_sec};
-    a->smtp = (jd_server){jd_strdup(f[F_SMTP_HOST].text), port_of(&f[F_SMTP_PORT]), app->smtp_sec};
+    a->address = jd_strdup(jd_field_text(&f[F_ADDRESS]));
+    a->name = jd_strdup(f[F_NAME].len ? jd_field_text(&f[F_NAME]) : jd_field_text(&f[F_ADDRESS]));
+    a->username = jd_strdup(f[F_USERNAME].len ? jd_field_text(&f[F_USERNAME]) : jd_field_text(&f[F_ADDRESS]));
+    a->imap = (jd_server){jd_strdup(jd_field_text(&f[F_IMAP_HOST])), port_of(&f[F_IMAP_PORT]), app->imap_sec};
+    a->smtp = (jd_server){jd_strdup(jd_field_text(&f[F_SMTP_HOST])), port_of(&f[F_SMTP_PORT]), app->smtp_sec};
     a->sieve_port = sieve_port;
     app->have_account = 1;
     settings_write(app);

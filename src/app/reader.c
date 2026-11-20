@@ -1821,11 +1821,13 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         y += 20 * K;
     }
     y += 14;
+    float newest_y = y;
     /* each message is a card: a collapsed one shows its sender, date and first line; a click opens or closes it */
     for (int i = 0; i < c->n; i++) {
         jd_reading *m = &c->reading[i];
         const float pad = narrow ? 8 : 16, ar = 16 * K;
         float card_y = y, ix = x + pad, iw = w - 2 * pad;
+        newest_y = card_y;
         float head_h = 2 * ar;
         /* opening and closing ease over OPEN_S: the open card is drawn throughout, cut to a height between the
            closed one's and its whole height (smoothstep), and what follows moves with it */
@@ -2006,7 +2008,10 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         y += 8;
     }
     jd_scissor_end();
+    /* a conversation opens at its newest message (the last card), once the first frame has measured the cards */
+    int opening = c->content == 0;
     c->content = y + c->scroll - r.y + 40;
+    if (opening && c->n > 1) c->scroll += newest_y - r.y - 8;
     if (!app->dialog.kind && !app->menu.open) jd_scrollbar(r, c->content, &c->scroll);
     touch_handles_draw(app, c, r);
     reader_menu_draw(app, c);

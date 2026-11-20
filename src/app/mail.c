@@ -11,11 +11,11 @@
 #include "rlgl.h"
 #include "ui/icons.h"
 
-enum { TAB_H = 34, BAR_H = 28, SPLIT = 5 };
+enum { TAB_H = 34, BAR_H = 28, SPLIT = 5, RAIL_W = 60 };
 
-/* The phone's drawer slides; drawer_k is how far it is out (0 to 1). What it slides over as it opens and the drawer
-   itself as it closes cannot be drawn live (the page would take the taps, and by then the sidebar draws as the rail),
-   so drawer_shot holds the screen of the frame it opened or closed in. */
+/* The phone's drawer grows out of the rail; drawer_k is how far it is open (0 to 1). What it grows over as it opens
+   and the drawer itself as it closes cannot be drawn live (the page would take the taps, and by then the sidebar
+   draws as the rail), so drawer_shot holds the screen of the frame it opened or closed in. */
 static float drawer_k;
 static Texture2D drawer_shot;
 
@@ -130,6 +130,7 @@ void mail_view_reset(jd_app *app)
     app->npicked = 0;
     app->list_scroll = app->side_scroll = 0;
     free(app->dialog.ids);
+    jd_field_free(&app->dialog.field);
     app->dialog = (jd_dialog){0};
 }
 
@@ -560,7 +561,7 @@ void mail_frame(jd_app *app)
     /* the tab bar shows only when there is more than the mail view, and not when tabs live in the sidebar */
     float top = (!app->prefs.tabs_side && app->ntabs > 1) ? TAB_H : 0;
     if (top) tabs_draw(app, (Rectangle){0, 0, sw, TAB_H});
-    float side = app->prefs.sidebar_rail ? 60 : fmaxf(170, fminf(app->side_w ? app->side_w : 230, sw * 0.4f));
+    float side = app->prefs.sidebar_rail ? RAIL_W : fmaxf(170, fminf(app->side_w ? app->side_w : 230, sw * 0.4f));
     float body_h = sh - top - BAR_H;
     SetMouseCursor(MOUSE_CURSOR_DEFAULT);
     /* On a phone the full sidebar is a drawer over the page, which is too narrow to share: the page shows behind it
@@ -571,6 +572,8 @@ void mail_frame(jd_app *app)
     int drawer = plat_touch() && !app->prefs.sidebar_rail && app->tabs[app->tab].kind == TAB_MAIL;
     drawer_k = drawer ? fminf(1, drawer_k + GetFrameTime() / DRAWER_S) : fmaxf(0, drawer_k - GetFrameTime() / DRAWER_S);
     float out = 1 - (1 - drawer_k) * (1 - drawer_k) * (1 - drawer_k);
+    /* the drawer is uncovered from the rail's edge outwards, crossfading with the rail over the rail's width */
+    float shown = RAIL_W + (dw - RAIL_W) * out;
     if (drawer) {
         if (drawer_shot.id) {
             jd_scale_end();
@@ -583,10 +586,20 @@ void mail_frame(jd_app *app)
             app->prefs.sidebar_rail = 1;
             save_prefs(app);
         }
-        sidebar_draw(app, (Rectangle){dw * (out - 1), top, dw, body_h});
+        jd_scissor(0, top, shown, body_h);
+        sidebar_draw(app, (Rectangle){0, top, dw, body_h});
+        jd_scissor_end();
+        if (drawer_shot.id && out < 1) {
+            jd_scissor(0, top, RAIL_W, body_h);
+            jd_scale_end();
+            DrawTexture(drawer_shot, 0, 0, ColorAlpha(WHITE, 1 - out));
+            jd_scale_begin();
+            jd_scissor_end();
+        }
         footer(app, sw, sh);
         jd_tooltip_draw(&app->ui);
         menu_draw(app);
+        accounts_menu_draw(app);
         dialog_draw(app);
         if (app->prefs.sidebar_rail) drawer_capture();
         return;
@@ -721,9 +734,9 @@ void mail_frame(jd_app *app)
 
     if (drawer_k > 0 && drawer_shot.id) {
         DrawRectangleRec((Rectangle){0, top, sw, body_h}, ColorAlpha(BLACK, 0.45f * out));
-        jd_scissor(0, top, dw * out, body_h);
+        jd_scissor(0, top, shown, body_h);
         jd_scale_end();
-        DrawTexture(drawer_shot, (int)(dw * (out - 1) * (float)drawer_shot.width / sw), 0, WHITE);
+        DrawTexture(drawer_shot, 0, 0, ColorAlpha(WHITE, out));
         jd_scale_begin();
         jd_scissor_end();
     } else if (drawer_shot.id) {

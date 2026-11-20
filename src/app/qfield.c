@@ -42,7 +42,7 @@ char *qfield_query(const jd_qfield *q)
 {
     jd_buf b = {0};
     for (int i = 0; i < q->npills; i++) jd_buf_addf(&b, "%s%s", b.len ? " " : "", q->pills[i]);
-    const char *t = q->text.text;
+    const char *t = jd_field_text(&q->text);
     while (*t == ' ') t++;
     if (*t) jd_buf_addf(&b, "%s%s", b.len ? " " : "", t);
     return b.s;
@@ -51,7 +51,7 @@ char *qfield_query(const jd_qfield *q)
 /* complete operators (followed by a space, or every one when all) out of the text and into pills */
 static void absorb(jd_qfield *q, int all)
 {
-    const char *t = q->text.text;
+    const char *t = jd_field_text(&q->text);
     int len = q->text.len, i = 0, took = 0;
     jd_buf keep = {0};
     while (i < len) {
@@ -81,9 +81,9 @@ static void absorb(jd_qfield *q, int all)
 static const char *typed_word(const jd_qfield *q)
 {
     if (q->text.cursor != q->text.len) return NULL;
-    const char *word = q->text.text;
+    const char *word = jd_field_text(&q->text);
     int quoted = 0;
-    for (const char *p = q->text.text; *p; p++) {
+    for (const char *p = jd_field_text(&q->text); *p; p++) {
         if (*p == '"') quoted = !quoted;
         else if (*p == ' ' && !quoted) word = p + 1;
     }
@@ -105,9 +105,9 @@ static void hint_accept(jd_qfield *q, int i)
 {
     const char *word = typed_word(q);
     if (!word || i < 0 || i >= q->nhints) return;
-    char text[600];
-    snprintf(text, sizeof text, "%.*s%s", (int)(word - q->text.text), q->text.text, q->hints[i].insert);
+    char *text = jd_printf("%.*s%s", (int)(word - jd_field_text(&q->text)), jd_field_text(&q->text), q->hints[i].insert);
     jd_field_set(&q->text, text);
+    free(text);
     absorb(q, 0);
     snprintf(q->hints_for, sizeof q->hints_for, "\x01");
 }
@@ -135,7 +135,7 @@ int qfield_keys(jd_app *app, jd_qfield *q)
     }
     if (IsKeyPressed(KEY_BACKSPACE) && q->text.cursor == 0 && !q->text.selecting && q->npills) {
         char *last = q->pills[--q->npills];
-        char *back = jd_printf("%s%s%s", last, q->text.len ? " " : "", q->text.text);
+        char *back = jd_printf("%s%s%s", last, q->text.len ? " " : "", jd_field_text(&q->text));
         jd_field_set(&q->text, back);
         q->text.cursor = (int)strlen(last);
         free(back), free(last);

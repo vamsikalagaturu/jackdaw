@@ -19,10 +19,12 @@ Rectangle jd_text_ink(jd_ui *ui, const char *s, float size, int bold);
 /* s cut with "..." to fit width */
 void jd_text_fit(jd_ui *ui, const char *s, float x, float y, float width, float size, Color c, int bold);
 
-/* One-line text input. The text is UTF-8; the cursor is a byte offset on a character boundary. */
+/* One-line text input. The text is UTF-8; the cursor is a byte offset on a character boundary. The text grows as
+   needed (an address line has no length limit) and is NULL until first written: read it with jd_field_text, and
+   give it back with jd_field_free. */
 typedef struct {
-    char text[512];
-    int len, cursor;
+    char *text;
+    int len, cursor, cap;
     int selecting, anchor; /* a selection from anchor to cursor, while selecting */
     int secret;
     int bare; /* no box of its own: it sits inside one the caller draws */
@@ -33,7 +35,10 @@ typedef struct {
 /* For a left press: 1, or 2 and 3 for a second and third press within 0.4 s and a few pixels (a word, a line) */
 int jd_click_count(void);
 
+static inline const char *jd_field_text(const jd_field *f) { return f->text ? f->text : ""; }
 void jd_field_set(jd_field *f, const char *s);
+/* empties it and frees the text (wiped first for a secret); the field can be used again */
+void jd_field_free(jd_field *f);
 /* typing, editing keys and paste, for the focused field */
 void jd_field_input(jd_field *f);
 /* returns 1 when clicked */
