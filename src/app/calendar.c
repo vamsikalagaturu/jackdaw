@@ -119,7 +119,7 @@ static void picker_toggle(const jd_calendar_row *c)
 static void picker_apply(jd_app *app, Color c)
 {
     picker_set(c);
-    if (cal_store) jd_store_calendar_recolor(cal_store, cp.cal, cp.hex.text);
+    if (cal_store) jd_store_calendar_recolor(cal_store, cp.cal, jd_field_text(&cp.hex));
     cv.stale = 1;
     share_changed(app);
 }
@@ -142,7 +142,7 @@ static int picker_keys(jd_app *app)
     if (IsKeyPressed(KEY_ESCAPE)) cp.hex_focus = 0;
     else if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
         Color c;
-        if (hex_valid(cp.hex.text, &c)) picker_apply(app, c);
+        if (hex_valid(jd_field_text(&cp.hex), &c)) picker_apply(app, c);
         cp.hex_focus = 0;
     } else jd_field_input(&cp.hex);
     return 1;
@@ -165,7 +165,7 @@ static float picker_draw(jd_app *app, const jd_calendar_row *c, float x, float y
         Vector2 at = {px + 11 + 26 * (float)(i % per), py + 11 + 26 * (float)(i / per)};
         int on = CheckCollisionPointCircle(m, at, 11);
         DrawCircleV(at, on ? 11 : 10, sc);
-        if (strcasecmp(cp.hex.text, swatches[i]) == 0) DrawCircleLinesV(at, 13, JD_NORD6);
+        if (strcasecmp(jd_field_text(&cp.hex), swatches[i]) == 0) DrawCircleLinesV(at, 13, JD_NORD6);
         if (on && press) picker_apply(app, sc);
     }
     int rows = (nsw + per - 1) / per;
@@ -216,7 +216,7 @@ static float picker_draw(jd_app *app, const jd_calendar_row *c, float x, float y
     }
     if (jd_button(ui, "Done", (Rectangle){x + w - 12 - 70, py, 70, 32}, 1)) {
         Color typed;
-        if (cp.hex_focus && hex_valid(cp.hex.text, &typed)) picker_apply(app, typed);
+        if (cp.hex_focus && hex_valid(jd_field_text(&cp.hex), &typed)) picker_apply(app, typed);
         cp.cal = 0, cp.hex_focus = 0;
         if (focus && *focus == CF_HEX) *focus = -1;
     }
@@ -1097,15 +1097,15 @@ static void editor_save(jd_app *app)
 {
     if (ed.saving) return;
     int y0, m0, d0, y1, m1, d1, h0 = 0, i0 = 0, h1 = 0, i1 = 0;
-    if (!parse_date(ed.f[EF_DATE0].text, &y0, &m0, &d0) || !parse_date(ed.f[EF_DATE1].text, &y1, &m1, &d1)) {
+    if (!parse_date(jd_field_text(&ed.f[EF_DATE0]), &y0, &m0, &d0) || !parse_date(jd_field_text(&ed.f[EF_DATE1]), &y1, &m1, &d1)) {
         snprintf(ed.error, sizeof ed.error, "Dates are written 2026-11-19.");
         return;
     }
-    if (!ed.all_day && (!parse_time(ed.f[EF_TIME0].text, &h0, &i0) || !parse_time(ed.f[EF_TIME1].text, &h1, &i1))) {
+    if (!ed.all_day && (!parse_time(jd_field_text(&ed.f[EF_TIME0]), &h0, &i0) || !parse_time(jd_field_text(&ed.f[EF_TIME1]), &h1, &i1))) {
         snprintf(ed.error, sizeof ed.error, "Times are written 09:30.");
         return;
     }
-    jd_ical_event e = {.summary = ed.f[EF_TITLE].text, .location = ed.f[EF_LOCATION].text,
+    jd_ical_event e = {.summary = (char *)jd_field_text(&ed.f[EF_TITLE]), .location = (char *)jd_field_text(&ed.f[EF_LOCATION]),
                        .description = ed.notes.text, .all_day = ed.all_day};
     if (ed.all_day) {
         e.start = jd_days_from_civil(y0, m0, d0) * 86400;
@@ -1208,7 +1208,7 @@ static void editor_keys(jd_app *app)
     if (ed.focus == EF_TZ && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
         /* the first zone the typed text finds */
         const char *found[1];
-        if (tz_matches(ed.f[EF_TZ].text, found, 1)) snprintf(ed.tz, sizeof ed.tz, "%s", found[0]);
+        if (tz_matches(jd_field_text(&ed.f[EF_TZ]), found, 1)) snprintf(ed.tz, sizeof ed.tz, "%s", found[0]);
         jd_field_set(&ed.f[EF_TZ], ed.tz);
         ed.focus = EF_LOCATION;
         return;
@@ -1295,12 +1295,12 @@ static void editor_draw(jd_app *app, Rectangle page)
             if (ed.focus != EF_TZ) jd_field_set(&ed.f[EF_TZ], NULL);
             ed.focus = EF_TZ;
         }
-        if (ed.focus != EF_TZ && strcmp(ed.f[EF_TZ].text, ed.tz) != 0) jd_field_set(&ed.f[EF_TZ], ed.tz);
+        if (ed.focus != EF_TZ && strcmp(jd_field_text(&ed.f[EF_TZ]), ed.tz) != 0) jd_field_set(&ed.f[EF_TZ], ed.tz);
         y += 42;
         /* while typing: the zones found, in line (Enter takes the first) */
         const char *found[6];
-        int nf = ed.focus == EF_TZ && ed.f[EF_TZ].len && strcmp(ed.f[EF_TZ].text, ed.tz) != 0
-                     ? tz_matches(ed.f[EF_TZ].text, found, 6) : 0;
+        int nf = ed.focus == EF_TZ && ed.f[EF_TZ].len && strcmp(jd_field_text(&ed.f[EF_TZ]), ed.tz) != 0
+                     ? tz_matches(jd_field_text(&ed.f[EF_TZ]), found, 6) : 0;
         if (ed.focus == EF_TZ && ed.f[EF_TZ].len && !nf) {
             jd_text(ui, "No zone has that name.", tzf.x + 4, y, FS_SMALL, JD_MUTED, 0);
             y += 24;
@@ -1996,13 +1996,13 @@ static void agenda(jd_app *app, Rectangle r)
    repeating event once, at its first date */
 static void search_run(jd_app *app)
 {
-    if (cs.found_for && strcmp(cs.found_for, cs.q.text) == 0) return;
+    if (cs.found_for && strcmp(cs.found_for, jd_field_text(&cs.q)) == 0) return;
     free(cs.found_for);
-    cs.found_for = jd_strdup(cs.q.text);
+    cs.found_for = jd_strdup(jd_field_text(&cs.q));
     occs_free(cv.occs, cv.nocc);
     cv.occs = NULL, cv.nocc = 0, cv.sel = -1, cv.detail = -1, cv.scroll = 0;
     cv.from = cv.to = 0;
-    char *words = jd_strdup(cs.q.text), *save = NULL;
+    char *words = jd_strdup(jd_field_text(&cs.q)), *save = NULL;
     char *first = strtok_r(words, " \t", &save);
     if (!first || !cal_store) {
         free(words);
@@ -2552,26 +2552,26 @@ static void save_caldav(jd_app *app)
         snprintf(settings_note, sizeof settings_note, "The server address, the username and the password are needed.");
         return;
     }
-    jd_cal_account a = {1, cf[0].text, cf[1].text, 15};
+    jd_cal_account a = {1, (char *)jd_field_text(&cf[0]), (char *)jd_field_text(&cf[1]), 15};
     char *key = secret_key(&a);
-    int saved = plat_secret_save(key, cf[2].text) == 0;
+    int saved = plat_secret_save(key, jd_field_text(&cf[2])) == 0;
     free(key);
     if (!saved) {
         snprintf(settings_note, sizeof settings_note, "The keystore did not take the password.");
         return;
     }
-    account_added(app, 1, cf[0].text, cf[1].text);
+    account_added(app, 1, jd_field_text(&cf[0]), jd_field_text(&cf[1]));
 }
 
 static void google_sign_in(jd_app *app)
 {
-    if (!cf[3].len || !strchr(cf[3].text, '@')) {
+    if (!cf[3].len || !strchr(jd_field_text(&cf[3]), '@')) {
         snprintf(settings_note, sizeof settings_note, "Enter the Google address first.");
         return;
     }
     jd_oauth_stop(signin);
     char *url = NULL, err[300];
-    signin = jd_oauth_start(cf[3].text, &url, err, sizeof err);
+    signin = jd_oauth_start(jd_field_text(&cf[3]), &url, err, sizeof err);
     if (!signin) {
         snprintf(settings_note, sizeof settings_note, "%s", err);
         return;
@@ -2597,7 +2597,7 @@ static void signin_tick(jd_app *app)
         snprintf(settings_note, sizeof settings_note, "%s", err);
         return;
     }
-    jd_cal_account a = {2, NULL, cf[3].text, 15};
+    jd_cal_account a = {2, NULL, (char *)jd_field_text(&cf[3]), 15};
     char *key = secret_key(&a);
     int saved = plat_secret_save(key, refresh) == 0;
     free(key);
@@ -2607,7 +2607,7 @@ static void signin_tick(jd_app *app)
         snprintf(settings_note, sizeof settings_note, "Signed in, but the keystore did not take the sign-in.");
         return;
     }
-    account_added(app, 2, NULL, cf[3].text);
+    account_added(app, 2, NULL, jd_field_text(&cf[3]));
     SetWindowFocused();
 }
 

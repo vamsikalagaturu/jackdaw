@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(jackdaw VERSION 0.3.1 DESCRIPTION "Mail client for Linux and Android" LANGUAGES C CXX)
+project(jackdaw VERSION 0.3.2 DESCRIPTION "Mail client for Linux and Android" LANGUAGES C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 # litehtml (HTML mail) is C++17; everything else is C

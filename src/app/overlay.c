@@ -249,11 +249,11 @@ void help_draw(jd_app *app)
             if (!help_lines[i][1]) {
                 section = i;
                 int any = 0;
-                for (int k = i + 1; k < n && help_lines[k][1] && !any; k++) any = help_shown(k, section, filter.text);
+                for (int k = i + 1; k < n && help_lines[k][1] && !any; k++) any = help_shown(k, section, jd_field_text(&filter));
                 h += any ? HELP_ROW + 4 : 0;
-            } else if (help_shown(i, section, filter.text)) h += HELP_ROW;
+            } else if (help_shown(i, section, jd_field_text(&filter))) h += HELP_ROW;
         }
-        if (!help_rows(filter.text)) h += HELP_ROW;
+        if (!help_rows(jd_field_text(&filter))) h += HELP_ROW;
     }
     float content = h;
     h += 124;
@@ -275,7 +275,7 @@ void help_draw(jd_app *app)
     if (scroll > content - list.height) scroll = content - list.height;
     if (scroll < 0) scroll = 0;
     jd_scissor(list.x, list.y, list.width, list.height);
-    help_content(app, box.x + 24, list.y + 4 - scroll, w - 48, filter.text);
+    help_content(app, box.x + 24, list.y + 4 - scroll, w - 48, jd_field_text(&filter));
     jd_scissor_end();
     jd_scrollbar(list, content + 8, &scroll);
 }

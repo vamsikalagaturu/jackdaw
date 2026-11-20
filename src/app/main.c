@@ -218,6 +218,10 @@ int main(int argc, char **argv)
     conv_close(&app.tabs[0].conv);
     free(app.tabs);
     jd_editor_free(&app.filters.script);
+    jd_field_free(&app.filters.name);
+    jd_field_free(&app.search);
+    jd_field_free(&app.dialog.field);
+    for (int i = 0; i < F_COUNT; i++) jd_field_free(&app.fields[i]);
     jd_icons_unload();
     fonts_release(&app);
     CloseWindow();
