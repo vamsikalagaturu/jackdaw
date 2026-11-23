@@ -220,6 +220,13 @@ jd_store *jd_store_open(const char *path, char *err, int errlen)
             exec(s, "ALTER TABLE calendars ADD COLUMN user_color TEXT; PRAGMA user_version = 11;");
         exec(s, "COMMIT");
     }
+    /* a text part that is HTML-escaped ("Sp&#252;ren") now reads as its HTML part: snippets and search text again */
+    if (run(prep(s, "PRAGMA user_version")) == 11) {
+        exec(s, "BEGIN IMMEDIATE");
+        if (run(prep(s, "PRAGMA user_version")) == 11)
+            exec(s, "UPDATE folders SET texts_stale = 1; PRAGMA user_version = 12;");
+        exec(s, "COMMIT");
+    }
     return s;
 bad:
     snprintf(err, (size_t)errlen, "%s: %s", path, s->db ? sqlite3_errmsg(s->db) : "cannot open");

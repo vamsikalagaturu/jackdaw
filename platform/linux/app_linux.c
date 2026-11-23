@@ -2,6 +2,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,7 @@
 
 #include "core/util.h"
 #include "platform.h"
+#include "raylib.h"
 
 /* https://specifications.freedesktop.org/trash-spec/latest/ (home trash). The .trashinfo is created first with
    O_EXCL, which reserves the name; rename fails across file systems rather than copying. */
@@ -56,9 +58,63 @@ int plat_trash(const char *path)
     return r;
 }
 
+/* Scrolling. raylib's GLFW callback keeps only a frame's last scroll event (it assigns), dropping the rest of a
+   touchpad's; ours adds them up. A wheel's whole notches (Wayland's value120 in steps of 120) glide instead of
+   jumping, eased with a 50 ms time constant: 95% in 150 ms, inside the 50-200 ms Firefox animates a notch over
+   (general.smoothScroll.mouseWheel.duration*, Mozilla bug 1660933). A touchpad's fractions apply as they come.
+   The values reach the app through GetMouseWheelMove, wrapped at link time (CMakeLists.txt) as on Android. */
+typedef struct GLFWwindow GLFWwindow;
+typedef void (*GLFWscrollfun)(GLFWwindow *, double, double);
+GLFWscrollfun glfwSetScrollCallback(GLFWwindow *window, GLFWscrollfun callback);
+GLFWwindow *glfwGetCurrentContext(void);
+
+static double direct_x, direct_y, glide_x, glide_y; /* in notches */
+static float frame_x, frame_y;
+
+static void add_scroll(double v, double *direct, double *glide)
+{
+    if (v != 0 && v == floor(v)) *glide += v;
+    else *direct += v;
+}
+
+static void on_scroll(GLFWwindow *w, double x, double y)
+{
+    (void)w;
+    add_scroll(x, &direct_x, &glide_x);
+    add_scroll(y, &direct_y, &glide_y);
+}
+
+static float take(double *direct, double *glide, double k)
+{
+    double step = fabs(*glide) < 0.01 ? *glide : *glide * k;
+    *glide -= step;
+    float v = (float)(*direct + step);
+    *direct = 0;
+    return v;
+}
+
+Vector2 __real_GetMouseWheelMoveV(void);
+float __wrap_GetMouseWheelMove(void) { return frame_y; }
+Vector2 __wrap_GetMouseWheelMoveV(void) { return (Vector2){frame_x, frame_y}; }
+
 void plat_init(void) {}
-void plat_window_ready(void) {}
-void plat_frame(int typing) { (void)typing; }
+/* GetWindowHandle is the native window (a wl_surface on Wayland), not GLFW's: raylib's window is the one whose
+   context it made current */
+void plat_window_ready(void)
+{
+    GLFWwindow *w = glfwGetCurrentContext();
+    if (w) glfwSetScrollCallback(w, on_scroll);
+}
+
+void plat_frame(int typing)
+{
+    (void)typing;
+    double k = 1 - exp(-GetFrameTime() / 0.05);
+    /* raylib's own value: what its automation events (the tests) set */
+    Vector2 raylib = __real_GetMouseWheelMoveV();
+    frame_x = take(&direct_x, &glide_x, k) + raylib.x;
+    frame_y = take(&direct_y, &glide_y, k) + raylib.y;
+}
 float plat_density(void) { return 1; }
 int plat_touch(void) { return 0; }
 int plat_swipe(void) { return 0; }

@@ -610,7 +610,8 @@ char *jd_mime_body_html(const char *raw, size_t len)
 
 /* text with HTML tags in it ('<', an optional '/', a name, then space, '/' or '>'), as some mail sends for its
    text/plain part; two or more, so one stray <b> or "a < b" does not count. <user@host> and <https://...> are no
-   tags: their name ends at '@' or ':'. */
+   tags: their name ends at '@' or ':'. A numeric character reference ("Sp&#252;ren") counts too: such a part is
+   HTML-escaped text, which reads right only as HTML. */
 static int looks_like_html(const char *s)
 {
     int tags = 0;
@@ -619,7 +620,15 @@ static int looks_like_html(const char *s)
         while (isalnum((unsigned char)*q)) q++;
         if (q > name && isalpha((unsigned char)*name) && (*q == ' ' || *q == '/' || *q == '>') && strchr(q, '>')) tags++;
     }
-    return tags >= 2;
+    if (tags >= 2) return 1;
+    size_t n = strlen(s);
+    for (const char *p = strstr(s, "&#"); p; p = strstr(p + 2, "&#")) {
+        jd_buf ch = {0};
+        size_t k = entity(p, n - (size_t)(p - s), &ch);
+        jd_buf_free(&ch);
+        if (k) return 1;
+    }
+    return 0;
 }
 
 char *jd_mime_body_text(const char *raw, size_t len)
