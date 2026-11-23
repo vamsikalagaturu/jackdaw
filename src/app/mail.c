@@ -18,6 +18,7 @@ enum { TAB_H = 34, BAR_H = 28, SPLIT = 5, RAIL_W = 60 };
    draws as the rail), so drawer_shot holds the screen of the frame it opened or closed in. */
 static float drawer_k;
 static Texture2D drawer_shot;
+static int drawer_captured;
 
 static void drawer_capture(void)
 {
@@ -27,6 +28,7 @@ static void drawer_capture(void)
     Image im = LoadImageFromScreen();
     drawer_shot = LoadTextureFromImage(im);
     UnloadImage(im);
+    drawer_captured = 1;
 }
 
 void notify_user(jd_app *app, const char *fmt, ...)
@@ -570,9 +572,20 @@ void mail_frame(jd_app *app)
     const float DRAWER_S = 0.25f;
     float dw = sw * 0.8f < 300 ? sw * 0.8f : 300;
     int drawer = plat_touch() && !app->prefs.sidebar_rail && app->tabs[app->tab].kind == TAB_MAIL;
-    drawer_k = drawer ? fminf(1, drawer_k + GetFrameTime() / DRAWER_S) : fmaxf(0, drawer_k - GetFrameTime() / DRAWER_S);
-    float out = 1 - (1 - drawer_k) * (1 - drawer_k) * (1 - drawer_k);
-    /* the drawer is uncovered from the rail's edge outwards, crossfading with the rail over the rail's width */
+    /* the frame after a capture took its readback's time (16-23 ms on a phone), and any other slow frame is a
+       stall: counted, the drawer jumped a quarter of the way at once. A step is at most a 60 Hz frame. */
+    float dt = drawer_captured ? 0 : fminf(GetFrameTime(), 1.0f / 60);
+    drawer_captured = 0;
+    /* both ways it moves at once and slows as it arrives (cubic ease-out): opening as 1 - (1 - k)^3, closing as
+       k^3. Turning back midway, k is moved to where the other curve stands at the same opening. */
+    static int opening = 1;
+    if (drawer != opening) {
+        float at = opening ? 1 - powf(1 - drawer_k, 3) : powf(drawer_k, 3);
+        drawer_k = drawer ? 1 - cbrtf(1 - at) : cbrtf(at);
+        opening = drawer;
+    }
+    drawer_k = drawer ? fminf(1, drawer_k + dt / DRAWER_S) : fmaxf(0, drawer_k - dt / DRAWER_S);
+    float out = drawer ? 1 - powf(1 - drawer_k, 3) : powf(drawer_k, 3);    /* the drawer is uncovered from the rail's edge outwards, crossfading with the rail over the rail's width */
     float shown = RAIL_W + (dw - RAIL_W) * out;
     if (drawer) {
         if (drawer_shot.id) {

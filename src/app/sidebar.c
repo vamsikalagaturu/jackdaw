@@ -182,9 +182,11 @@ static int icon_button(jd_app *app, const char *icon, Rectangle b, const char *t
                        Vector2 *tip_at)
 {
     int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind && !app->menu.open;
-    if (hover) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
-    jd_icon(icon, b.x + (b.width - 18) / 2, b.y + (b.height - 18) / 2, 18, hover ? JD_NORD8 : tint);
-    if (hover && tip) *show_tip = tip, *tip_at = (Vector2){b.x + b.width + 6, b.y + (b.height - 24) / 2};
+    /* a touch screen's pointer sits where a finger scrolling the sidebar is: no hover there */
+    int lit = hover && !plat_touch();
+    if (lit) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
+    jd_icon(icon, b.x + (b.width - 18) / 2, b.y + (b.height - 18) / 2, 18, lit ? JD_NORD8 : tint);
+    if (lit && tip) *show_tip = tip, *tip_at = (Vector2){b.x + b.width + 6, b.y + (b.height - 24) / 2};
     return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
@@ -197,13 +199,16 @@ static float tab_rows(jd_app *app, Rectangle r, float y, int rail)
         Rectangle box = {r.x + 8, y, r.width - 16, 30};
         int hover = CheckCollisionPointRec(GetMousePosition(), box) && !app->dialog.kind && !app->menu.open;
         if (i == app->tab) DrawRectangleRounded(box, 0.25f, 6, ColorAlpha(JD_NORD10, 0.45f));
-        else if (hover) DrawRectangleRounded(box, 0.25f, 6, JD_NORD3);
+        else if (hover && !plat_touch()) DrawRectangleRounded(box, 0.25f, 6, JD_NORD3);
         jd_icon(icons[app->tabs[i].kind], box.x + (rail ? (box.width - 16) / 2 : 12), y + 7, 16,
                 i == app->tab ? JD_NORD8 : JD_NORD4);
         Rectangle close = {box.x + box.width - 24, y + 6, 18, 18};
         if (!rail) {
             jd_text_fit(ui, tab_title(app, i), box.x + 36, y + 8, box.width - 66, 14, JD_NORD6, i == app->tab);
-            if (i && hover) jd_icon("x", close.x + 2, close.y + 2, 14, CheckCollisionPointRec(GetMousePosition(), close) ? JD_NORD11 : JD_MUTED);
+            /* a touch screen has no hover to show it by: always there */
+            if (i && (hover || plat_touch()))
+                jd_icon("x", close.x + 2, close.y + 2, 14,
+                        hover && !plat_touch() && CheckCollisionPointRec(GetMousePosition(), close) ? JD_NORD11 : JD_MUTED);
         }
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             if (i && !rail && CheckCollisionPointRec(GetMousePosition(), close)) {
@@ -262,9 +267,10 @@ static void rail_draw(jd_app *app, Rectangle r)
     }
     Rectangle write = {cx, r.y + 85, 40, 36};
     int hover_write = CheckCollisionPointRec(GetMousePosition(), write) && !app->dialog.kind && !app->menu.open;
-    DrawRectangleRounded(write, 0.3f, 6, hover_write ? ColorBrightness(JD_NORD10, 0.12f) : JD_NORD10);
+    int lit_write = hover_write && !plat_touch();
+    DrawRectangleRounded(write, 0.3f, 6, lit_write ? ColorBrightness(JD_NORD10, 0.12f) : JD_NORD10);
     jd_icon("pencil", write.x + 11, write.y + 9, 18, JD_ON_ACCENT);
-    if (hover_write) tip = "New message (Ctrl+N)", tip_at = (Vector2){write.x + 46, write.y + 6};
+    if (lit_write) tip ="New message (Ctrl+N)", tip_at = (Vector2){write.x + 46, write.y + 6};
     if (hover_write && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) compose_open(app, COMPOSE_NEW, 0);
     float y = r.y + 134;
     if (app->prefs.tabs_side && app->ntabs > 1) y = tab_rows(app, r, y, 1);
@@ -343,7 +349,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
     /* the open account; a click lists them all, to switch or add one */
     Rectangle who = {r.x + 8, r.y + 54, r.width - 16, 42};
     int hover_who = CheckCollisionPointRec(GetMousePosition(), who) && free_input && !accounts_menu.open;
-    if (hover_who || accounts_menu.open) DrawRectangleRounded(who, 0.25f, 6, JD_NORD2);
+    if ((hover_who && !plat_touch()) || accounts_menu.open) DrawRectangleRounded(who, 0.25f, 6, JD_NORD2);
     char initial[8] = "?";
     if (app->account.address) snprintf(initial, sizeof initial, "%c", toupper((unsigned char)app->account.address[0]));
     DrawCircleV((Vector2){r.x + 30, r.y + 74}, 14, JD_NORD10);
@@ -370,7 +376,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
 
     Rectangle write = {r.x + 12, r.y + 102, r.width - 24, 38};
     int hover_write = CheckCollisionPointRec(GetMousePosition(), write) && free_input;
-    DrawRectangleRounded(write, 0.3f, 6, hover_write ? ColorBrightness(JD_NORD10, 0.12f) : JD_NORD10);
+    DrawRectangleRounded(write, 0.3f, 6, hover_write && !plat_touch() ? ColorBrightness(JD_NORD10, 0.12f) : JD_NORD10);
     jd_icon("pencil", write.x + 14, write.y + 11, 16, JD_ON_ACCENT);
     jd_text(ui, "New message", write.x + 40, write.y + 11, 14, JD_ON_ACCENT, 1);
     if (hover_write && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) drawer_done(app), compose_open(app, COMPOSE_NEW, 0);
@@ -442,8 +448,9 @@ void sidebar_draw(jd_app *app, Rectangle r)
         float fw = jd_text_width(ui, foot[k].label, 13, 0) + 40;
         Rectangle b = {fx, fy, fw, 32};
         int hover = CheckCollisionPointRec(GetMousePosition(), b) && free_input;
-        if (hover) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
-        jd_icon(foot[k].icon, fx + 10, fy + 8, 16, hover ? JD_NORD8 : JD_NORD4);
+        int lit = hover && !plat_touch();
+        if (lit) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
+        jd_icon(foot[k].icon, fx + 10, fy + 8, 16, lit ? JD_NORD8 : JD_NORD4);
         jd_text(ui, foot[k].label, fx + 32, fy + 9, 13, JD_NORD4, 0);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             drawer_done(app);

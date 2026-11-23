@@ -104,9 +104,12 @@ static void free_reading(jd_reading *r)
     jd_message_row_clear(&r->row);
 }
 
+static void forget_conv(jd_conv *c);
+
 void conv_close(jd_conv *c)
 {
     visual_end(c);
+    forget_conv(c);
     for (int i = 0; i < c->n; i++) free_reading(&c->reading[i]);
     free(c->reading);
     *c = (jd_conv){0};
@@ -426,7 +429,12 @@ static int copy_selection(jd_app *app, jd_conv *c);
 static char *selected_text(jd_conv *c);
 static void clear_selections(jd_conv *c);
 static float span(jd_ui *ui, const char *text, int from, int to);
+/* the right-click menu over a message's text: the body's, or a header text's (menu_label, its id in menu_label_id,
+   which Select all selects whole) */
 static jd_popup reader_menu;
+static jd_conv *menu_conv;
+static int menu_msg, menu_label_id;
+static char *menu_link, *menu_label;
 
 /* the wrapped line of plain text m holding byte pos, among the lines shown */
 static int plain_line(const jd_reading *m, int pos)
@@ -807,6 +815,19 @@ static void label_press(const char *text, int at)
     hl.text = b > a ? jd_strndup(text + a, (size_t)(b - a)) : NULL;
 }
 
+/* the reader's menu over header text id; the subject's (ids from 100000) acts on the newest message */
+static void label_menu_open(jd_conv *c, int id, const char *text)
+{
+    menu_conv = c;
+    menu_msg = id >= 100000 ? c->n - 1 : id / 16;
+    free(menu_link);
+    menu_link = NULL;
+    free(menu_label);
+    menu_label = jd_strdup(text);
+    menu_label_id = id;
+    jd_popup_open(&reader_menu);
+}
+
 /* text drawn at (x, y) in at most w, made selectable as id */
 static void sel_label(jd_app *app, jd_conv *c, int id, const char *text, float x, float y, float w, float size, int bold,
                       Rectangle clip)
@@ -816,13 +837,15 @@ static void sel_label(jd_app *app, jd_conv *c, int id, const char *text, float x
     float tw = jd_text_width(ui, text, size, bold);
     Rectangle box = {x, y - 2, tw < w ? tw : w, size + 4};
     Vector2 mp = GetMousePosition();
-    int over = CheckCollisionPointRec(mp, box) && CheckCollisionPointRec(mp, clip) && !app->dialog.kind && !app->menu.open;
+    int over = CheckCollisionPointRec(mp, box) && CheckCollisionPointRec(mp, clip) && !app->dialog.kind &&
+               !app->menu.open && !reader_menu.open;
     if (over) SetMouseCursor(MOUSE_CURSOR_IBEAM);
     if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         clear_selections(c);
         hl.conv = c, hl.id = id;
         label_press(text, label_hit(ui, text, mp.x - x, size, bold));
     }
+    if (over && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) label_menu_open(c, id, text);
     if (hl.conv != c || hl.id != id) return;
     if (hl.dragging) {
         int at = label_hit(ui, text, mp.x - x, size, bold);
@@ -975,6 +998,8 @@ static float address_line(jd_app *app, jd_conv *c, int id, const char *label, co
         snprintf(chip_addr, sizeof chip_addr, "%s", a[under].addr);
         chip_conv = c;
         jd_popup_open(&chip_menu);
+    } else if (at >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+        label_menu_open(c, id, text);
     }
 
     int sel = hl.conv == c && hl.id == id && hl.to > hl.from;
@@ -1274,10 +1299,6 @@ static struct {
     jd_conv *conv;
     Vector2 start; /* relative to the body's top left */
 } drag;
-
-static jd_conv *menu_conv;
-static int menu_msg;
-static char *menu_link;
 
 int reader_visual(void)
 {
@@ -1600,6 +1621,8 @@ static void text_mouse(jd_app *app, jd_conv *c, int i, Rectangle area, Rectangle
         menu_conv = c, menu_msg = i;
         free(menu_link);
         menu_link = html ? jd_html_link_at(m->html, at.x, at.y) : NULL;
+        free(menu_label);
+        menu_label = NULL;
         jd_popup_open(&reader_menu);
     }
     if (!drag.active || drag.conv != c || drag.msg != i) return;
@@ -1650,7 +1673,12 @@ static void reader_menu_draw(jd_app *app, jd_conv *c)
     case 0: copy_selection(app, c); break;
     case 1:
         clear_selections(c);
-        if (m->html && !c->plain) jd_html_select_all(m->html);
+        if (menu_label) {
+            hl.conv = c, hl.id = menu_label_id, hl.dragging = 0;
+            hl.anchor = hl.from = 0, hl.to = (int)strlen(menu_label);
+            free(hl.text);
+            hl.text = jd_strdup(menu_label);
+        } else if (m->html && !c->plain) jd_html_select_all(m->html);
         else if (m->text) m->sel_from = 0, m->sel_to = (int)strlen(m->text);
         break;
     case 3: follow_link(app, menu_link); break;
@@ -1675,6 +1703,28 @@ static int card_msg, card_more[CA_COUNT], ncard_more;
 static unsigned card_frames, card_opened_at;
 /* a click's action, done once the conversation is drawn: it may close it, or open a tab that moves it */
 static int card_pending = -1, card_pending_msg;
+
+/* c is closed, or opens another conversation in its place (the preview does): a selection, drag or menu made in
+   it is keyed by its address and a message index or label id, and would land on the next one's messages */
+static void forget_conv(jd_conv *c)
+{
+    clear_selections(c);
+    if (drag.conv == c) drag.active = 0;
+    if (ts.conv == c) ts.active = ts.drag = 0;
+    if (menu_conv == c) {
+        reader_menu.open = 0;
+        menu_conv = NULL;
+    }
+    if (chip_conv == c) {
+        chip_menu.open = 0;
+        chip_conv = NULL;
+    }
+    if (card_conv == c) {
+        card_menu.open = 0;
+        card_conv = NULL;
+        card_pending = -1;
+    }
+}
 
 static const char *card_icon(const jd_reading *m, int a)
 {
@@ -1850,7 +1900,7 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         if (on_head) SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
         if (m->card_h > 0 && card_y < r.y + r.height && card_y + m->card_h > r.y)
             DrawRectangleRounded((Rectangle){x, card_y, w, m->card_h}, 16.0f / fminf(w, m->card_h), 8,
-                                 on_head && !shown ? JD_NORD2 : JD_NORD1);
+                                 on_head && !shown && !app->ui.touch ? JD_NORD2 : JD_NORD1);
         y += pad;
         char date[32];
         format_date(m->row.date, date, sizeof date);
@@ -1865,7 +1915,12 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         /* in an open card the sender and date are text to select; a click elsewhere on the header closes it */
         float icons_right = tx + tw - dw - 26 * K, icons_cy = y + ar;
         float icons_w = shown ? card_icons(app, c, i, icons_right, icons_cy, r, narrow, 0) : 0;
-        float nw = jd_text_width(ui, from, 15 * K, 1), nmax = tw - dw - 40 * K - icons_w;
+        /* before its body is downloaded only the server knows a message has attachments, not how many */
+        int clip = !shown && (m->nfiles > 0 || (!m->row.body_cached && m->row.has_attachment));
+        char nfiles[16] = "";
+        if (clip && m->nfiles) snprintf(nfiles, sizeof nfiles, "%d", m->nfiles);
+        float clip_w = clip ? 14 * K + (nfiles[0] ? 3 + jd_text_width(ui, nfiles, 12 * K, 0) : 0) + 8 * K : 0;
+        float nw = jd_text_width(ui, from, 15 * K, 1), nmax = tw - dw - 40 * K - icons_w - clip_w;
         Rectangle name_box = {tx, name_y - 2, nw < nmax ? nw : nmax, 15 * K + 4};
         Rectangle date_box = {tx + tw - dw, name_y, dw, 13 * K + 4};
         Rectangle icons_box = {icons_right - icons_w, icons_cy - 14, icons_w, 28};
@@ -1882,6 +1937,11 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
             sel_label(app, c, i * 16 + 2, date, tx + tw - dw, name_y + 2 * K, dw, 13 * K, 0, r);
         }
         if ((m->row.flags & JD_FLAGGED) && !shown) jd_icon("star", tx + tw - dw - 22 * K, name_y + 1, 14 * K, JD_NORD13);
+        if (clip) {
+            float cx = tx + tw - dw - ((m->row.flags & JD_FLAGGED) ? 22 * K : 0) - clip_w;
+            jd_icon("paperclip", cx, name_y + 1, 14 * K, JD_NORD4);
+            if (nfiles[0]) jd_text(ui, nfiles, cx + 14 * K + 3, name_y + 2 * K, 12 * K, JD_NORD4, 0);
+        }
         jd_text(ui, date, tx + tw - dw, name_y + 2 * K, 13 * K, JD_NORD4, 0);
         if (shown) card_icons(app, c, i, icons_right, icons_cy, r, narrow, 1);
         if (!shown) {

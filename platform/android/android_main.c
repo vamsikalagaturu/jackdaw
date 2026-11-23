@@ -792,7 +792,8 @@ static void on_touch(const AInputEvent *e, int action)
         if (sideways) release_dx = x - touch.x;
         if (action == AMOTION_EVENT_ACTION_UP && !touch.held) {
             add_samples(e);
-            if (touch.pending && !touch.moved && !touch.stopped_fling) tap(MOUSE_BUTTON_LEFT, touch.x, touch.y), ime_recheck = 4;
+            int tapped = touch.pending && !touch.moved && !touch.stopped_fling;
+            if (tapped) tap(MOUSE_BUTTON_LEFT, touch.x, touch.y), ime_recheck = 4;
             float dx = x - touch.x, v = 0;
             int fast = release_velocity(AMotionEvent_getEventTime(e) / 1e9, sideways, &v) && fabsf(v) > FLING_MIN_DP * dp();
             if (sideways) {
@@ -802,6 +803,10 @@ static void on_touch(const AInputEvent *e, int action)
             } else if (touch.scrolling && fast) {
                 fling_start(fmaxf(-FLING_MAX_DP * dp(), fminf(FLING_MAX_DP * dp(), v)));
             }
+            /* a scroll, swipe or stopped fling that ends without a fling or tap would leave the pointer where the
+               finger was, lighting what is under it; it goes a frame later, once the last scroll and the swipe
+               have been taken by what was under it */
+            if (!tapped && !fling_v) push_step((step){.kind = 0}), push_step((step){.kind = 3});
         } else if (sideways) {
             swipe_pending = 2;
         }
