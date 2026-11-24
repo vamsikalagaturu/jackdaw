@@ -5,10 +5,11 @@
 
 #include "app.h"
 #include "core/util.h"
+#include "ui/fx.h"
 #include "ui/icons.h"
 
 typedef enum {
-    M_NONE, M_OPEN_TAB, M_REPLY, M_REPLY_ALL, M_FORWARD, M_READ, M_FLAG, M_ARCHIVE, M_SNOOZE, M_MOVE, M_COPY, M_DELETE,
+    M_NONE, M_NOT_JUNK, M_OPEN_TAB, M_REPLY, M_REPLY_ALL, M_FORWARD, M_READ, M_FLAG, M_ARCHIVE, M_SNOOZE, M_MOVE, M_COPY, M_DELETE,
     M_F_NEW, M_F_RENAME, M_F_DELETE, M_F_ALL_READ, M_SEP
 } menu_item;
 
@@ -18,6 +19,7 @@ typedef struct {
 } entry;
 
 static const entry row_menu[] = {
+    {M_NOT_JUNK, "Not junk", "inbox", NULL}, {M_SEP, NULL, NULL, NULL},
     {M_OPEN_TAB, "Open in a tab", "external-link", "Shift+Enter"}, {M_SEP, NULL, NULL, NULL},
     {M_REPLY, "Reply", "reply", "r"}, {M_REPLY_ALL, "Reply all", "reply-all", "R"},
     {M_FORWARD, "Forward", "forward", "F"}, {M_SEP, NULL, NULL, NULL},
@@ -37,6 +39,7 @@ static void run(jd_app *app, menu_item item)
     int64_t source = app->nrows ? app->rows[app->row].latest : 0;
     const jd_folder_row *f = app->nfolders ? &app->folders[app->folder] : NULL;
     switch (item) {
+    case M_NOT_JUNK: act_not_junk(app); break;
     case M_OPEN_TAB: reader_open(app, 1); break;
     case M_REPLY: compose_open(app, COMPOSE_REPLY, source); break;
     case M_REPLY_ALL: compose_open(app, COMPOSE_REPLY_ALL, source); break;
@@ -87,6 +90,8 @@ void menu_draw(jd_app *app)
     if (!m->open) return;
     jd_ui *ui = &app->ui;
     const entry *items = m->on_folder ? folder_menu : row_menu;
+    /* Not junk (and the line after it) only in a Junk folder */
+    if (items == row_menu && !in_junk(app)) items += 2;
     int n = 0;
     float h = 8;
     for (; items[n].item != M_NONE; n++) h += items[n].item == M_SEP ? 9 : 30;
@@ -129,6 +134,7 @@ static const char *help_lines[][2] = {
     {"Everywhere", NULL},
     {"Ctrl+Tab  Ctrl+1..9", "switch tabs"}, {"Ctrl+W", "close the tab"}, {"Ctrl+N", "new message"},
     {"Ctrl+,", "settings"}, {"Ctrl+R", "sync now"}, {"Ctrl+B", "sidebar full or icons only"}, {"?", "this help"},
+    {"Ctrl + wheel", "magnify around the pointer, until Ctrl is let go"},
     {"Modes", NULL},
     {"v", "visual: j/k extend the selection, then an action (Esc leaves)"},
     {"Esc  i  a  o", "compose: normal mode, back to insert (I A O: line start, end, line above)"},
@@ -138,7 +144,8 @@ static const char *help_lines[][2] = {
     {"Shift+arrows  Ctrl+A", "compose, typing: select; Ctrl+C Ctrl+X Ctrl+V copy, cut, paste"},
     {"Enter", "on a list item: the next item; on an empty one: the list ends"},
     {"Mail", NULL},
-    {"/  Ctrl+K", "search (Enter runs it, Ctrl+Enter asks the server too)"},
+    {"/  Ctrl+K", "the search bar, on any page: mail, folders, settings, events, people, actions as you type"},
+    {"↑ ↓  Enter", "in the search: pick a result and open it; nothing picked, Enter searches the mail (Ctrl+Enter the server too)"},
     {"from:  is:  after:", "search operators become pills after a space; dates DD-MM-YYYY"},
     {"Backspace", "at the start of the search: the last pill back into the text"},
     {"Tab  h  l", "folders / list / reader"},
@@ -154,6 +161,7 @@ static const char *help_lines[][2] = {
     {"Space  j  k", "scroll"}, {"o  Shift+P", "expand all, plain text or HTML"}, {"Shift+L", "light or dark mail page"},
     {"v", "a caret: h j k l w b 0 $ gg G move (k above the text: From, To, Cc, In); v again selects, y copies, Esc leaves"},
     {"Drag  Ctrl+C", "select text (body, subject, sender, To, Cc) and copy it; right click for a menu"}, {"Shift+A", "save all attachments"},
+    {"Ctrl+click", "a link opens it"}, {"Ctrl+=  Ctrl+-  Ctrl+0", "message text larger, smaller, as set (this session)"},
     {"Click  ↓", "an attachment opens it; its download icon saves it"},
     {"Ctrl+S  Ctrl+P", "save the message as .eml in Downloads, print"},
     {"Folders", NULL},
@@ -224,22 +232,26 @@ float help_content(jd_app *app, float x, float y, float w, const char *filter)
     return y;
 }
 
-/* The ? overlay: what is typed narrows it; Esc clears that first, then closes; a click outside closes */
+/* The ? overlay: what is typed narrows it; Esc or a click outside closes it, the typed filter going with it */
 void help_draw(jd_app *app)
 {
     static jd_field filter;
+    static int shown;
     if (!app->help) {
         jd_field_set(&filter, NULL);
+        shown = 0;
         return;
     }
+    /* opened by a press this frame (the sidebar's Keys): that press is not a click outside */
+    int opening = !shown;
+    shown = 1;
     if (IsKeyPressed(KEY_ESCAPE)) {
-        if (filter.len) jd_field_set(&filter, NULL);
-        else app->help = 0;
+        app->help = 0;
         return;
     }
     jd_field_input(&filter);
     float sw = jd_screen_w(), sh = jd_screen_h();
-    DrawRectangleV((Vector2){0, 0}, (Vector2){sw, sh}, ColorAlpha(BLACK, 0.45f));
+    fx_backdrop(ColorAlpha(BLACK, 0.45f));
     float w = sw - 80 < 820 ? sw - 80 : 820;
     float h = 0;
     {
@@ -259,11 +271,13 @@ void help_draw(jd_app *app)
     h += 124;
     if (h > sh - 40) h = sh - 40;
     Rectangle box = {(sw - w) / 2, (sh - h) / 2 > 20 ? (sh - h) / 2 : 20, w, h};
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(GetMousePosition(), box)) {
+    if (!opening && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(GetMousePosition(), box)) {
         app->help = 0;
         return;
     }
+    fx_shadow(box, 0.03f, 1, 1);
     DrawRectangleRounded(box, 0.03f, 8, JD_NORD1);
+    DrawRectangleRoundedLinesEx(box, 0.03f, 8, 1, JD_NORD2);
     jd_icon("keyboard", box.x + 24, box.y + 22, 20, JD_NORD8);
     jd_text(&app->ui, "Keyboard", box.x + 54, box.y + 22, 18, JD_NORD6, 1);
     filter.placeholder = "Type to find a key or an action";

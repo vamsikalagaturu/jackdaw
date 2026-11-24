@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5,6 +6,9 @@
 
 #include "app.h"
 #include "core/util.h"
+#include "platform.h"
+#include "ui/fx.h"
+#include "ui/icons.h"
 
 void dialog_open(jd_app *app, dialog_kind kind, action act, const char *title, const char *value)
 {
@@ -24,22 +28,26 @@ static void close_dialog(jd_app *app)
     app->dialog = (jd_dialog){0};
 }
 
-static int matches(const jd_folder_row *f, const char *filter)
+/* The picker's rows: with nothing typed, the tree as the sidebar shows it (a closed folder's folders left out);
+   typed, every folder whose path as shown (Inbox, not the server's INBOX. before each) has it */
+static int matches(jd_app *app, int i, const char *filter)
 {
-    return !filter[0] || strcasestr(f->name, filter) || strcasestr(folder_label(f), filter);
+    const jd_folder_row *f = &app->folders[i];
+    if (!filter[0]) return !folder_hidden(app, i);
+    return strcasestr(f->path, filter) || strcasestr(folder_label(f), filter);
 }
 
 static int pick_count(jd_app *app)
 {
     int n = 0;
-    for (int i = 0; i < app->nfolders; i++) n += matches(&app->folders[i], jd_field_text(&app->dialog.field));
+    for (int i = 0; i < app->nfolders; i++) n += matches(app, i, jd_field_text(&app->dialog.field));
     return n;
 }
 
 static const jd_folder_row *picked(jd_app *app)
 {
     for (int i = 0, k = 0; i < app->nfolders; i++)
-        if (matches(&app->folders[i], jd_field_text(&app->dialog.field)) && k++ == app->dialog.selected) return &app->folders[i];
+        if (matches(app, i, jd_field_text(&app->dialog.field)) && k++ == app->dialog.selected) return &app->folders[i];
     return NULL;
 }
 
@@ -185,21 +193,43 @@ static void rules_draw(jd_app *app, Rectangle box)
             box.y + box.height - 30, 13, JD_NORD4, 0);
 }
 
+/* the folder picker's list: how far it is scrolled, and the selection it last scrolled to */
+static float pick_scroll;
+static int pick_followed = -1;
+
 void dialog_draw(jd_app *app)
 {
     jd_dialog *d = &app->dialog;
-    if (!d->kind) return;
+    static dialog_kind shown_kind;
+    static double opened;
+    if (!d->kind) {
+        shown_kind = 0;
+        return;
+    }
+    if (d->kind != shown_kind) shown_kind = d->kind, opened = GetTime(), pick_scroll = 0, pick_followed = -1;
+    /* it rises into place as it opens: 10 px over 180 ms, easing out */
+    float t = fx_enabled() ? fminf(1, (float)(GetTime() - opened) / 0.18f) : 1, rise = 1 - (1 - t) * (1 - t) * (1 - t);
     jd_ui *ui = &app->ui;
     if (IsKeyPressed(KEY_ESCAPE)) {
         close_dialog(app);
         return;
     }
+    /* a phone has no Esc: a tap outside the box cancels, past the tap that opened it; the shared settings'
+       question is not one to cancel */
+    int tap_away = plat_touch() && GetTime() - opened > 0.25 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+                   d->act != ACT_USE_SHARED;
     if (d->kind == DLG_RULES) {
         float sw = jd_screen_w(), sh = jd_screen_h();
-        DrawRectangleV((Vector2){0, 0}, (Vector2){sw, sh}, (Color){0x2e, 0x34, 0x40, 0xb0});
-        float rw = sw - 32 < 720 ? sw - 32 : 720;
-        Rectangle box = {(sw - rw) / 2.0f, sh * 0.15f, rw, 420};
+        fx_backdrop((Color){0x2e, 0x34, 0x40, 0xb0});
+        float rw = sw - 32 < 720 ? sw - 32 : 720, rh = sh - 32 < 420 ? sh - 32 : 420;
+        Rectangle box = {(sw - rw) / 2.0f, (sh - rh) / 2 + 10 * (1 - rise), rw, rh};
+        if (tap_away && !CheckCollisionPointRec(GetMousePosition(), box)) {
+            close_dialog(app);
+            return;
+        }
+        fx_shadow(box, 0.04f, rise, 1);
         DrawRectangleRounded(box, 0.04f, 8, JD_NORD1);
+        DrawRectangleRoundedLinesEx(box, 0.04f, 8, 1, JD_NORD2);
         jd_text(ui, "Rules", box.x + 20, box.y + 18, 16, JD_NORD6, 1);
         rules_draw(app, box);
         return;
@@ -213,6 +243,15 @@ void dialog_draw(jd_app *app)
         jd_field_input(&d->field);
         if (d->field.len != before) d->selected = 0;
     }
+    /* the tree (nothing typed): Right opens the selected folder, Left closes it */
+    if (d->kind == DLG_PICK_FOLDER && !d->field.len && (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_LEFT))) {
+        for (int i = 0, k = 0; i < app->nfolders; i++) {
+            if (!matches(app, i, "")) continue;
+            if (k++ != d->selected) continue;
+            if (folder_has_children(app, i) && app->folders[i].collapsed == IsKeyPressed(KEY_RIGHT)) toggle_collapsed(app, i);
+            break;
+        }
+    }
     if (d->kind == DLG_PICK_FOLDER) {
         int n = pick_count(app);
         if (IsKeyPressed(KEY_DOWN) || (IsKeyPressed(KEY_N) && IsKeyDown(KEY_LEFT_CONTROL))) d->selected++;
@@ -222,45 +261,111 @@ void dialog_draw(jd_app *app)
     }
 
     float sw = jd_screen_w(), sh = jd_screen_h();
-    DrawRectangleV((Vector2){0, 0}, (Vector2){sw, sh}, (Color){0x2e, 0x34, 0x40, 0xb0});
-    /* a phone's screen is narrower than the box */
-    float w = sw - 32 < 520 ? sw - 32 : 520, h = d->kind == DLG_PICK_FOLDER ? 420 : d->kind == DLG_PROMPT ? 150 : 130;
-    Rectangle box = {(sw - w) / 2, sh * 0.2f, w, h};
+    fx_backdrop((Color){0x2e, 0x34, 0x40, 0xb0});
+    /* a phone's screen is narrower than the box; 22 px of room on every side of what it holds */
+    float w = sw - 32 < 520 ? sw - 32 : 520;
+    float h = d->kind == DLG_PICK_FOLDER ? fminf(640, sh - 64) : d->kind == DLG_PROMPT ? (plat_touch() ? 158 : 140) : 120;
+    if (h > sh - 32) h = sh - 32;
+    Rectangle box = {(sw - w) / 2, (sh - h) / 2 + 10 * (1 - rise), w, h};
+    if (tap_away && !CheckCollisionPointRec(GetMousePosition(), box)) {
+        close_dialog(app);
+        return;
+    }
+    fx_shadow(box, 0.04f, rise, 1);
     DrawRectangleRounded(box, 0.04f, 8, JD_NORD1);
-    float x = box.x + 20, y = box.y + 18;
-    jd_text_fit(ui, d->title, x, y, w - 40, 16, JD_NORD6, 1);
+    DrawRectangleRoundedLinesEx(box, 0.04f, 8, 1, JD_NORD2);
+    float x = box.x + 22, y = box.y + 22;
+    jd_text_fit(ui, d->title, x, y, w - 44, 16, JD_NORD6, 1);
     y += 34;
     if (d->kind == DLG_CONFIRM && d->act == ACT_USE_SHARED) {
-        if (jd_button(ui, "Use those", (Rectangle){x, y + 10, 130, 34}, 1)) confirm(app);
-        else if (jd_button(ui, "Keep this device's", (Rectangle){x + 142, y + 10, 170, 34}, 0)) {
+        if (jd_button(ui, "Use those", (Rectangle){x, y + 8, 130, 34}, 1)) confirm(app);
+        else if (jd_button(ui, "Keep this device's", (Rectangle){x + 142, y + 8, 170, 34}, 0)) {
             close_dialog(app);
             share_decided(app, 0);
         }
         return;
     }
     if (d->kind == DLG_CONFIRM) {
-        if (jd_button(ui, d->act == ACT_LOGOUT ? "Log out" : "Delete", (Rectangle){x, y + 10, 110, 34}, 1)) confirm(app);
-        else if (jd_button(ui, "Cancel", (Rectangle){x + 122, y + 10, 110, 34}, 0)) close_dialog(app);
+        if (jd_button(ui, d->act == ACT_LOGOUT ? "Log out" : "Delete", (Rectangle){x, y + 8, 110, 34}, 1)) confirm(app);
+        else if (jd_button(ui, "Cancel", (Rectangle){x + 122, y + 8, 110, 34}, 0)) close_dialog(app);
         return;
     }
-    jd_field_draw(ui, &d->field, (Rectangle){x, y, w - 40, 34}, 1);
+    jd_field_draw(ui, &d->field, (Rectangle){x, y, w - 44, 34}, 1);
     y += 46;
+    if (d->kind == DLG_PROMPT && plat_touch()) {
+        if (jd_button(ui, "OK", (Rectangle){x, y, 110, 34}, 1)) confirm(app);
+        else if (jd_button(ui, "Cancel", (Rectangle){x + 122, y, 110, 34}, 0)) close_dialog(app);
+        return;
+    }
     if (d->kind == DLG_PROMPT) {
         jd_text(ui, "Enter to confirm, Esc to cancel.", x, y, 13, JD_NORD4, 0);
         return;
     }
-    for (int i = 0, k = 0; i < app->nfolders && y < box.y + box.height - 30; i++) {
-        const jd_folder_row *f = &app->folders[i];
-        if (!matches(f, jd_field_text(&d->field))) continue;
-        Rectangle row = {x - 6, y - 4, w - 28, 26};
-        if (k == d->selected) DrawRectangleRounded(row, 0.2f, 6, JD_NORD2);
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), row)) {
+    /* As the sidebar names them: the folder's icon, the folders it is in (muted), then its own name. The list
+       scrolls (wheel, scrollbar), and follows the selection when keys move it. */
+    Rectangle list = {box.x + 8, y - 6, w - 16, box.y + box.height - 14 - (y - 6)};
+    float content = (float)pick_count(app) * 28 + 8;
+    if (d->selected != pick_followed) {
+        float sy = (float)d->selected * 28;
+        if (sy < pick_scroll) pick_scroll = sy;
+        if (sy + 36 > pick_scroll + list.height) pick_scroll = sy + 36 - list.height;
+        pick_followed = d->selected;
+    }
+    int on_list = CheckCollisionPointRec(GetMousePosition(), list);
+    if (on_list) pick_scroll -= jd_wheel_y(28 * 3);
+    if (pick_scroll > content - list.height) pick_scroll = content - list.height;
+    if (pick_scroll < 0) pick_scroll = 0;
+    float bar = content > list.height ? 10 : 0;
+    /* nothing typed: the tree, each folder indented under the one it is in, an arrow opening or closing it */
+    int tree = !d->field.len;
+    jd_scissor(list.x, list.y, list.width, list.height);
+    for (int i = 0, k = 0; i < app->nfolders; i++) {
+        jd_folder_row *f = &app->folders[i];
+        if (!matches(app, i, jd_field_text(&d->field))) continue;
+        y = list.y + 10 + (float)k * 28 - pick_scroll;
+        if (y + 24 < list.y || y - 4 > list.y + list.height) {
+            k++;
+            continue;
+        }
+        Rectangle row = {x - 6, y - 4, w - 32 - bar, 26};
+        int sel = k == d->selected;
+        if (sel) DrawRectangleRounded(row, 0.2f, 6, JD_NORD2);
+        float ix = tree ? x + 18 + 16 * (float)folder_depth(f) : x;
+        if (tree && folder_has_children(app, i)) {
+            Rectangle arrow = {ix - 20, y - 4, 20, 26};
+            int on_arrow = on_list && CheckCollisionPointRec(GetMousePosition(), arrow);
+            jd_icon(f->collapsed ? "chevron-right" : "chevron-down", arrow.x + 3, y + 2, 14, on_arrow ? JD_NORD8 : JD_NORD4);
+            if (on_arrow && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                toggle_collapsed(app, i);
+                jd_scissor_end();
+                return;
+            }
+        }
+        if (on_list && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), row)) {
             d->selected = k;
+            jd_scissor_end();
             confirm(app);
             return;
         }
-        jd_text_fit(ui, f->name, x, y, w - 50, 15, JD_NORD6, 0);
-        y += 28;
+        jd_icon(folder_icon(f), ix, y + 1, 16, sel ? JD_NORD8 : JD_NORD4);
+        const char *leaf = folder_label(f);
+        float tx = ix + 26, room = x + w - 56 - tx;
+        /* typed: the folders it is in before its name (folder_label is the path's last part, except INBOX's) */
+        if (!tree && f->delim && strcasecmp(f->name, "INBOX") && leaf != f->path) {
+            char parents[256];
+            int n = 0;
+            for (const char *s = f->path; s < leaf - 1 && n < (int)sizeof parents - 4; s++) {
+                if (*s == f->delim) parents[n++] = ' ', parents[n++] = '/', parents[n++] = ' ';
+                else parents[n++] = *s;
+            }
+            snprintf(parents + n, sizeof parents - (size_t)n, " / ");
+            float pw = fminf(jd_text_width(ui, parents, 15, 0), room * 0.6f);
+            jd_text_fit(ui, parents, tx, y, pw, 15, JD_MUTED, 0);
+            tx += pw, room -= pw;
+        }
+        jd_text_fit(ui, leaf, tx, y, room - bar, 15, JD_NORD6, sel);
         k++;
     }
+    jd_scissor_end();
+    jd_scrollbar(list, content, &pick_scroll);
 }

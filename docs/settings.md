@@ -46,7 +46,7 @@ again.
 |---|---|
 | `[[account]]` | one per mail account, the first first (its folder carries the shared settings): `name`, `address`, `username`, `imap_host` / `imap_port` / `imap_security`, `smtp_host` / `smtp_port` / `smtp_security`, `sieve_port` (4190). A single `[account]`, as earlier versions wrote it, is read as the only one |
 | `[theme]` | `scheme` = `dark` / `light` / `system` (as light or dark as the desktop theme); colour roles as in the desktop theme's `~/.local/state/omarchy/current/theme/colors.toml`, which jackdaw follows when it is there: `accent`, `background`, `dark_background`, `lighter_background`, `foreground`, `bright_foreground`, `red`, `yellow`, `green`, `blue`, `magenta`, `cyan`, `orange` (`"#rrggbb"`); otherwise Nord. The same as in ferret and cuttle |
-| `[view]` | scale, density, snippets, grouping, reading pane right/bottom/off, sidebar full/rail, tabs top/sidebar, `list_text` and `reader_text` sizes, pane sizes, `calendar` = `day` / `week` / `month` / `agenda`: the view the calendar opens in (absent: week, agenda on a phone) |
+| `[view]` | scale, density, snippets, `effects` (true: sent mail folds into a paper plane that circles while Undo waits, deleted mail burns away, dialogs rise over a frosted page; per device), grouping, reading pane right/bottom/off, sidebar full/rail, tabs top/sidebar, `list_text` and `reader_text` sizes, pane sizes, `calendar` = `day` / `week` / `month` / `agenda`: the view the calendar opens in (absent: week, agenda on a phone) |
 | `[fonts]` | `ui`, `list`, `reader`, `mono` as fontconfig families, `mono_plain` |
 | `[reading]` | format, mark_read, `remote_images` = ask/always, `images_from` = trusted senders |
 | `[notifications]` | enabled, when_focused |

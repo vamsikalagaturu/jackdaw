@@ -126,7 +126,7 @@ void jd_prefs_load(jd_prefs *p)
     *p = (jd_prefs){.conversations = 1, .scale = 100, .snippets = 1, .mark_read = 1, .notify = 1, .notify_focused = 1, .push = 1, .update_check = 1,
                     .prefetch_days = 30, .check_minutes = 5, .list_text = 15, .reader_text = 15,
                     .attachment_list = 1, .markdown = 1, .cal_reminders = 1, .cal_view = -1, .share = 1,
-                    .undo_seconds = 10};
+                    .undo_seconds = 10, .effects = 1};
     jd_toml *t = jd_toml_load(jd_settings_path(), NULL, 0);
     if (!t) return;
     p->attachment_list = jd_toml_bool(t, "compose", "attachment_list", 1);
@@ -151,6 +151,7 @@ void jd_prefs_load(jd_prefs *p)
     for (int i = 0; i < 13; i++) p->theme_roles[i] = jd_strdup(jd_toml_str(t, "theme", jd_theme_roles[i]));
     p->compact = jd_streq(jd_toml_str(t, "view", "density"), "compact");
     p->snippets = jd_toml_bool(t, "view", "snippets", 1);
+    p->effects = jd_toml_bool(t, "view", "effects", 1);
     p->prefer_plain = jd_streq(jd_toml_str(t, "reading", "format"), "plain");
     p->mark_read = jd_toml_bool(t, "reading", "mark_read", 1);
     p->notify = jd_toml_bool(t, "notifications", "enabled", 1);
@@ -447,10 +448,11 @@ int jd_settings_save(const jd_account *const *accounts, int naccounts, const jd_
     }
     static const char *readers[] = {"right", "bottom", "off"};
     theme_text(&b, p);
-    jd_buf_addf(&b, "\n[view]\nscale = %d\ndensity = \"%s\"\nsnippets = %s\nconversations = %s\n"
+    jd_buf_addf(&b, "\n[view]\nscale = %d\ndensity = \"%s\"\nsnippets = %s\neffects = %s\nconversations = %s\n"
                     "reader = \"%s\"\nsidebar = \"%s\"\ntabs = \"%s\"\nlist_text = %d\nreader_text = %d\n",
                 p->scale ? p->scale : 100, p->compact ? "compact" : "comfortable",
-                p->snippets ? "true" : "false", p->conversations ? "true" : "false", readers[p->reader_pos % 3],
+                p->snippets ? "true" : "false", p->effects ? "true" : "false", p->conversations ? "true" : "false",
+                readers[p->reader_pos % 3],
                 p->sidebar_rail ? "rail" : "full", p->tabs_side ? "sidebar" : "top", p->list_text ? p->list_text : 15,
                 p->reader_text ? p->reader_text : 15);
     if (p->cal_view >= 0 && p->cal_view < 4) jd_buf_addf(&b, "calendar = \"%s\"\n", calviews[p->cal_view]);

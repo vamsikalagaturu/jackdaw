@@ -97,6 +97,23 @@ Vector2 __real_GetMouseWheelMoveV(void);
 float __wrap_GetMouseWheelMove(void) { return frame_y; }
 Vector2 __wrap_GetMouseWheelMoveV(void) { return (Vector2){frame_x, frame_y}; }
 
+/* Keys. raylib counts a press only when the key is down at one frame's poll and was up at the poll before, so a
+   press and its release read in the same poll are lost to IsKeyPressed, though they reach GetKeyPressed's queue.
+   Some keyboards send a tap that way: the record (JD_DEBUG_KEYS) showed every Esc tap arriving released, the key
+   in the queue, and Esc needing four or five taps. The frame's queue is taken here; a key in it counts as pressed.
+   IsKeyPressed is wrapped at link time (CMakeLists.txt); nothing else reads GetKeyPressed. */
+static unsigned char tapped[512];
+
+bool __real_IsKeyPressed(int key);
+bool __wrap_IsKeyPressed(int key) { return __real_IsKeyPressed(key) || (key > 0 && key < 512 && tapped[key]); }
+
+static void take_taps(void)
+{
+    memset(tapped, 0, sizeof tapped);
+    for (int k = GetKeyPressed(); k; k = GetKeyPressed())
+        if (k > 0 && k < 512) tapped[k] = 1;
+}
+
 void plat_init(void) {}
 /* GetWindowHandle is the native window (a wl_surface on Wayland), not GLFW's: raylib's window is the one whose
    context it made current */
@@ -109,6 +126,7 @@ void plat_window_ready(void)
 void plat_frame(int typing)
 {
     (void)typing;
+    take_taps();
     double k = 1 - exp(-GetFrameTime() / 0.05);
     /* raylib's own value: what its automation events (the tests) set */
     Vector2 raylib = __real_GetMouseWheelMoveV();

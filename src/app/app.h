@@ -221,6 +221,9 @@ void form_frame(jd_app *app);
 float help_content(jd_app *app, float x, float y, float w, const char *filter);
 
 void mail_frame(jd_app *app);
+/* a toast's box this frame; on_floating: the mouse is over one drawn last frame, so the page under it takes no click */
+void floating_add(Rectangle r);
+int on_floating(void);
 void mail_reload(jd_app *app);
 /* the mail view emptied (folders, list, reader, search, status), as before another account's comes in */
 void mail_view_reset(jd_app *app);
@@ -231,11 +234,24 @@ void mail_select_inbox(jd_app *app);
 void mail_open_message(jd_app *app, int64_t id);
 
 void sidebar_draw(jd_app *app, Rectangle r);
+/* where the folder with this special use ("Drafts") was drawn this moment, at its icon; 0 when it is not in sight */
+int sidebar_special_at(const char *use, Vector2 *at);
 int sidebar_keys(jd_app *app);
 const char *folder_label(const jd_folder_row *f);
+/* the icon the sidebar shows for f: its special use's (Inbox, Sent, Trash, ...) or a folder's */
+const char *folder_icon(const jd_folder_row *f);
 /* shows the folder with this special use ("Sent", "Drafts", ...) or "INBOX"; 0 when there is none */
 int folder_go(jd_app *app, const char *use);
+/* folder i shown in the mail view */
+void folder_select(jd_app *app, int i);
 int folder_hidden(jd_app *app, int i);
+/* app->folders put in tree order (each folder followed by those inside it), after every load */
+void folders_tree_order(jd_app *app);
+/* how deep a folder is in the tree, whether any folder is inside folder i, and folder i opened or closed (kept in
+   the store, as the sidebar's arrow does) */
+int folder_depth(const jd_folder_row *f);
+int folder_has_children(jd_app *app, int i);
+void toggle_collapsed(jd_app *app, int i);
 
 void list_reload(jd_app *app);
 /* the coloured circle with initials the list and the reader show for a sender */
@@ -261,6 +277,8 @@ typedef struct {
     Rectangle hints_box;
 } jd_qfield;
 void qfield_clear(jd_qfield *q);
+/* a saved query back in the field: its operators as pills, the rest as text */
+void qfield_set(jd_qfield *q, const char *query);
 /* the pills and the typed words as one query; malloc'd, NULL when empty */
 char *qfield_query(const jd_qfield *q);
 /* typing, Backspace into the last pill, hints with Up/Down/Tab; 1 when Enter was pressed with no hint picked */
@@ -274,11 +292,29 @@ float query_pills_draw(jd_app *app, const char *query, float x, float y, float w
 /* the search as one query: scope (with_scope), quick filters, pills and typed words; NULL when empty. free() it */
 char *search_full_query(jd_app *app, int with_scope);
 void list_draw(jd_app *app, Rectangle r);
+/* the mail search box's parts, which search.c places in the bar over every page: the box with its pills, the
+   operator hints under it (search_hints_open: how many), its keys, and the focus moved into it */
+void search_box_draw(jd_app *app, float x, float y, float w);
+void search_hints_draw(jd_app *app, float x, float y, float w);
+int search_hints_open(jd_app *app);
+void search_hints_forget(void);
+int search_box_keys(jd_app *app);
+void search_focus(jd_app *app);
+/* the box's text and pills run as the mail search, shown in the mail view */
+void search_run_mail(jd_app *app);
+/* search.c: the bar over every page (drawn before the page), what it finds (drawn after, over the page), its keys
+   while it has the focus */
+void search_bar(jd_app *app, Rectangle r);
+void search_bar_overlay(jd_app *app);
+void search_bar_keys(jd_app *app);
 int list_keys(jd_app *app);
 /* gg and g + letter (folders by role), before any pane's keys */
 int go_keys(jd_app *app);
 /* the actions on the selection (the picked rows, else the current one) */
 void act_archive(jd_app *app);
+/* the selection out of Junk, back to the Inbox (the rules then run on it there); in_junk: the folder shown is Junk */
+void act_not_junk(jd_app *app);
+int in_junk(jd_app *app);
 void act_delete(jd_app *app);
 void act_toggle_read(jd_app *app);
 void act_toggle_flag(jd_app *app);
@@ -305,6 +341,11 @@ void menu_draw(jd_app *app);
 void help_draw(jd_app *app);
 
 void settings_open(jd_app *app);
+/* the Settings entries text is in (their names, sections and words they are known by): up to max indexes; an
+   entry's name and section; and Settings open at one, scrolled to it and tinted a moment */
+int settings_find(const char *text, int *out, int max);
+const char *settings_entry(int i, const char **section);
+void settings_goto(jd_app *app, int i);
 /* Settings, at its Calendar section */
 void settings_show_calendar(jd_app *app);
 void settings_keys(jd_app *app);
@@ -347,6 +388,9 @@ int conv_keys(jd_app *app, jd_conv *c);
 /* a keyboard caret in a reader: moving freely (reader_caret), or selecting (reader_visual) */
 int reader_visual(void);
 int reader_caret(void);
+/* the reader's zoom this session, on top of Settings > Message text: dir 1 in, -1 out, 0 back to 100% */
+void reader_zoom(jd_app *app, int dir);
+int reader_zoom_percent(void);
 /* the selected list row into the preview pane, or into a new tab */
 void reader_open(jd_app *app, int in_tab);
 void reader_close(jd_app *app);
@@ -384,6 +428,14 @@ void calendar_stop(jd_app *app);
 /* every frame: the worker's events, reminders due */
 void calendar_tick(jd_app *app);
 void calendar_open(jd_app *app);
+/* events whose title or place has text, for the search bar; and the calendar opened at one of them */
+typedef struct {
+    int64_t id, start;
+    int all_day;
+    char title[160], place[120];
+} cal_found;
+int calendar_find(const char *text, cal_found *out, int max);
+void calendar_show_event(jd_app *app, const char *text, int64_t id);
 void calendar_keys(jd_app *app);
 void calendar_draw(jd_app *app, Rectangle r);
 /* the event editor has the keyboard */

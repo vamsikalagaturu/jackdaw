@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(jackdaw VERSION 0.3.3 DESCRIPTION "Mail client for Linux and Android" LANGUAGES C CXX)
+project(jackdaw VERSION 0.3.4 DESCRIPTION "Mail client for Linux and Android" LANGUAGES C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 # litehtml (HTML mail) is C++17; everything else is C
@@ -196,8 +196,8 @@ else()
   pkg_check_modules(JD_SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
   pkg_check_modules(JD_FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
   target_link_libraries(jdapp PUBLIC PkgConfig::JD_SYSTEMD PkgConfig::JD_FONTCONFIG)
-  # the wheel as platform/linux/app_linux.c adds it up and eases it
-  target_link_options(jdapp INTERFACE -Wl,--wrap=GetMouseWheelMove -Wl,--wrap=GetMouseWheelMoveV)
+  # the wheel as platform/linux/app_linux.c adds it up and eases it; a key tapped within one poll still pressed
+  target_link_options(jdapp INTERFACE -Wl,--wrap=GetMouseWheelMove -Wl,--wrap=GetMouseWheelMoveV -Wl,--wrap=IsKeyPressed)
   pkg_check_modules(JD_LIBSECRET IMPORTED_TARGET libsecret-1>=0.19)
   if(JD_LIBSECRET_FOUND)
     target_compile_definitions(jdapp PRIVATE JD_HAVE_LIBSECRET)

@@ -14,6 +14,7 @@
 #include "mail/mime.h"
 #include "mail/send.h"
 #include "platform.h"
+#include "ui/fx.h"
 #include "ui/html.h"
 #include "ui/icons.h"
 
@@ -100,9 +101,21 @@ const char *compose_title(struct jd_compose *c)
     return c->fields[C_SUBJECT].len ? jd_field_text(&c->fields[C_SUBJECT]) : "New message";
 }
 
+/* Send waits for the end of the compose page's frame: its paper plane is folded from the page as drawn */
+static struct jd_compose *send_asked;
+/* Send later waits likewise, a frame more (the frame it was asked in still drew the menu over the page): the
+   envelope is folded from the page as drawn, later_page being where it was */
+static struct {
+    struct jd_compose *c;
+    int64_t at;
+    int waited;
+} later_asked;
+
 void compose_free(jd_app *app, struct jd_compose *c)
 {
     if (!c) return;
+    if (send_asked == c) send_asked = NULL;
+    if (later_asked.c == c) later_asked.c = NULL;
     if (c->holding && app->sync) jd_sync_hold(app->sync, c->msgid, 0);
     jd_editor_free(&c->body);
     for (int i = 0; i <= C_SUBJECT; i++) jd_field_free(&c->fields[i]);
@@ -591,8 +604,11 @@ void compose_held_tick(jd_app *app)
             held[k].until = 0;
             if (!release(app, held[k].c)) {
                 struct jd_compose *c = held[k].c;
+                fx_plane_recall(c->serial);
                 unhold(k--);
                 reattach(app, c);
+            } else {
+                fx_plane_release(held[k].c->serial);
             }
         }
 }
@@ -609,6 +625,7 @@ float compose_held_draw(jd_app *app, float y)
         float maxw = jd_screen_w() - 200, tw = jd_text_width(ui, label, 14, 0);
         if (tw > maxw) tw = maxw;
         Rectangle box = {(jd_screen_w() - tw - 130) / 2, y - 52, tw + 130, 44};
+        floating_add(box);
         DrawRectangleRounded((Rectangle){box.x + 2, box.y + 3, box.width, box.height}, 0.3f, 6, ColorAlpha(BLACK, 0.3f));
         DrawRectangleRounded(box, 0.3f, 6, JD_NORD3);
         jd_text_fit(ui, label, box.x + 16, box.y + 14, tw, 14, JD_NORD6, 0);
@@ -619,6 +636,7 @@ float compose_held_draw(jd_app *app, float y)
         jd_text(ui, "Undo", undo.x + 30, undo.y + 7, 14, JD_NORD8, 1);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             struct jd_compose *c = held[k].c;
+            fx_plane_recall(c->serial);
             unhold(k);
             reattach(app, c);
             return y;
@@ -631,7 +649,7 @@ float compose_held_draw(jd_app *app, float y)
 void compose_held_flush(jd_app *app)
 {
     for (int k = 0; k < nheld; k++)
-        if (held[k].until > 0) held[k].until = 0, release(app, held[k].c);
+        if (held[k].until > 0) held[k].until = 0, release(app, held[k].c), fx_plane_release(held[k].c->serial);
 }
 
 void compose_held_free(jd_app *app)
@@ -658,6 +676,13 @@ static int save_draft(jd_app *app, struct jd_compose *c)
     return 1;
 }
 
+static Rectangle later_page;
+
+static void ask_schedule(struct jd_compose *c, int64_t at)
+{
+    later_asked.c = c, later_asked.at = at, later_asked.waited = 0;
+}
+
 /* saved to Drafts with the time, and its tab closed */
 static void schedule(jd_app *app, struct jd_compose *c, int64_t at)
 {
@@ -678,6 +703,12 @@ static void schedule(jd_app *app, struct jd_compose *c, int64_t at)
         return;
     }
     scheduled_serial = c->serial, scheduled_for = at;
+    if (later_page.width > 0) {
+        Vector2 drafts;
+        int seen = sidebar_special_at("Drafts", &drafts);
+        fx_envelope(later_page, drafts, seen);
+        later_page = (Rectangle){0};
+    }
     for (int t = 0; t < app->ntabs; t++)
         if (app->tabs[t].kind == TAB_COMPOSE && app->tabs[t].compose == c) {
             tab_close(app, t);
@@ -695,7 +726,7 @@ void compose_schedule_typed(jd_app *app, const char *text)
         return;
     }
     tm.tm_year -= 1900, tm.tm_mon -= 1;
-    schedule(app, c, (int64_t)mktime(&tm));
+    ask_schedule(c, (int64_t)mktime(&tm));
 }
 
 static void later_menu(jd_app *app, struct jd_compose *c)
@@ -720,7 +751,7 @@ static void later_menu(jd_app *app, struct jd_compose *c)
                              {labels[2], "calendar", NULL, 0}, {"Pick a time...", "pencil", NULL, 0}};
     int i = jd_popup_draw(&app->ui, &c->later, items, 4);
     if (i >= 0 && i < 3) {
-        schedule(app, c, at[i]);
+        ask_schedule(c, at[i]);
     } else if (i == 3) {
         char typed[32];
         strftime(typed, sizeof typed, "%Y-%m-%d %H:%M", &tomorrow);
@@ -969,7 +1000,7 @@ static float format_bar(jd_app *app, struct jd_compose *c, float x, float y, flo
     }
     if (x + w - bx - 12 > 160)
         jd_text_fit(ui, "Markdown: sent as formatted HTML and as this text", bx + 12, y + 9, x + w - bx - 12, 13, JD_MUTED, 0);
-    if (tip) jd_tooltip(tip, tip_x, y + 34);
+    if (tip && !plat_touch()) jd_tooltip(tip, tip_x, y + 34);
     return y + 36;
 }
 
@@ -1134,7 +1165,7 @@ void compose_keys(jd_app *app, struct jd_compose *c)
     int shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     if (c->menu.open || c->later.open) return;
     if (ctrl && (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))) {
-        send(app, c);
+        send_asked = c;
         return;
     }
     if (ctrl && IsKeyPressed(KEY_S)) {
@@ -1373,7 +1404,7 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
     Rectangle battach = narrow ? (Rectangle){x + w - 160, y, 48, 40} : (Rectangle){x + 268, y, 110, 36};
     Rectangle bdraft = narrow ? (Rectangle){x + w - 104, y, 48, 40} : (Rectangle){x + 388, y, 136, 36};
     Rectangle bdiscard = narrow ? (Rectangle){x + w - 48, y, 48, 40} : (Rectangle){x + w - 116, y, 116, 36};
-    if (jd_icon_button(ui, "send", c->sending ? "Sending..." : "Send", bsend, 1)) send(app, c);
+    if (jd_icon_button(ui, "send", c->sending ? "Sending..." : "Send", bsend, 1)) send_asked = c;
     if (jd_icon_button(ui, "calendar", narrow ? NULL : "Later", blater, 0) && !c->sending) jd_popup_open(&c->later);
     if (jd_icon_button(ui, "paperclip", narrow ? NULL : "Attach", battach, 0) && plat_pick_files("Attach files") != 0)
         snprintf(c->error, sizeof c->error, "No file chooser available; drop files on the window instead.");
@@ -1410,4 +1441,22 @@ void compose_draw(jd_app *app, struct jd_compose *c, Rectangle r)
     }
     body_menu(app, c);
     later_menu(app, c);
+    if (later_asked.c == c && later_asked.waited++) {
+        later_asked.c = NULL;
+        later_page = r;
+        schedule(app, c, later_asked.at);
+        later_page = (Rectangle){0};
+        return;
+    }
+    if (send_asked == c) {
+        send_asked = NULL;
+        int was = c->sending;
+        send(app, c);
+        if (c->sending && !was) {
+            fx_plane_launch(c->serial, r);
+            int waits = 0;
+            for (int k = 0; k < nheld; k++) waits |= held[k].c == c;
+            if (!waits) fx_plane_release(c->serial);
+        }
+    }
 }

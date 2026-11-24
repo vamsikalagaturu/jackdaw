@@ -207,7 +207,7 @@ static float picker_draw(jd_app *app, const jd_calendar_row *c, float x, float y
         if (focus) *focus = CF_HEX;
     }
     Rectangle reset = {px + 160, py, 72, 32};
-    if (c->user_color && CheckCollisionPointRec(m, reset)) jd_tooltip("Back to the server's colour", reset.x - 40, reset.y + 38);
+    if (c->user_color && CheckCollisionPointRec(m, reset) && !plat_touch()) jd_tooltip("Back to the server's colour", reset.x - 40, reset.y + 38);
     if (c->user_color && jd_button(ui, "Reset", reset, 0)) {
         if (cal_store) jd_store_calendar_recolor(cal_store, cp.cal, NULL);
         picker_set(hex_color(c->server_color));
@@ -1711,16 +1711,16 @@ static float header(jd_app *app, Rectangle r)
     Rectangle sync = {nx - 44, y, 38, 32};
     if (jd_icon_button(ui, NULL, NULL, sync, 0) && !app->dialog.kind) sync_now(app);
     jd_icon("refresh-cw", sync.x + 11, sync.y + 8, 16, calendar_status() ? JD_NORD8 : JD_NORD6);
-    if (CheckCollisionPointRec(GetMousePosition(), sync)) jd_tooltip("Sync now (r)", sync.x - 40, sync.y + 38);
+    if (CheckCollisionPointRec(GetMousePosition(), sync) && !plat_touch()) jd_tooltip("Sync now (r)", sync.x - 40, sync.y + 38);
     /* the calendar's settings: accounts, which calendars sync, the view it opens in */
     Rectangle gear = {sync.x - 44, y, 38, 32};
     if (jd_icon_button(ui, "settings", NULL, gear, 0) && !app->dialog.kind) settings_show_calendar(app);
-    if (CheckCollisionPointRec(GetMousePosition(), gear)) jd_tooltip("Calendar settings", gear.x - 60, gear.y + 38);
+    if (CheckCollisionPointRec(GetMousePosition(), gear) && !plat_touch()) jd_tooltip("Calendar settings", gear.x - 60, gear.y + 38);
     /* which synced calendars show: a list under this button */
     float cw = labelled ? 126 : 38;
     Rectangle cals = {gear.x - cw - 6, y, cw, 32};
     if (jd_icon_button(ui, "eye", labelled ? "Calendars" : NULL, cals, 0) && !app->dialog.kind) shown_open = !shown_open;
-    if (!labelled && CheckCollisionPointRec(GetMousePosition(), cals)) jd_tooltip("Show calendars", cals.x - 40, cals.y + 38);
+    if (!labelled && CheckCollisionPointRec(GetMousePosition(), cals) && !plat_touch()) jd_tooltip("Show calendars", cals.x - 40, cals.y + 38);
     shown_box.x = cals.x + cals.width - 300 < r.x + 8 ? r.x + 8 : cals.x + cals.width - 300;
     shown_box.y = y + 38;
     Rectangle find = {cals.x - 44, y, 38, 32};
@@ -1728,7 +1728,7 @@ static float header(jd_app *app, Rectangle r)
         if (cs.open) search_close();
         else search_open();
     }
-    if (CheckCollisionPointRec(GetMousePosition(), find)) jd_tooltip("Search events (/)", find.x - 50, find.y + 38);
+    if (CheckCollisionPointRec(GetMousePosition(), find) && !plat_touch()) jd_tooltip("Search events (/)", find.x - 50, find.y + 38);
     float sx = narrow ? x : find.x - segw - 12, sy = narrow ? y + 40 : y;
     int cur = 0;
     for (int i = 0; i < 4; i++)
@@ -2049,6 +2049,32 @@ static void search_run(jd_app *app)
         occ t = cv.occs[i];
         cv.occs[i] = cv.occs[j], cv.occs[j] = t;
     }
+}
+
+int calendar_find(const char *text, cal_found *out, int max)
+{
+    if (!cal_store || !text[0]) return 0;
+    int n, k = 0;
+    jd_event_row *rows = jd_store_events_search(cal_store, text, &n);
+    for (int i = 0; i < n && k < max; i++) {
+        out[k].id = rows[i].id, out[k].start = rows[i].dtstart, out[k].all_day = rows[i].all_day;
+        snprintf(out[k].title, sizeof out[k].title, "%s", rows[i].summary ? rows[i].summary : "(no title)");
+        snprintf(out[k].place, sizeof out[k].place, "%s", rows[i].location ? rows[i].location : "");
+        k++;
+    }
+    jd_event_rows_free(rows, n);
+    return k;
+}
+
+void calendar_show_event(jd_app *app, const char *text, int64_t id)
+{
+    calendar_open(app);
+    search_open();
+    cs.focus = 0;
+    jd_field_set(&cs.q, text);
+    search_run(app);
+    for (int i = 0; i < cv.nocc; i++)
+        if (cv.occs[i].event == id) cv.sel = cv.detail = i;
 }
 
 /* the search's results, latest first: date, time, title and place */
@@ -2667,7 +2693,7 @@ static float calendar_list(jd_app *app, int a, float x, float y, float w, int *f
         }
         /* its colour: the picker opens under it */
         if (jd_icon_button(&app->ui, "paintbrush", NULL, paint, cp.cal == c[i].id) && !app->dialog.kind) picker_toggle(&c[i]);
-        if (CheckCollisionPointRec(GetMousePosition(), paint)) jd_tooltip("Colour", paint.x - 10, paint.y + 38);
+        if (CheckCollisionPointRec(GetMousePosition(), paint) && !plat_touch()) jd_tooltip("Colour", paint.x - 10, paint.y + 38);
         y += 34;
         if (cp.cal == c[i].id) y = picker_draw(app, &c[i], x, y, w, focus);
     }

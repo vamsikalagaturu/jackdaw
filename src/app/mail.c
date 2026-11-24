@@ -9,6 +9,7 @@
 #include "core/util.h"
 #include "platform.h"
 #include "rlgl.h"
+#include "ui/fx.h"
 #include "ui/icons.h"
 
 enum { TAB_H = 34, BAR_H = 28, SPLIT = 5, RAIL_W = 60 };
@@ -19,8 +20,10 @@ enum { TAB_H = 34, BAR_H = 28, SPLIT = 5, RAIL_W = 60 };
 static float drawer_k;
 static Texture2D drawer_shot;
 static int drawer_captured;
+/* the page as the drawer opened over it, frosted; kept while it closes, when drawer_shot holds the drawer */
+static RenderTexture2D drawer_blur;
 
-static void drawer_capture(void)
+static void drawer_capture(int opening)
 {
     if (drawer_shot.id) UnloadTexture(drawer_shot);
     /* the frame's pending draws first: the screen is read as it stands */
@@ -28,6 +31,7 @@ static void drawer_capture(void)
     Image im = LoadImageFromScreen();
     drawer_shot = LoadTextureFromImage(im);
     UnloadImage(im);
+    if (opening) fx_blur(drawer_shot, 0, &drawer_blur);
     drawer_captured = 1;
 }
 
@@ -101,6 +105,7 @@ void apply_prefs(jd_app *app)
     app->list_w = (float)app->prefs.list_width;
     app->list_h = (float)app->prefs.list_height;
     plat_push(app->prefs.notify && app->prefs.push);
+    fx_enable(app->prefs.effects);
     load_fonts(app);
     /* HTML is laid out with the message text size as its default: open messages are read again for a new one */
     static int laid_out_size;
@@ -142,6 +147,7 @@ void mail_reload(jd_app *app)
     int64_t keep = app->nfolders ? app->folders[app->folder].id : 0;
     jd_folder_rows_free(app->folders, app->nfolders);
     app->folders = jd_store_folders(app->view, &app->nfolders);
+    folders_tree_order(app);
     share_check(app);
     app->folder = 0;
     for (int i = 0; i < app->nfolders; i++)
@@ -253,8 +259,8 @@ static void splitter(jd_app *app, int id, Rectangle r, int vertical, float origi
 }
 
 /* reply, forward and the message actions above the preview */
-enum { TB_REPLY, TB_REPLY_ALL, TB_FORWARD, TB_ARCHIVE, TB_DELETE, TB_MOVE, TB_UNREAD, TB_FLAG, TB_PLAIN, TB_PAGE,
-       TB_TAB, TB_SAVE, TB_PRINT, TB_COUNT };
+enum { TB_NOT_JUNK, TB_REPLY, TB_REPLY_ALL, TB_FORWARD, TB_ARCHIVE, TB_DELETE, TB_MOVE, TB_UNREAD, TB_FLAG, TB_PLAIN, TB_PAGE,
+       TB_ZOOM_OUT, TB_ZOOM_IN, TB_ZOOM_RESET, TB_TAB, TB_SAVE, TB_PRINT, TB_COUNT };
 
 /* those that do not fit go into a menu behind the last; returns 1 when a tab's message left it (archived, deleted) */
 static int toolbar_buttons(jd_app *app, jd_conv *c, Rectangle r, int in_tab)
@@ -265,28 +271,42 @@ static int toolbar_buttons(jd_app *app, jd_conv *c, Rectangle r, int in_tab)
     static unsigned calls, opened_at;
     calls++;
     int64_t last = c->reading[c->n - 1].row.id;
+    /* the zoom's tips say where it stands; a phone's menu has no keys to name */
+    char zoom_out_tip[48], zoom_in_tip[48], zoom_reset_tip[48];
+    int touch = plat_touch(), pct = reader_zoom_percent();
+    snprintf(zoom_out_tip, sizeof zoom_out_tip, touch ? "Zoom out (%d%%)" : "Zoom out (Ctrl+-), %d%%", pct);
+    snprintf(zoom_in_tip, sizeof zoom_in_tip, touch ? "Zoom in (%d%%)" : "Zoom in (Ctrl+=), %d%%", pct);
+    snprintf(zoom_reset_tip, sizeof zoom_reset_tip, touch ? "Zoom 100%%" : "Zoom 100%% (Ctrl+0)");
     struct {
         const char *icon, *tip;
         int gap;
     } all[TB_COUNT] = {
+        [TB_NOT_JUNK] = {"inbox", "Not junk: back to the Inbox", 0},
         [TB_REPLY] = {"reply", "Reply (r)", 0}, [TB_REPLY_ALL] = {"reply-all", "Reply all (R)", 0},
         [TB_FORWARD] = {"forward", "Forward (F)", 0}, [TB_ARCHIVE] = {"archive", "Archive (e)", 1},
         [TB_DELETE] = {"trash-2", "Delete (dd)", 0}, [TB_MOVE] = {"folder-input", "Move (m)", 0},
         [TB_UNREAD] = {"mail", "Mark unread (u)", 0}, [TB_FLAG] = {"star", "Flag (s)", 0},
         [TB_PLAIN] = {c->plain ? "file-image" : "file-text", c->plain ? "Show HTML (Shift+P)" : "Show plain text (Shift+P)", 1},
         [TB_PAGE] = {mail_page_dark(app) ? "sun" : "moon", mail_page_dark(app) ? "Light mail page (Shift+L)" : "Dark mail page (Shift+L)", 0},
-        [TB_TAB] = {"external-link", "Open in a tab (Shift+Enter)", 0}, [TB_SAVE] = {"download", "Save as .eml (Ctrl+S)", 0},
+        [TB_ZOOM_OUT] = {"zoom-out", zoom_out_tip, 1}, [TB_ZOOM_IN] = {"zoom-in", zoom_in_tip, 0},
+        [TB_ZOOM_RESET] = {"search", zoom_reset_tip, 0},
+        [TB_TAB] = {"external-link", "Open in a tab (Shift+Enter)", 1}, [TB_SAVE] = {"download", "Save as .eml (Ctrl+S)", 0},
         [TB_PRINT] = {"printer", "Print (Ctrl+P)", 0},
     };
     static const int desk[] = {TB_REPLY, TB_REPLY_ALL, TB_FORWARD, TB_ARCHIVE, TB_DELETE, TB_MOVE, TB_UNREAD,
-                               TB_FLAG, TB_PLAIN, TB_PAGE, TB_TAB, TB_SAVE, TB_PRINT};
+                               TB_FLAG, TB_PLAIN, TB_PAGE, TB_ZOOM_OUT, TB_ZOOM_IN, TB_ZOOM_RESET, TB_TAB, TB_SAVE, TB_PRINT};
     static const int tab[] = {TB_REPLY, TB_REPLY_ALL, TB_FORWARD, TB_ARCHIVE, TB_DELETE, TB_MOVE, TB_UNREAD,
-                              TB_FLAG, TB_PLAIN, TB_PAGE, TB_SAVE, TB_PRINT};
+                              TB_FLAG, TB_PLAIN, TB_PAGE, TB_ZOOM_OUT, TB_ZOOM_IN, TB_ZOOM_RESET, TB_SAVE, TB_PRINT};
     static const int phone[] = {TB_ARCHIVE, TB_DELETE, TB_UNREAD, TB_FLAG, TB_REPLY, TB_MOVE, TB_REPLY_ALL,
-                                TB_FORWARD, TB_PLAIN, TB_PAGE, TB_SAVE, TB_PRINT};
-    const int *order = !in_tab ? desk : plat_touch() ? phone : tab;
-    int n = !in_tab ? (int)(sizeof desk / sizeof *desk)
-                    : plat_touch() ? (int)(sizeof phone / sizeof *phone) : (int)(sizeof tab / sizeof *tab);
+                                TB_FORWARD, TB_PLAIN, TB_PAGE, TB_ZOOM_IN, TB_ZOOM_OUT, TB_ZOOM_RESET, TB_SAVE, TB_PRINT};
+    const int *base = !in_tab ? desk : plat_touch() ? phone : tab;
+    int nbase = !in_tab ? (int)(sizeof desk / sizeof *desk)
+                        : plat_touch() ? (int)(sizeof phone / sizeof *phone) : (int)(sizeof tab / sizeof *tab);
+    /* a conversation with a message in Junk (or Spam) has Not junk first */
+    int junk = 0, order[TB_COUNT], n = 0;
+    for (int k = 0; k < c->n; k++) junk |= jd_streq(c->reading[k].row.special_use, "Junk");
+    if (junk) order[n++] = TB_NOT_JUNK;
+    for (int k = 0; k < nbase; k++) order[n++] = base[k];
     float need = 0;
     for (int k = 0; k < n; k++) need += 36 + (all[order[k]].gap && k ? 12 : 0);
     int shown = n;
@@ -305,7 +325,7 @@ static int toolbar_buttons(jd_app *app, jd_conv *c, Rectangle r, int in_tab)
     float x = r.x;
     const char *tip = NULL;
     float tip_x = 0;
-    int chosen = -1, free_mouse = !app->dialog.kind && !app->menu.open && !more.open;
+    int chosen = -1, free_mouse = !app->dialog.kind && !app->menu.open && !more.open && !on_floating();
     for (int k = 0; k < shown; k++) {
         int id = order[k];
         if (spread) x = r.x + step * (float)k + (step - 32) / 2;
@@ -315,8 +335,7 @@ static int toolbar_buttons(jd_app *app, jd_conv *c, Rectangle r, int in_tab)
         }
         Rectangle b = {x, r.y + 6, 32, 32};
         int hover = CheckCollisionPointRec(GetMousePosition(), b) && free_mouse;
-        if (hover) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
-        jd_icon(all[id].icon, x + 7, r.y + 13, 18, hover ? JD_NORD8 : JD_NORD4);
+        jd_tap_icon(all[id].icon, b, 18, jd_tap_face(b, hover, 0, 0.3f), JD_NORD4, JD_NORD8);
         if (hover && !app->ui.touch) tip = all[id].tip, tip_x = x;
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) chosen = id;
         x += 36;
@@ -325,8 +344,7 @@ static int toolbar_buttons(jd_app *app, jd_conv *c, Rectangle r, int in_tab)
         if (spread) x = r.x + step * (float)shown + (step - 32) / 2;
         Rectangle b = {x, r.y + 6, 32, 32};
         int hover = CheckCollisionPointRec(GetMousePosition(), b) && free_mouse;
-        if (hover || more.open) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
-        jd_icon("ellipsis-vertical", x + 7, r.y + 13, 18, hover ? JD_NORD8 : JD_NORD4);
+        jd_tap_icon("ellipsis-vertical", b, 18, jd_tap_face(b, hover, more.open, 0.3f), JD_NORD4, JD_NORD8);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             jd_popup_open(&more);
             nmore = 0;
@@ -356,12 +374,14 @@ static int toolbar_buttons(jd_app *app, jd_conv *c, Rectangle r, int in_tab)
     }
     if (tip) jd_tooltip(tip, tip_x, r.y + 42);
     /* a tab's message may not be the list's selection: the actions on the list's messages are pointed at it */
-    int on_list = chosen == TB_ARCHIVE || chosen == TB_DELETE || chosen == TB_MOVE || chosen == TB_UNREAD || chosen == TB_FLAG;
+    int on_list = chosen == TB_ARCHIVE || chosen == TB_DELETE || chosen == TB_MOVE || chosen == TB_UNREAD || chosen == TB_FLAG ||
+                  chosen == TB_NOT_JUNK;
     if (in_tab && on_list && !list_select_conv(app, c)) return 0;
     switch (chosen) {
     case TB_REPLY: compose_open(app, COMPOSE_REPLY, last); break;
     case TB_REPLY_ALL: compose_open(app, COMPOSE_REPLY_ALL, last); break;
     case TB_FORWARD: compose_open(app, COMPOSE_FORWARD, last); break;
+    case TB_NOT_JUNK: act_not_junk(app); return in_tab;
     case TB_ARCHIVE: act_archive(app); return in_tab;
     case TB_DELETE: act_delete(app); return in_tab;
     case TB_MOVE: dialog_open(app, DLG_PICK_FOLDER, ACT_MOVE, "Move to", NULL); break;
@@ -369,6 +389,9 @@ static int toolbar_buttons(jd_app *app, jd_conv *c, Rectangle r, int in_tab)
     case TB_FLAG: act_toggle_flag(app); break;
     case TB_PLAIN: c->plain = !c->plain; break;
     case TB_PAGE: app->page_flip = !app->page_flip; break;
+    case TB_ZOOM_OUT: reader_zoom(app, -1); break;
+    case TB_ZOOM_IN: reader_zoom(app, 1); break;
+    case TB_ZOOM_RESET: reader_zoom(app, 0); break;
     case TB_TAB: reader_open(app, 1); break;
     case TB_SAVE: conv_save_message(app, c); break;
     case TB_PRINT: app->print_tab = in_tab ? app->tab + 1 : 1; break;
@@ -398,6 +421,20 @@ static void focus_line(jd_app *app, int pane, Rectangle r)
 }
 
 /* the list and the reading pane, right of the sidebar */
+/* the reading pane fades up from the background when another message comes into it */
+static void reader_arrives(jd_app *app, Rectangle r)
+{
+    static int64_t seen;
+    static double at = -10;
+    int64_t shown = preview(app)->thread * 31 + preview(app)->message;
+    if (shown != seen) {
+        if (seen && shown && fx_enabled()) at = GetTime();
+        seen = shown;
+    }
+    float u = (float)(GetTime() - at) / 0.18f;
+    if (u < 1) DrawRectangleRec(r, ColorAlpha(JD_NORD0, 0.85f * (1 - u) * (1 - u)));
+}
+
 static void mail_draw(jd_app *app, Rectangle r)
 {
     float w = r.width, h = r.height;
@@ -411,6 +448,7 @@ static void mail_draw(jd_app *app, Rectangle r)
         lh = fmaxf(160, fminf(app->list_h, h - 140));
         list_draw(app, (Rectangle){r.x, r.y, w, lh});
         preview_draw(app, (Rectangle){r.x, r.y + lh + SPLIT, w, h - lh - SPLIT});
+        reader_arrives(app, (Rectangle){r.x, r.y + lh + SPLIT, w, h - lh - SPLIT});
         focus_line(app, PANE_LIST, (Rectangle){r.x, r.y, w, lh});
         focus_line(app, PANE_READER, (Rectangle){r.x, r.y + lh + SPLIT, w, h - lh - SPLIT});
         break;
@@ -423,6 +461,7 @@ static void mail_draw(jd_app *app, Rectangle r)
         lw = fmaxf(300, fminf(app->list_w, w - 300));
         list_draw(app, (Rectangle){r.x, r.y, lw, h});
         preview_draw(app, (Rectangle){r.x + lw + SPLIT, r.y, w - lw - SPLIT, h});
+        reader_arrives(app, (Rectangle){r.x + lw + SPLIT, r.y, w - lw - SPLIT, h});
         focus_line(app, PANE_LIST, (Rectangle){r.x, r.y, lw, h});
         focus_line(app, PANE_READER, (Rectangle){r.x + lw + SPLIT, r.y, w - lw - SPLIT, h});
         break;
@@ -430,6 +469,9 @@ static void mail_draw(jd_app *app, Rectangle r)
 }
 
 /* "Archived 2 conversations  Undo" while a move waits */
+void floating_add(Rectangle r) { jd_cover(r); }
+int on_floating(void) { return jd_covered(); }
+
 static void toast(jd_app *app, float sh)
 {
     jd_pending *p = &app->pending;
@@ -437,6 +479,7 @@ static void toast(jd_app *app, float sh)
     jd_ui *ui = &app->ui;
     float tw = jd_text_width(ui, p->label, 14, 0);
     Rectangle box = {(jd_screen_w() - tw - 130) / 2, sh - BAR_H - 62, tw + 130, 44};
+    floating_add(box);
     DrawRectangleRounded((Rectangle){box.x + 2, box.y + 3, box.width, box.height}, 0.3f, 6, ColorAlpha(BLACK, 0.3f));
     DrawRectangleRounded(box, 0.3f, 6, JD_NORD3);
     jd_text(ui, p->label, box.x + 16, box.y + 14, 14, JD_NORD6, 0);
@@ -541,6 +584,7 @@ static void tab_keys(jd_app *app)
 void mail_frame(jd_app *app)
 {
     float sw = jd_screen_w(), sh = jd_screen_h();
+    jd_cover_frame();
     pending_tick(app, 0);
     compose_held_tick(app);
     int shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
@@ -550,9 +594,27 @@ void mail_frame(jd_app *app)
     if (free_keys && ctrl && shift && current_mode(app) != MODE_INSERT)
         for (int k = 0; k < 9; k++)
             if (IsKeyPressed(KEY_ONE + k)) account_switch(app, k);
-    if (free_keys && current_mode(app) != MODE_INSERT && IsKeyPressed(KEY_SLASH) && shift) {
+    jd_tab *now = &app->tabs[app->tab];
+    /* the search bar shows over every page; a phone has room for it over the mail list only */
+    int bar_shown = !plat_touch() || now->kind == TAB_MAIL;
+    if (!bar_shown) app->searching = 0;
+    if (free_keys && app->searching) {
+        search_bar_keys(app);
+    } else if (free_keys && current_mode(app) != MODE_INSERT && IsKeyPressed(KEY_SLASH) && shift) {
         app->help = 1;
         GetCharPressed();
+    } else if (free_keys && bar_shown && current_mode(app) != MODE_INSERT &&
+               ((IsKeyPressed(KEY_SLASH) && !shift) || (ctrl && IsKeyPressed(KEY_K) && now->kind != TAB_COMPOSE))) {
+        /* / or Ctrl+K: the search bar, from any page */
+        search_focus(app);
+        GetCharPressed();
+    } else if (free_keys && ctrl && current_mode(app) != MODE_INSERT &&
+               (app->tabs[app->tab].kind == TAB_CONV || (app->tabs[app->tab].kind == TAB_MAIL && preview(app)->n)) &&
+               (IsKeyPressed(KEY_EQUAL) || IsKeyPressed(KEY_KP_ADD) || IsKeyPressed(KEY_MINUS) ||
+                IsKeyPressed(KEY_KP_SUBTRACT) || IsKeyPressed(KEY_ZERO) || IsKeyPressed(KEY_KP_0))) {
+        /* the reader's zoom, while a message shows */
+        reader_zoom(app, IsKeyPressed(KEY_ZERO) || IsKeyPressed(KEY_KP_0) ? 0
+                         : IsKeyPressed(KEY_MINUS) || IsKeyPressed(KEY_KP_SUBTRACT) ? -1 : 1);
     } else if (free_keys && ctrl && IsKeyPressed(KEY_B) && current_mode(app) != MODE_INSERT) {
         app->prefs.sidebar_rail = !app->prefs.sidebar_rail;
         save_prefs(app);
@@ -593,6 +655,7 @@ void mail_frame(jd_app *app)
             DrawTexture(drawer_shot, 0, 0, WHITE);
             jd_scale_begin();
         }
+        fx_draw_blurred(drawer_blur, out);
         DrawRectangleRec((Rectangle){0, top, sw, body_h}, ColorAlpha(BLACK, 0.45f * out));
         Rectangle rest = {dw, top, sw - dw, body_h};
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), rest)) {
@@ -614,7 +677,7 @@ void mail_frame(jd_app *app)
         menu_draw(app);
         accounts_menu_draw(app);
         dialog_draw(app);
-        if (app->prefs.sidebar_rail) drawer_capture();
+        if (app->prefs.sidebar_rail) drawer_capture(0);
         return;
     }
     /* a phone gives what is open (a message, compose, settings) the whole width; the folders are the list's */
@@ -629,6 +692,10 @@ void mail_frame(jd_app *app)
         bx = side + SPLIT;
     }
     Rectangle page = {bx, top, sw - bx, body_h};
+    if (bar_shown) {
+        search_bar(app, (Rectangle){page.x, page.y, page.width, 52});
+        page.y += 52, page.height -= 52;
+    }
     jd_tab *t = &app->tabs[app->tab];
     /* a phone has no Esc to close what is open: a back bar does it, to the folder it came from */
     Rectangle actions = {0};
@@ -659,6 +726,17 @@ void mail_frame(jd_app *app)
         actions = (Rectangle){page.x + 16, page.y, page.width - 16, 44};
         page.y += 44, page.height -= 44;
     }
+    /* another tab, page or account comes in from a little to the right, fading up from the background */
+    static int seen_tab = -1, seen_cur = -1;
+    static tab_kind seen_kind;
+    static double page_at = -10;
+    if (app->tab != seen_tab || app->cur != seen_cur || t->kind != seen_kind) {
+        if (seen_tab >= 0 && fx_enabled()) page_at = GetTime();
+        seen_tab = app->tab, seen_cur = app->cur, seen_kind = t->kind;
+    }
+    float pu = fminf(1, (float)(GetTime() - page_at) / 0.22f), pe = 1 - (1 - pu) * (1 - pu) * (1 - pu);
+    Rectangle arriving = page;
+    if (pu < 1) page.x += 14 * (1 - pe);
     if (t->kind == TAB_MAIL) mail_draw(app, page);
     else if (t->kind == TAB_CONV) {
         /* a swipe pages through the list; the finger to the left is the next message */
@@ -744,8 +822,11 @@ void mail_frame(jd_app *app)
     else if (t->kind == TAB_SETTINGS) settings_draw(app, page);
     else if (t->kind == TAB_CALENDAR) calendar_draw(app, page);
     else compose_draw(app, t->compose, page);
+    if (pu < 1) DrawRectangleRec(arriving, ColorAlpha(JD_NORD0, 0.9f * (1 - pe)));
+    if (bar_shown) search_bar_overlay(app);
 
     if (drawer_k > 0 && drawer_shot.id) {
+        fx_draw_blurred(drawer_blur, out);
         DrawRectangleRec((Rectangle){0, top, sw, body_h}, ColorAlpha(BLACK, 0.45f * out));
         jd_scissor(0, top, shown, body_h);
         jd_scale_end();
@@ -755,6 +836,7 @@ void mail_frame(jd_app *app)
     } else if (drawer_shot.id) {
         UnloadTexture(drawer_shot);
         drawer_shot = (Texture2D){0};
+        fx_blur_free(&drawer_blur);
     }
     footer(app, sw, sh);
     jd_tooltip_draw(&app->ui);
@@ -766,5 +848,5 @@ void mail_frame(jd_app *app)
     accounts_menu_draw(app);
     dialog_draw(app);
     help_draw(app);
-    if (plat_touch() && !app->prefs.sidebar_rail && app->tabs[app->tab].kind == TAB_MAIL) drawer_capture();
+    if (plat_touch() && !app->prefs.sidebar_rail && app->tabs[app->tab].kind == TAB_MAIL) drawer_capture(1);
 }
