@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "core/util.h"
+#include "fx.h"
 #include "icons.h"
 #include "platform.h"
 
@@ -777,10 +778,62 @@ static int touch_ui;
 
 void jd_set_touch(int touch) { touch_ui = touch; }
 
+/* What floats over the page (toasts, the search results) is drawn after it, and the page takes its clicks in the same
+   frame: each records its box, and the page's widgets leave the mouse alone over the ones drawn last frame. */
+enum { MAX_COVERS = 8 };
+static Rectangle covers[2][MAX_COVERS];
+static int ncovers[2], covers_now;
+
+void jd_cover(Rectangle r)
+{
+    if (ncovers[covers_now] < MAX_COVERS) covers[covers_now][ncovers[covers_now]++] = r;
+}
+
+int jd_covered(void)
+{
+    int last = !covers_now;
+    for (int i = 0; i < ncovers[last]; i++)
+        if (CheckCollisionPointRec(GetMousePosition(), covers[last][i])) return 1;
+    return 0;
+}
+
+void jd_cover_frame(void)
+{
+    covers_now = !covers_now;
+    ncovers[covers_now] = 0;
+}
+
+static int ctrl_held(void)
+{
+    return !touch_ui && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
+}
+
+/* Ctrl + wheel: a magnifier around the pointer while Ctrl is held (the wheel scrolls nothing then); letting go of
+   Ctrl glides back. Text is rasterised for the enlargement once it settles, so it is sharp, not stretched. */
+void jd_magnifier_frame(void)
+{
+    static float want = 1, now = 1, settled = 1;
+    static double still_since;
+    if (ctrl_held()) {
+        float wheel = GetMouseWheelMove();
+        if (wheel != 0) want = fminf(5, fmaxf(1, want * powf(1.25f, wheel)));
+    } else {
+        want = 1;
+    }
+    float was = now;
+    now += (want - now) * (1 - expf(-GetFrameTime() / 0.06f));
+    if (fabsf(now - want) < 0.003f) now = want;
+    if (now != was) still_since = GetTime();
+    float sharp = now == 1 ? 1 : GetTime() - still_since > 0.15 ? now : settled;
+    if (sharp != settled) jd_text_zoom(settled = sharp);
+    jd_magnify(now);
+}
+
 float jd_wheel_y(float notch)
 {
     float dx, dy;
     if (plat_scroll(&dx, &dy)) return dy;
+    if (ctrl_held()) return 0;
     return GetMouseWheelMove() * notch;
 }
 
@@ -788,6 +841,7 @@ float jd_wheel_x(float notch)
 {
     float dx, dy;
     if (plat_scroll(&dx, &dy)) return dx;
+    if (ctrl_held()) return 0;
     Vector2 m = GetMouseWheelMoveV();
     return (fabsf(m.x) > fabsf(m.y) ? m.x : m.y) * notch;
 }
@@ -835,12 +889,54 @@ void jd_scrollbar(Rectangle view, float content, float *scroll)
                                      over || dragging == scroll ? 8 : 4, th}, 1, 6, ColorAlpha(c, 0.85f));
 }
 
+/* Buttons and switches in motion (fx_enabled): the hover colour eases in and out, a held button sinks a little, a
+   click sends a ripple out from where it landed, a switch's knob slides. Immediate-mode widgets keep no state, so
+   it is kept here by the widget's rectangle, for the few dozen on screen; one that moves just starts afresh. */
+typedef struct {
+    Rectangle r;
+    double seen, ripple_at;
+    float hover, sink, knob;
+    Vector2 ripple;
+    int held;
+} motion;
+
+static motion *motion_of(Rectangle r, float knob)
+{
+    static motion all[48];
+    double now = GetTime();
+    motion *oldest = &all[0];
+    for (int i = 0; i < 48; i++) {
+        motion *m = &all[i];
+        if (m->r.x == r.x && m->r.y == r.y && m->r.width == r.width && m->r.height == r.height && now - m->seen < 0.5) {
+            m->seen = now;
+            return m;
+        }
+        if (m->seen < oldest->seen) oldest = m;
+    }
+    *oldest = (motion){.r = r, .seen = now, .knob = knob};
+    return oldest;
+}
+
+static float ease_to(float from, float to, float tau)
+{
+    return from + (to - from) * (1 - expf(-GetFrameTime() / tau));
+}
+
 int jd_switch(jd_ui *ui, float x, float y, int on)
 {
     Rectangle r = {x, y, 42, 24};
-    int hover = CheckCollisionPointRec(GetMousePosition(), r);
-    DrawRectangleRounded(r, 1, 12, on ? JD_NORD10 : hover ? JD_NORD3 : JD_NORD2);
-    DrawCircleV((Vector2){on ? x + 30 : x + 12, y + 12}, 9, on ? JD_ON_ACCENT : JD_NORD4);
+    int hover = CheckCollisionPointRec(GetMousePosition(), r) && !jd_covered();
+    float k = (float)on;
+    Color off_bg = hover ? JD_NORD3 : JD_NORD2;
+    if (fx_enabled()) {
+        motion *m = motion_of(r, (float)on);
+        m->knob = ease_to(m->knob, (float)on, 0.05f);
+        k = m->knob;
+        m->hover = ease_to(m->hover, (float)hover, 0.06f);
+        off_bg = ColorLerp(JD_NORD2, JD_NORD3, m->hover);
+    }
+    DrawRectangleRounded(r, 1, 12, ColorLerp(off_bg, JD_NORD10, k));
+    DrawCircleV((Vector2){x + 12 + 18 * k, y + 12}, 9, ColorLerp(JD_NORD4, JD_ON_ACCENT, k));
     return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
@@ -855,7 +951,7 @@ int jd_segmented(jd_ui *ui, float x, float y, const char *const *labels, int n, 
     float cx = x + 2;
     for (int i = 0; i < n && i < 8; i++) {
         Rectangle seg = {cx, y + 2, widths[i], 28};
-        int hover = CheckCollisionPointRec(GetMousePosition(), seg);
+        int hover = CheckCollisionPointRec(GetMousePosition(), seg) && !jd_covered();
         if (i == selected) DrawRectangleRounded(seg, 0.3f, 6, JD_NORD10);
         else if (hover) DrawRectangleRounded(seg, 0.3f, 6, JD_NORD2);
         jd_text(ui, labels[i], cx + 14, y + 9, 13, i == selected ? JD_ON_ACCENT : JD_NORD6, 1);
@@ -865,22 +961,80 @@ int jd_segmented(jd_ui *ui, float x, float y, const char *const *labels, int n, 
     return picked;
 }
 
+/* a press on r starts its ripple and holds it down; the hover and the sink ease toward where they are going */
+static motion *press_motion(Rectangle r, int hover, int on)
+{
+    motion *m = motion_of(r, 0);
+    if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) m->held = 1, m->ripple_at = GetTime(), m->ripple = GetMousePosition();
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) m->held = 0;
+    m->hover = ease_to(m->hover, hover || on ? 1.0f : 0.0f, 0.07f);
+    m->sink = ease_to(m->sink, m->held && hover ? 1.0f : 0.0f, 0.04f);
+    return m;
+}
+
+static void ripple(motion *m, Rectangle face, Color c)
+{
+    float u = (float)(GetTime() - m->ripple_at) / 0.45f;
+    if (u >= 1) return;
+    float reach = hypotf(face.width, face.height) * (1 - (1 - u) * (1 - u));
+    jd_scissor(face.x, face.y, face.width, face.height);
+    DrawCircleV(m->ripple, reach, ColorAlpha(c, 0.25f * (1 - u)));
+    jd_scissor_end();
+}
+
+float jd_tap_face(Rectangle r, int hover, int on, float roundness)
+{
+    hover = hover && !jd_covered();
+    if (!fx_enabled()) {
+        if (hover || on) DrawRectangleRounded(r, roundness, 6, JD_NORD2);
+        return hover ? 1 : 0;
+    }
+    motion *m = press_motion(r, hover, on);
+    float in = roundf(1.2f * m->sink);
+    Rectangle face = {r.x + in, r.y + in, r.width - 2 * in, r.height - 2 * in};
+    if (m->hover > 0.01f) DrawRectangleRounded(face, roundness, 6, ColorAlpha(JD_NORD2, m->hover));
+    ripple(m, face, JD_NORD8);
+    return m->hover;
+}
+
+void jd_tap_icon(const char *icon, Rectangle r, float size, float hover, Color rest, Color lit)
+{
+    float s = size * (1 + 0.1f * hover);
+    jd_icon(icon, r.x + (r.width - s) / 2, r.y + (r.height - s) / 2, s, ColorLerp(rest, lit, hover));
+}
+
 int jd_icon_button(jd_ui *ui, const char *icon, const char *label, Rectangle r, int primary)
 {
-    int hover = CheckCollisionPointRec(GetMousePosition(), r);
-    Color bg = primary ? JD_NORD10 : JD_NORD2;
-    if (hover) bg = primary ? ColorBrightness(JD_NORD10, 0.12f) : JD_NORD3;
-    DrawRectangleRounded(r, 0.2f, 6, bg);
-    const float size = 15, isz = 16, gap = label && icon ? 8 : 0;
+    int hover = CheckCollisionPointRec(GetMousePosition(), r) && !jd_covered();
+    int clicked = hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    Color base = primary ? JD_NORD10 : JD_NORD2, lit = primary ? ColorBrightness(JD_NORD10, 0.14f) : JD_NORD3;
     Color fg = primary ? JD_ON_ACCENT : JD_NORD6;
+    Rectangle face = r;
+    if (fx_enabled()) {
+        /* raised: a soft shadow under it, a lit top edge; hovered it rises onto a deeper shadow, pressed it sinks */
+        motion *m = press_motion(r, hover, 0);
+        /* whole pixels: the label is drawn snapped to them, so a fraction would move the face ahead of it */
+        float rise = m->hover * (1 - m->sink), in = roundf(1.2f * m->sink);
+        face = (Rectangle){r.x + in, r.y + in - roundf(1.2f * rise), r.width - 2 * in, r.height - 2 * in};
+        fx_shadow(face, 0.2f, 0.05f + 0.12f * rise, primary ? 0.9f + 0.5f * rise : 0.5f + 0.4f * rise);
+        DrawRectangleRounded(face, 0.2f, 6, ColorLerp(base, lit, m->hover));
+        float rad = fminf(face.width, face.height) * 0.1f;
+        DrawLineEx((Vector2){face.x + rad + 1, face.y + 1}, (Vector2){face.x + face.width - rad - 1, face.y + 1}, 1,
+                   ColorAlpha(WHITE, primary ? 0.22f + 0.1f * m->hover : 0.07f + 0.05f * m->hover));
+        if (!primary) DrawRectangleRoundedLinesEx(face, 0.2f, 6, 1, ColorLerp(JD_NORD3, JD_NORD8, 0.45f * m->hover));
+        ripple(m, face, fg);
+    } else {
+        DrawRectangleRounded(r, 0.2f, 6, hover ? lit : base);
+    }
+    const float size = 15, isz = 16, gap = label && icon ? 8 : 0;
     float w = (label ? jd_text_width(ui, label, size, 1) : 0) + (icon ? isz + gap : 0);
-    float x = r.x + (r.width - w) / 2;
+    float x = face.x + (face.width - w) / 2;
     if (icon) {
-        jd_icon(icon, x, r.y + (r.height - isz) / 2, isz, fg);
+        jd_icon(icon, x, face.y + (face.height - isz) / 2, isz, fg);
         x += isz + gap;
     }
-    if (label) jd_text(ui, label, x, r.y + (r.height - size) / 2, size, fg, 1);
-    return hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    if (label) jd_text(ui, label, x, face.y + (face.height - size) / 2, size, fg, 1);
+    return clicked;
 }
 
 int jd_button(jd_ui *ui, const char *label, Rectangle r, int primary)

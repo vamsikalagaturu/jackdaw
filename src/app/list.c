@@ -9,9 +9,164 @@
 #include "app.h"
 #include "core/util.h"
 #include "platform.h"
+#include "ui/fx.h"
 #include "ui/icons.h"
 
 enum { HEADER_H = 28, UNDO_SECONDS = 5 };
+
+/* A delete to Trash waits for the end of the list's next drawing, so the rows it takes are on screen: they burn
+   away there (fx_burn), the rows below keeping their places until it is over, then closing up. Not drawn within
+   two frames (the list is not showing), it goes without. */
+static struct {
+    int64_t *ids;
+    int n, single, waited;
+    char *trash;
+} burn_ask;
+
+/* the rows drawn this frame, by key, at their screen y */
+enum { MAX_SHOWN = 256 };
+static struct {
+    int64_t key;
+    int row;
+    float y;
+    Rectangle box;
+} shown[MAX_SHOWN];
+static int nshown;
+
+/* rows after a burn slide from where they were (y, screen) to their new places, from `at` on */
+static struct {
+    int64_t key[MAX_SHOWN];
+    float y[MAX_SHOWN];
+    int n, gone;
+    double at;
+} slide;
+static const double SLIDE_S = 0.24;
+
+static void schedule(jd_app *app, int64_t *ids, int n, const char *to, const char *verb, int single);
+static int64_t row_key(jd_app *app, int i);
+
+/* New mail: rows the list did not have a moment ago that are newer than all it had, in the same view (folder,
+   search, filters). The rows on screen slide down to make room (slide), the new ones come in from the top and glow
+   for a moment. A first load, another folder or a search is not new mail. */
+static struct {
+    int64_t *keys;
+    int n;
+    int64_t newest;
+    uint64_t view;
+    int valid;
+} known;
+static struct {
+    int64_t key;
+    double at;
+} arrived[16];
+
+static uint64_t view_of(jd_app *app)
+{
+    uint64_t h = (uint64_t)app->cur * 1000003u + (uint64_t)(app->nfolders ? app->folders[app->folder].id : 0) * 31u +
+                 (uint64_t)app->grouped;
+    /* the scope only matters with a search in effect: opening the search box sets it without searching */
+    h = h * 31u + (uint64_t)(app->filter_unread | app->filter_flagged << 1 | app->filter_attachment << 2 |
+                             (app->query ? app->search_here << 3 : 0));
+    for (const char *s = app->query ? app->query : ""; *s; s++) h = h * 131u + (unsigned char)*s;
+    for (const char *s = app->filter_from ? app->filter_from : ""; *s; s++) h = h * 131u + (unsigned char)*s;
+    return h;
+}
+
+static void arrivals(jd_app *app)
+{
+    uint64_t view = view_of(app);
+    int fresh = 0;
+    if (fx_enabled() && known.valid && view == known.view) {
+        double now = GetTime();
+        for (int i = 0; i < app->nrows && fresh < 16; i++) {
+            if (app->rows[i].date <= known.newest) continue;
+            int64_t key = row_key(app, i);
+            int seen = 0;
+            for (int k = 0; k < known.n && !seen; k++) seen = known.keys[k] == key;
+            if (seen) continue;
+            int slot = 0;
+            for (int k = 0; k < 16; k++)
+                if (arrived[k].at < arrived[slot].at) slot = k;
+            arrived[slot].key = key, arrived[slot].at = now;
+            fresh++;
+        }
+        if (fresh && !slide.n) {
+            for (int s = 0; s < nshown; s++) slide.key[slide.n] = shown[s].key, slide.y[slide.n++] = shown[s].y;
+            slide.gone = fresh, slide.at = now;
+        }
+    }
+    known.keys = jd_realloc(known.keys, sizeof *known.keys * (size_t)(app->nrows + 1));
+    known.n = app->nrows, known.newest = 0, known.view = view, known.valid = 1;
+    for (int i = 0; i < app->nrows; i++) {
+        known.keys[i] = row_key(app, i);
+        if (app->rows[i].date > known.newest) known.newest = app->rows[i].date;
+    }
+}
+
+/* The search's plain words (not operators) marked where they occur in s, drawn as jd_text_fit draws it at x
+   within width: a tint behind each match, none past where the text is cut. */
+static void mark_matches(jd_app *app, const char *s, float x, float y, float width, float size, int bold)
+{
+    if (!app->query || !s || !s[0]) return;
+    for (const char *q = app->query; *q;) {
+        while (*q == ' ') q++;
+        const char *w = q;
+        while (*q && *q != ' ') q++;
+        int n = (int)(q - w);
+        if (n && *w == '"') w++, n--;
+        if (n && w[n - 1] == '"') n--;
+        if (n < 2 || n > 60 || memchr(w, ':', (size_t)n) || *w == '-') continue;
+        char word[64];
+        snprintf(word, sizeof word, "%.*s", n, w);
+        for (const char *hit = strcasestr(s, word); hit; hit = strcasestr(hit + n, word)) {
+            char pre[512], mid[64];
+            if (hit - s >= (long)sizeof pre) break;
+            snprintf(pre, sizeof pre, "%.*s", (int)(hit - s), s);
+            snprintf(mid, sizeof mid, "%.*s", n, hit);
+            float hx = x + jd_text_width(&app->ui, pre, size, bold), hw = jd_text_width(&app->ui, mid, size, bold);
+            if (hx + hw > x + width - 12) break;
+            DrawRectangleRounded((Rectangle){hx - 2, y - 2, hw + 4, size + 5}, 0.35f, 6, ColorAlpha(JD_NORD13, 0.3f));
+        }
+    }
+}
+
+/* how much a row still glows for having just arrived, 0 to 1 */
+static float arrival_glow(int64_t key)
+{
+    for (int k = 0; k < 16; k++)
+        if (arrived[k].key == key) {
+            float u = (float)(GetTime() - arrived[k].at) / 1.6f;
+            return u < 1 ? (1 - u) * (1 - u) : 0;
+        }
+    return 0;
+}
+
+static void burn_flush(jd_app *app, int drawn)
+{
+    if (!burn_ask.ids) return;
+    int64_t *ids = burn_ask.ids;
+    int n = burn_ask.n, single = burn_ask.single;
+    char *trash = burn_ask.trash;
+    burn_ask.ids = NULL, burn_ask.trash = NULL;
+    double done = 0;
+    int gone = 0;
+    for (int s = 0; drawn && s < nshown; s++) {
+        if (shown[s].row >= app->nrows) continue;
+        const jd_thread_row *t = &app->rows[shown[s].row];
+        int hit = 0;
+        for (int k = 0; k < n && !hit; k++) hit = ids[k] == t->latest;
+        if (!hit || (single && t->count > 1)) continue;
+        double end = fx_burn(shown[s].box, 0.05 * gone++);
+        if (end > done) done = end;
+    }
+    if (gone) {
+        slide.n = 0, slide.gone = gone;
+        for (int s = 0; s < nshown; s++) slide.key[slide.n] = shown[s].key, slide.y[slide.n++] = shown[s].y;
+        slide.at = GetTime() + done - 0.12;
+    }
+    schedule(app, ids, n, trash, "Deleted", single);
+    free(trash);
+}
 
 /* the mouse is over the search hints, which lie on top of the list: what is under them takes no clicks */
 static int under_hints;
@@ -236,6 +391,7 @@ static const jd_folder_row *special(jd_app *app, const char *use)
 
 void pending_tick(jd_app *app, int force)
 {
+    if (burn_ask.ids && (force || ++burn_ask.waited >= 2)) burn_flush(app, 0);
     jd_pending *p = &app->pending;
     if (!p->ids || p->due < 0 || (!force && GetTime() < p->due)) return;
     if (app->sync) {
@@ -347,7 +503,34 @@ static void delete_ids(jd_app *app, int64_t *ids, int n, int64_t folder, int sin
         app->dialog.nids = n;
         return;
     }
-    schedule(app, ids, n, trash->name, "Deleted", single);
+    burn_flush(app, 0);
+    if (!fx_enabled()) {
+        schedule(app, ids, n, trash->name, "Deleted", single);
+        return;
+    }
+    burn_ask.ids = ids, burn_ask.n = n, burn_ask.single = single, burn_ask.waited = 0;
+    burn_ask.trash = jd_strdup(trash->name);
+}
+
+/* Not junk: back to the Inbox, undoable as any move; the Inbox's next sync sees it as new there (IMAP gives it a new
+   UID), so the rules run on it as on arriving mail */
+void act_not_junk(jd_app *app)
+{
+    const jd_folder_row *inbox = NULL;
+    for (int i = 0; i < app->nfolders && !inbox; i++)
+        if (!strcasecmp(app->folders[i].name, "INBOX")) inbox = &app->folders[i];
+    int n;
+    int64_t *ids = selection_ids(app, &n);
+    if (!inbox) {
+        free(ids);
+        return;
+    }
+    schedule(app, ids, n, inbox->name, "Not junk, to the Inbox:", 0);
+}
+
+int in_junk(jd_app *app)
+{
+    return app->nfolders && jd_streq(app->folders[app->folder].special_use, "Junk");
 }
 
 void act_archive(jd_app *app)
@@ -498,12 +681,50 @@ void act_toggle_read(jd_app *app)
     free(ids);
 }
 
+/* rows just flagged: their star pops and sparks the first time it is drawn (the store sets the flag a moment
+   later), within a few seconds */
+enum { MAX_POPS = 32 };
+static struct {
+    int64_t key;
+    double asked, at; /* at: when the star first showed, 0 not yet */
+} pops[MAX_POPS];
+
+static void pop_ask(int64_t key)
+{
+    int slot = 0;
+    for (int i = 0; i < MAX_POPS; i++)
+        if (pops[i].asked < pops[slot].asked) slot = i;
+    pops[slot] = (typeof(pops[0])){key, GetTime(), 0};
+}
+
+/* the star's size this frame, size when it is not popping; sparks at (cx, cy) as it first shows */
+static float star_pop(int64_t key, float size, float cx, float cy)
+{
+    double now = GetTime();
+    for (int i = 0; i < MAX_POPS; i++) {
+        if (pops[i].key != key || now - pops[i].asked > 4) continue;
+        if (!pops[i].at) {
+            pops[i].at = now;
+            fx_sparkle((Vector2){cx, cy}, JD_NORD13);
+        }
+        float u = (float)(now - pops[i].at) / 0.35f;
+        if (u < 1) return size * (1 + 0.55f * sinf(PI * u) * (1 - u * 0.4f));
+    }
+    return size;
+}
+
 void act_toggle_flag(jd_app *app)
 {
     int n;
     int64_t *ids = selection_ids(app, &n);
-    if (app->sync && n) jd_sync_set_flag(app->sync, ids, n, JD_FLAGGED, !selection_any(app, 0));
+    int on = !selection_any(app, 0);
+    if (app->sync && n) jd_sync_set_flag(app->sync, ids, n, JD_FLAGGED, on);
     free(ids);
+    if (!on || !fx_enabled()) return;
+    if (app->npicked)
+        for (int i = 0; i < app->npicked; i++) pop_ask(app->picked[i]);
+    else if (app->nrows)
+        pop_ask(row_key(app, app->row));
 }
 
 static void set_query(jd_app *app);
@@ -827,6 +1048,8 @@ static int search_keys(jd_app *app)
     if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) {
         absorb(app, 1);
         app->searching = 0;
+        /* from any page: the mail found shows in the mail view */
+        app->tab = 0;
         run_search(app);
         if (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)) server_search(app);
         return 1;
@@ -1135,15 +1358,28 @@ static void draw_search(jd_app *app, float x, float y, float w)
     int free_mouse = !app->dialog.kind && !app->menu.open;
     /* a press anywhere else leaves the field, as Esc does (the hints over the list are part of it) */
     if (app->searching && free_mouse && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, box) &&
-        !CheckCollisionPointRec(mouse, hints_box)) {
+        !CheckCollisionPointRec(mouse, hints_box) && !jd_covered()) {
         app->searching = 0;
         if (!app->query) {
             jd_field_set(&app->search, NULL);
             app->search_here = 1;
         }
     }
+    /* focused, a glow of the accent eases in around it; while the server searches, light sweeps across it */
+    static float focus;
+    focus = fx_enabled() ? focus + ((float)app->searching - focus) * (1 - expf(-GetFrameTime() / 0.08f)) : (float)app->searching;
+    for (int g = 3; g >= 1 && focus > 0.01f && fx_enabled(); g--)
+        DrawRectangleRoundedLinesEx((Rectangle){box.x - 1.5f * g, box.y - 1.5f * g, box.width + 3 * g, box.height + 3 * g},
+                                    0.25f, 6, 1.5f, ColorAlpha(JD_NORD8, 0.1f * focus * (float)(4 - g)));
     DrawRectangleRounded(box, 0.2f, 6, JD_NORD1);
-    DrawRectangleRoundedLinesEx(box, 0.2f, 6, 1.5f, app->searching ? JD_NORD8 : JD_NORD2);
+    if (app->server_searching && fx_enabled()) {
+        float span = box.width + 240, at = box.x - 120 + fmodf((float)GetTime() * 420, span);
+        jd_scissor(box.x, box.y, box.width, box.height);
+        DrawRectangleGradientH((int)at, (int)box.y, 60, (int)box.height, ColorAlpha(JD_NORD8, 0), ColorAlpha(JD_NORD8, 0.18f));
+        DrawRectangleGradientH((int)at + 60, (int)box.y, 60, (int)box.height, ColorAlpha(JD_NORD8, 0.18f), ColorAlpha(JD_NORD8, 0));
+        jd_scissor_end();
+    }
+    DrawRectangleRoundedLinesEx(box, 0.2f, 6, 1.5f, ColorLerp(JD_NORD2, JD_NORD8, focus));
     pill p[32];
     int n = pills_shown(app, p, 32);
     int any = n || app->search.len || app->query;
@@ -1183,7 +1419,7 @@ static void draw_search(jd_app *app, float x, float y, float w)
     jd_scissor_end();
 
     static char placeholder[160];
-    snprintf(placeholder, sizeof placeholder, "Search %s   (/)", folder_name_now(app));
+    snprintf(placeholder, sizeof placeholder, plat_touch() ? "Search %s" : "Search %s   (/)", folder_name_now(app));
     app->search.placeholder = n ? (app->searching ? "Add words or from: to: subject: after: …" : NULL)
                                 : app->searching ? "Search  (from: to: subject: is: has: after:DD-MM-YYYY)"
                                                  : placeholder;
@@ -1193,8 +1429,8 @@ static void draw_search(jd_app *app, float x, float y, float w)
 
     Rectangle clear = {box.x + box.width - 28, y + 6, 22, 22};
     int on_clear = free_mouse && CheckCollisionPointRec(mouse, clear);
-    if (any) jd_icon("x", clear.x + 3, clear.y + 3, 16, on_clear ? JD_NORD11 : JD_MUTED);
-    else jd_icon("search", clear.x + 2, clear.y + 3, 16, JD_MUTED);
+    if (any) jd_tap_icon("x", clear, 16, jd_tap_face(clear, on_clear, 0, 0.5f), JD_MUTED, JD_NORD11);
+    else jd_tap_icon("search", clear, 16, focus, JD_MUTED, JD_NORD8);
     if (any && on_clear && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         search_clear(app);
         return;
@@ -1203,7 +1439,7 @@ static void draw_search(jd_app *app, float x, float y, float w)
         pill_remove(app, &p[removed], 0);
         return;
     }
-    if (clicked && !on_clear) focus_search(app);
+    if (clicked && !on_clear) search_focus(app);
 }
 
 /* Hints under the search field while typing: the operators that fit the word being typed, then values for the
@@ -1394,15 +1630,41 @@ static void hints_draw(jd_app *app, float x, float y, float w)
     }
 }
 
+/* the search box lives in the bar over every page (search.c); these are its parts here */
+void search_box_draw(jd_app *app, float x, float y, float w) { draw_search(app, x, y, w); }
+void search_hints_draw(jd_app *app, float x, float y, float w) { hints_draw(app, x, y, w); }
+
+/* every frame before the hints may be drawn: where they were goes, or it would keep the list's clicks once hidden */
+void search_hints_forget(void) { hints_box = (Rectangle){0}; }
+
+int search_hints_open(jd_app *app)
+{
+    hints_update(app);
+    return nhints;
+}
+
+int search_box_keys(jd_app *app) { return search_keys(app); }
+
+void search_run_mail(jd_app *app)
+{
+    absorb(app, 1);
+    app->searching = 0;
+    app->tab = 0;
+    run_search(app);
+}
+/* from any page: a Settings field that had the keys gives them up (-1 is Settings' no focus) */
+void search_focus(jd_app *app)
+{
+    focus_search(app);
+    app->settings_focus = -1;
+}
+
 void list_draw(jd_app *app, Rectangle r)
 {
     jd_ui *ui = &app->ui;
     float x = r.x + 16, y = r.y + 14, w = r.width - 32;
     /* the hints drawn last frame lie over the list: the list leaves the mouse to them */
     under_hints = CheckCollisionPointRec(GetMousePosition(), hints_box);
-    draw_search(app, x, y, w);
-    float hints_y = y + 38;
-    y += 44;
 
     const char *title = app->query ? "Search results" : app->nfolders ? folder_label(&app->folders[app->folder]) : "";
     jd_text_fit(ui, title, x, y, w - 120, 20, JD_NORD6, 1);
@@ -1420,8 +1682,7 @@ void list_draw(jd_app *app, Rectangle r)
         tx2 -= bw;
         Rectangle b = {tx2, y - 2, bw, 26};
         int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind && !app->menu.open && !under_hints;
-        if (hover) DrawRectangleRounded(b, 0.4f, 6, JD_NORD2);
-        jd_icon(toggles[k].icon, b.x + 8, y + 3, 14, hover ? JD_NORD8 : JD_NORD4);
+        jd_tap_icon(toggles[k].icon, b, 14, jd_tap_face(b, hover, 0, 0.4f), JD_NORD4, JD_NORD8);
         if (hover && !app->ui.touch) {
             const char *tip = toggles[k].tip;
             jd_tooltip(tip, b.x + b.width - (jd_text_width(ui, tip, 12, 0) + 16), y + 26);
@@ -1441,8 +1702,7 @@ void list_draw(jd_app *app, Rectangle r)
     {
         Rectangle b = {tx2 - 30, y - 2, 30, 26};
         int hover = CheckCollisionPointRec(GetMousePosition(), b) && !app->dialog.kind && !app->menu.open && !under_hints;
-        if (hover) DrawRectangleRounded(b, 0.4f, 6, JD_NORD2);
-        jd_icon("refresh-cw", b.x + 8, y + 3, 14, hover ? JD_NORD8 : JD_NORD4);
+        jd_tap_icon("refresh-cw", b, 14, jd_tap_face(b, hover, 0, 0.4f), JD_NORD4, JD_NORD8);
         if (hover && !app->ui.touch) jd_tooltip("Check for new mail (Ctrl+R)", b.x - 120, y + 26);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) list_refresh(app);
         tx2 -= 36;
@@ -1488,6 +1748,7 @@ void list_draw(jd_app *app, Rectangle r)
         char line[160];
         if (app->server_searching) snprintf(line, sizeof line, "%d found here. Searching the server...", app->nrows);
         else if (app->nserver_hits) snprintf(line, sizeof line, "%d found, the server's matches included.", app->nrows);
+        else if (plat_touch()) snprintf(line, sizeof line, "%d found here.", app->nrows);
         else snprintf(line, sizeof line, "%d found here.  Shift+S searches the server too.", app->nrows);
         jd_text(ui, line, x, y + 2, 13, JD_MUTED, 0);
         y += 24;
@@ -1498,6 +1759,16 @@ void list_draw(jd_app *app, Rectangle r)
     Rectangle area = {r.x, y, r.width, r.y + r.height - y - (pick_bar ? pick_bar_h : 0)};
     DrawRectangle((int)r.x, (int)y - 1, (int)r.width, 1, JD_NORD1);
     if (!app->nrows) {
+        int inbox = app->nfolders && !strcasecmp(app->folders[app->folder].name, "INBOX");
+        int filtered = app->filter_unread || app->filter_flagged || app->filter_attachment || app->filter_from;
+        if (fx_enabled() && inbox && !app->query && !filtered && area.height > 160) {
+            fx_inbox_zero(area, JD_NORD0, JD_NORD2);
+            const char *head = "All caught up", *sub = "Nothing waiting in the Inbox.";
+            float hy = area.y + area.height * 0.36f + 48;
+            jd_text(ui, head, area.x + (area.width - jd_text_width(ui, head, 18, 1)) / 2, hy, 18, JD_NORD6, 1);
+            jd_text(ui, sub, area.x + (area.width - jd_text_width(ui, sub, 14, 0)) / 2, hy + 28, 14, JD_MUTED, 0);
+            return;
+        }
         jd_text(ui, app->query ? "Nothing matches." : "No messages here.", x, y + 16, 15, JD_MUTED, 0);
         return;
     }
@@ -1550,6 +1821,7 @@ void list_draw(jd_app *app, Rectangle r)
             format_date(app->rows[i].send_at ? app->rows[i].send_at : app->rows[i].date, lay.date[i], sizeof lay.date[i]);
         }
         lay.total = yy + 12;
+        arrivals(app);
         /* rows came or went above the view: the first row shown keeps its place */
         if (lay.anchor && app->list_scroll > 0)
             for (int i = 0; i < app->nrows; i++)
@@ -1566,7 +1838,8 @@ void list_draw(jd_app *app, Rectangle r)
         if (top[app->row] + rh > app->list_scroll + area.height) app->list_scroll = top[app->row] + rh - area.height;
         app->followed_row = app->row;
     }
-    int over = CheckCollisionPointRec(GetMousePosition(), area) && !app->dialog.kind && !app->menu.open && !under_hints;
+    int over = CheckCollisionPointRec(GetMousePosition(), area) && !app->dialog.kind && !app->menu.open && !under_hints &&
+               !on_floating();
     float move = over ? jd_wheel_y(rh * 2) : 0;
     /* pull to refresh; a fling reaching the top pulls nothing */
     static float pull;              /* logical px */
@@ -1580,6 +1853,7 @@ void list_draw(jd_app *app, Rectangle r)
         move = 0;
     } else if (!pulling && pull > 0) {
         if (pull >= PULL_AT && refreshing_since <= 0) {
+            fx_fling((Vector2){area.x + area.width / 2, area.y + pull * 0.8f - 12});
             list_refresh(app);
             refreshing_since = GetTime(), saw_busy = 0;
         }
@@ -1612,23 +1886,81 @@ void list_draw(jd_app *app, Rectangle r)
         lay.anchor = app->grouped ? app->rows[first].thread : app->rows[first].latest;
         lay.anchor_off = top[first] - app->list_scroll;
     }
-    for (int i = first; i < app->nrows; i++) {
+    /* A row missing from where they were drawn takes the offset of the row before it (below a burnt one), or of the
+       first that was drawn (new mail above it) */
+    float slid = 0, settle = 0;
+    int from = slide.n ? (first > slide.gone ? first - slide.gone - 1 : 0) : first;
+    if (slide.n) {
+        float s = fminf(1, fmaxf(0, (float)((GetTime() - slide.at) / SLIDE_S)));
+        settle = (1 - s) * (1 - s) * (1 - s);
+        for (int i = from, found = 0; i < app->nrows && !found; i++)
+            for (int j = 0; j < slide.n && !found; j++)
+                if (slide.key[j] == row_key(app, i)) slid = slide.y[j] - (area.y + top[i] - app->list_scroll + pull), found = 1;
+    }
+    /* desktop hover: the row under the mouse rises on a soft shadow, the one it left settles back */
+    static int64_t lift_key, sink_key;
+    static float lift_k, sink_k;
+    int64_t hovered = 0;
+    int lifting = fx_enabled() && !plat_touch();
+    /* another folder, search or filter: its rows come in one after another from a little to the right */
+    static uint64_t cascade_view;
+    static double cascade_at = -10;
+    uint64_t view_now = view_of(app);
+    if (view_now != cascade_view) {
+        if (fx_enabled() && cascade_view) cascade_at = GetTime();
+        cascade_view = view_now;
+    }
+    int cascading = GetTime() - cascade_at < 1.5, drawn_rows = 0;
+    nshown = 0;
+    for (int i = from; i < app->nrows; i++) {
         float ry = area.y + top[i] - app->list_scroll + pull;
+        int64_t key = row_key(app, i);
+        if (slide.n) {
+            int j = 0;
+            while (j < slide.n && slide.key[j] != key) j++;
+            if (j < slide.n) slid = slide.y[j] - ry;
+            ry += roundf(slid * settle);
+        }
         if (ry > area.y + area.height) break;
         if (ry + rh < area.y) continue;
         if (lay.heading[i][0]) jd_text(ui, lay.heading[i], x, ry - HEADER_H + 9, 12, JD_MUTED, 1);
         const jd_thread_row *t = &app->rows[i];
         Rectangle box = {r.x + 8, ry + 1, r.width - 16, rh - 2};
+        float came = 1;
+        if (cascading) {
+            float u = fminf(1, fmaxf(0, (float)(GetTime() - cascade_at - 0.03 * drawn_rows) / 0.24f));
+            came = 1 - (1 - u) * (1 - u) * (1 - u);
+            box.x += roundf(16 * (1 - came));
+        }
+        drawn_rows++;
+        float y0 = fmaxf(box.y, area.y), y1 = fminf(box.y + box.height, area.y + area.height);
+        if (y1 > y0 && nshown < MAX_SHOWN)
+            shown[nshown++] = (typeof(shown[0])){key, i, ry, {box.x, y0, box.width, y1 - y0}};
+        /* hovered where the row lies, not where it has risen to: a pointer on its bottom edge would otherwise leave
+           it as it rises and find it again as it settles, flickering */
+        Rectangle hit = box;
+        float lk = !lifting ? 0 : key == lift_key ? lift_k : key == sink_key ? sink_k : 0;
+        /* whole pixels: text is drawn snapped to them, so a fraction would move the box ahead of its text */
+        if (lk > 0.01f) {
+            ry -= roundf(1.5f * lk);
+            box.y = ry + 1;
+            fx_shadow(box, 0.12f, 0.15f, lk);
+        }
         int open = app->grouped ? t->thread == preview(app)->thread : t->latest == preview(app)->message;
-        int picked = is_picked(app, row_key(app, i));
-        int hover = over && CheckCollisionPointRec(GetMousePosition(), box);
+        int picked = is_picked(app, key);
+        int hover = over && CheckCollisionPointRec(GetMousePosition(), hit);
+        if (hover) hovered = key;
         if (picked) DrawRectangleRounded(box, 0.12f, 6, ColorAlpha(JD_NORD10, 0.35f));
         else if (i == app->row) DrawRectangleRounded(box, 0.12f, 6, app->pane == PANE_LIST ? JD_NORD2 : JD_NORD1);
         /* the keyboard's place: outlined only while the list has the keys */
         if (i == app->row && app->pane == PANE_LIST && app->tab == 0 && !plat_touch())
             DrawRectangleRoundedLinesEx(box, 0.12f, 6, 1.5f, JD_NORD8);
         /* no hover on a touch screen: its pointer is wherever the last finger was, and rows slide past it */
-        else if (open || (hover && !plat_touch())) DrawRectangleRounded(box, 0.12f, 6, JD_NORD1);
+        else if (open) DrawRectangleRounded(box, 0.12f, 6, JD_NORD1);
+        else if (lifting && lk > 0.01f) DrawRectangleRounded(box, 0.12f, 6, ColorAlpha(JD_NORD1, lk));
+        else if (!lifting && hover && !plat_touch()) DrawRectangleRounded(box, 0.12f, 6, JD_NORD1);
+        float glow = arrival_glow(key);
+        if (glow > 0) DrawRectangleRounded(box, 0.12f, 6, ColorAlpha(JD_NORD8, 0.22f * glow));
 
         float ax = box.x + (app->prefs.compact ? 20 : 26), ay = ry + (app->prefs.compact ? rh / 2 : 28);
         float ar = app->prefs.compact ? 11 : 17;
@@ -1684,14 +2016,20 @@ void list_draw(jd_app *app, Rectangle r)
         float chips_w = show_folders ? folder_chips(app, t->folders, right, ry + (app->prefs.compact ? rh / 2 - 10 : 52 * k), 1, k) : 0;
         if (app->prefs.compact) {
             float sw = (right - tx) * 0.3f;
+            mark_matches(app, t->senders, tx, ry + rh / 2 - 8 * k, sw - 10, 14 * k, t->unread > 0);
             jd_text_fit(ui, t->senders, tx, ry + rh / 2 - 8 * k, sw - 10, 14 * k, strong, t->unread > 0);
             float mx = right - dw - chips_w;
             if (iw) jd_icon("calendar", mx, ry + rh / 2 - 7, 14, JD_NORD8);
             jd_text(ui, date, mx + iw, ry + rh / 2 - 7 * k, 12 * k, t->unread ? JD_NORD8 : JD_NORD4, t->unread > 0);
             if (chips_w) folder_chips(app, t->folders, right, ry + rh / 2 - 10, 0, k);
-            if (t->flagged) jd_icon("star", mx -= 20, ry + rh / 2 - 7, 14, JD_NORD13);
+            if (t->flagged) {
+                mx -= 20;
+                float s = star_pop(row_key(app, i), 14, mx + 7, ry + rh / 2);
+                jd_icon("star", mx + 7 - s / 2, ry + rh / 2 - s / 2, s, JD_NORD13);
+            }
             if (t->has_attachment) jd_icon("paperclip", mx -= 20, ry + rh / 2 - 7, 14, JD_NORD4);
             if (count[0]) jd_text(ui, count, mx -= cw, ry + rh / 2 - 7 * k, 12 * k, JD_NORD4, 1);
+            mark_matches(app, t->subject, tx + sw, ry + rh / 2 - 8 * k, mx - tx - sw - 10, 14 * k, t->unread > 0);
             jd_text_fit(ui, t->subject, tx + sw, ry + rh / 2 - 8 * k, mx - tx - sw - 10, 14 * k, strong, t->unread > 0);
         } else {
             if (show_meta) {
@@ -1703,24 +2041,45 @@ void list_draw(jd_app *app, Rectangle r)
                     jd_text(ui, count, pill.x + 6, ry + 12 * k, 12 * k, JD_NORD4, 1);
                 }
             }
+            mark_matches(app, t->senders, tx, ry + 10 * k, right - tx - dw - cw - 24, 15 * k, t->unread > 0);
             jd_text_fit(ui, t->senders, tx, ry + 10 * k, right - tx - dw - cw - 24, 15 * k, strong, t->unread > 0);
             float mx = right;
-            if (t->flagged) jd_icon("star", mx -= 18, ry + 34 * k, 14, JD_NORD13);
+            if (t->flagged) {
+                mx -= 18;
+                float s = star_pop(row_key(app, i), 14, mx + 7, ry + 34 * k + 7);
+                jd_icon("star", mx + 7 - s / 2, ry + 34 * k + 7 - s / 2, s, JD_NORD13);
+            }
             if (t->has_attachment) jd_icon("paperclip", mx -= 18, ry + 34 * k, 14, JD_NORD4);
+            mark_matches(app, t->subject, tx, ry + 33 * k, mx - tx - 8, 14 * k, t->unread > 0);
             jd_text_fit(ui, t->subject, tx, ry + 33 * k, mx - tx - 8, 14 * k, strong, t->unread > 0);
             if (app->prefs.snippets && t->snippet && t->snippet[0])
                 jd_text_fit(ui, t->snippet, tx, ry + 54 * k, right - tx - chips_w - (chips_w ? 8 : 0), 13 * k, JD_MUTED, 0);
             if (chips_w) folder_chips(app, t->folders, right, ry + 52 * k, 0, k);
         }
         jd_ui_use(ui, NULL);
+        if (came < 1) DrawRectangleRec((Rectangle){r.x, ry, r.width, rh}, ColorAlpha(JD_NORD0, 1 - came));
     }
     jd_scissor_end();
+    if (hovered != lift_key) sink_key = lift_key, sink_k = lift_k, lift_key = hovered, lift_k = 0;
+    float ease = 1 - expf(-GetFrameTime() / 0.07f);
+    lift_k += ((lift_key ? 1.0f : 0.0f) - lift_k) * ease;
+    sink_k -= sink_k * ease;
+    if (slide.n && settle <= 0) slide.n = 0;
+    burn_flush(app, 1);
     if (!app->dialog.kind && !app->menu.open) jd_scrollbar(area, total, &app->list_scroll);
     if (pull > 1) {
         float cx = area.x + area.width / 2, cy = area.y + pull / 2, rad = 11;
         float a = (float)GetTime() * 360;
         if (refreshing_since > 0) {
             DrawRing((Vector2){cx, cy}, rad - 2.5f, rad, a, a + 270, 32, JD_NORD8);
+        } else if (fx_enabled()) {
+            /* a slingshot: the plane drawn back on a band from two posts, taut once pulled far enough to go */
+            float k = fminf(1, pull / PULL_AT);
+            Color band = k >= 1 ? JD_NORD8 : JD_NORD4;
+            Vector2 seat = {cx, area.y + pull * 0.8f}, l = {cx - 30, area.y + 6}, rr = {cx + 30, area.y + 6};
+            DrawCircleV(l, 2.5f, band), DrawCircleV(rr, 2.5f, band);
+            DrawLineEx(l, seat, 1.5f, band), DrawLineEx(rr, seat, 1.5f, band);
+            fx_mini_plane((Vector2){cx, seat.y - 12}, -PI / 2, 22 + 6 * k, 1, 0.5f + 0.5f * k);
         } else {
             float k = fminf(1, pull / PULL_AT);
             DrawRing((Vector2){cx, cy}, rad - 2.5f, rad, -90 + k * 120, -90 + k * 120 + k * 300, 32,
@@ -1735,7 +2094,7 @@ void list_draw(jd_app *app, Rectangle r)
             const char *icon;
             void (*fn)(jd_app *);
         } acts[] = {{"archive", act_archive}, {"trash-2", act_delete}, {"mail-open", act_toggle_read}, {"star", act_toggle_flag}};
-        int free_tap = !app->dialog.kind && !app->menu.open;
+        int free_tap = !app->dialog.kind && !app->menu.open && !on_floating();
         float step = fminf(64, (bar.width - 110) / 4), bx = bar.x + bar.width - 4 * step - 4;
         /* slot 0 clears the selection; 1..4 are the actions */
         for (int k = 0; k < 5; k++) {
@@ -1754,5 +2113,4 @@ void list_draw(jd_app *app, Rectangle r)
         snprintf(line, sizeof line, "%d", app->npicked);
         jd_text(ui, line, bar.x + 58, bar.y + 14, 18, JD_NORD4, 1);
     }
-    hints_draw(app, x, hints_y, w);
 }

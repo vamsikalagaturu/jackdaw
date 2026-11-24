@@ -1,6 +1,7 @@
 /* The interface's keys, driven as a person types them: raylib automation events set a key down in one frame and
    up in the next, with pauses between the keys of a chord. The mailbox is seeded into a temporary directory, so
    no server is needed; a display is (a hidden window), and without one the test is skipped (77). */
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,7 +10,9 @@
 
 #include "app/app.h"
 #include "core/util.h"
+#include "platform.h"
 #include "raylib.h"
+#include "ui/fx.h"
 
 /* raylib's AutomationEventType, which rcore.c keeps to itself */
 enum { EV_KEY_UP = 1, EV_KEY_DOWN = 2 };
@@ -94,10 +97,12 @@ static void add_mail(jd_store *s, int64_t folder, int first, int n, int dir)
 
 static void frame(jd_app *app)
 {
+    plat_frame(0);
     BeginTextureMode(target);
     ClearBackground(JD_NORD0);
     jd_scale_begin();
     mail_frame(app);
+    fx_frame();
     jd_scale_end();
     EndTextureMode();
 }
@@ -244,6 +249,83 @@ int main(void)
     jd_conv *shown = app.prefs.reader_pos == 2 ? &app.tabs[app.tab].conv : preview(&app);
     check(!strcmp(folder_now(&app), "INBOX") && shown->thread == wanted_thread,
           "a notification opens its message (folder %s, thread %lld)", folder_now(&app), (long long)shown->thread);
+
+    /* the keys help: ? (Shift+/) opens it, keys typed into its filter, then one Esc closes it */
+    app.tab = 0;
+    app.pane = PANE_LIST;
+    PollInputEvents();
+    key_event(EV_KEY_DOWN, KEY_LEFT_SHIFT);
+    frame(&app);
+    tap(&app, KEY_SLASH);
+    PollInputEvents();
+    key_event(EV_KEY_UP, KEY_LEFT_SHIFT);
+    frame(&app);
+    check(app.help, "? opens the keys help");
+    tap(&app, KEY_D);
+    tap(&app, KEY_E);
+    tap(&app, KEY_MINUS);
+    tap(&app, KEY_ESCAPE);
+    check(!app.help, "Esc closes the keys help after typing (searching %d)", app.searching);
+
+    /* a tap some keyboards send as press and release together: both read in one poll, it still counts */
+    app.help = 1;
+    for (int i = 0; i < 3; i++) frame(&app);
+    PollInputEvents();
+    key_event(EV_KEY_DOWN, KEY_ESCAPE);
+    key_event(EV_KEY_UP, KEY_ESCAPE);
+    frame(&app);
+    check(!app.help, "an Esc pressed and released within one frame closes the keys help");
+
+    /* the magnifier (Ctrl + wheel): enlarged twice around the pointer, the point under it stays under it */
+    {
+        AutomationEvent e = {0};
+        e.type = 7; /* INPUT_MOUSE_POSITION */
+        e.params[0] = 600, e.params[1] = 400;
+        PlayAutomationEvent(e);
+        frame(&app);
+        Vector2 before = GetMousePosition();
+        jd_magnify(2);
+        for (int i = 0; i < 3; i++) frame(&app);
+        Vector2 after = GetMousePosition();
+        Rectangle on_screen = jd_to_pixels((Rectangle){after.x, after.y, 0, 0});
+        check(fabsf(after.x - before.x) < 1 && fabsf(after.y - before.y) < 1 && fabsf(on_screen.x - 600) < 2 &&
+                  fabsf(on_screen.y - 400) < 2,
+              "magnified twice, the pointer stays on the same point (%.0f,%.0f -> %.0f,%.0f, drawn at %.0f,%.0f)",
+              before.x, before.y, after.x, after.y, on_screen.x, on_screen.y);
+        jd_magnify(1);
+        frame(&app);
+    }
+
+    /* the folder tree: a special folder's own folder follows it, not the plain folders listed after the specials */
+    jd_store_begin(app.view);
+    jd_folder_upsert(app.view, "Archive/2019", '/', NULL);
+    jd_folder_upsert(app.view, "00-todo", '/', NULL);
+    jd_store_commit(app.view);
+    mail_reload(&app);
+    {
+        int archive = -1, inside = -1;
+        for (int i = 0; i < app.nfolders; i++) {
+            if (!strcmp(app.folders[i].name, "Archive")) archive = i;
+            if (!strcmp(app.folders[i].name, "Archive/2019")) inside = i;
+        }
+        check(archive >= 0 && inside == archive + 1, "a folder inside Archive comes right after it (%d, %d)", archive, inside);
+    }
+
+    /* the search bar: / from another page focuses it; what is typed finds a setting; Down and Enter open it */
+    settings_open(&app);
+    frame(&app);
+    tap(&app, KEY_SLASH);
+    check(app.searching, "/ focuses the search bar from Settings");
+    jd_field_set(&app.search, "undo");
+    /* the results come once typing pauses */
+    for (double t = GetTime(); GetTime() - t < 0.25;) frame(&app);
+    tap(&app, KEY_DOWN);
+    tap(&app, KEY_ENTER);
+    /* 5: Settings' Compose section, where Undo send is */
+    check(!app.searching && app.tabs[app.tab].kind == TAB_SETTINGS && app.settings_section == 5,
+          "the search bar finds Undo send and opens Settings at it (section %d)", app.settings_section);
+    tab_close(&app, app.tab);
+    app.tab = 0;
 
     /* the calendar: g c opens its tab (with no calendar set up), n asks for one first, Esc closes the tab */
     app.tab = 0;

@@ -31,4 +31,5 @@ jackdaw with `SSL_CERT_FILE=~/.cache/jackdaw/imap-test/ca.crt` to trust its cert
 Changes reach `main` through pull requests; CI (`.github/workflows/ci.yml`) builds Linux and Android. After CI passes
 on `main`, `.github/workflows/release.yml` runs `platform/release.sh` when the version in `CMakeLists.txt`'s
 `project()` has no release yet, publishing `jackdaw-linux-x86_64` and `jackdaw.apk` as `vX.Y.Z`. A release needs that
-version raised.
+version raised, and a `## [X.Y.Z] - date` section for it in `CHANGELOG.md` (Keep a Changelog 1.1.0), which becomes
+the release notes: without one the release stops before anything is tagged.

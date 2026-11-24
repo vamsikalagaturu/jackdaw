@@ -137,7 +137,7 @@ static const char *special_use_of(const struct mailimap_mailbox_list *mb, int *n
         const char *name, *use;
     } names[] = {{"Sent", "Sent"}, {"Sent Items", "Sent"}, {"Sent Messages", "Sent"}, {"Drafts", "Drafts"},
                  {"Trash", "Trash"}, {"Deleted Items", "Trash"}, {"Junk", "Junk"}, {"Spam", "Junk"},
-                 {"Archive", "Archive"}, {NULL, NULL}};
+                 {"Archive", "Archive"}, {"Archives", "Archive"}, {NULL, NULL}};
     const char *leaf = mb->mb_delimiter ? strrchr(mb->mb_name, mb->mb_delimiter) : NULL;
     leaf = leaf ? leaf + 1 : mb->mb_name;
     for (int i = 0; names[i].name; i++)

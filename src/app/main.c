@@ -8,6 +8,7 @@
 #include "mail/fetch.h"
 #include "platform.h"
 #include "raylib.h"
+#include "ui/fx.h"
 #include "ui/icons.h"
 
 /* the phone may sleep, or freeze the app, past a scheduled draft's time */
@@ -186,12 +187,14 @@ int main(int argc, char **argv)
         }
         if (!app.show_form && IsKeyPressed(KEY_COMMA) && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)))
             settings_open(&app);
+        jd_magnifier_frame();
         BeginDrawing();
         ClearBackground(JD_NORD0);
         jd_scale_begin();
         if (app.show_form) form_frame(&app);
         else mail_frame(&app);
         jd_field_menu_draw(&app.ui);
+        fx_frame();
         jd_scale_end();
         EndDrawing();
         if (app.print_tab) {

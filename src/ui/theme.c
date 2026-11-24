@@ -133,6 +133,14 @@ void jd_set_insets(float top, float bottom)
     inset_top = top, inset_bottom = bottom;
 }
 
+/* Magnification: the view enlarged around the pointer, the layout as it was. at is the logical point that lies under
+   the pointer unmagnified; it is drawn under the pointer, everything else spread around it, so moving the pointer
+   moves the enlarged view across the page. */
+static float magnify = 1;
+static Vector2 magnify_at;
+
+void jd_magnify(float m) { magnify = m > 1 ? m : 1; }
+
 void jd_scale_begin(void)
 {
 #ifdef __ANDROID__
@@ -141,9 +149,18 @@ void jd_scale_begin(void)
     /* BeginMode2D loads identity, dropping raylib's HiDPI screen scale, so the camera carries it */
     float dpi = GetWindowScaleDPI().x;
 #endif
-    camera = (Camera2D){.zoom = jd_scale * dpi, .offset = {0, inset_top}};
-    SetMouseScale(1 / jd_scale, 1 / jd_scale);
-    SetMouseOffset(0, (int)-inset_top);
+    float s = jd_scale, m = magnify;
+    /* the mouse as last mapped is magnified: from it, where the pointer is in unmagnified logical pixels */
+    if (camera.zoom) {
+        Vector2 p = GetMousePosition();
+        float was = camera.zoom / (s * dpi);
+        magnify_at = (Vector2){p.x * was - magnify_at.x * (was - 1), p.y * was - magnify_at.y * (was - 1)};
+    }
+    if (m == 1) magnify_at = (Vector2){0};
+    camera = (Camera2D){.zoom = s * dpi * m, .target = magnify_at,
+                        .offset = {magnify_at.x * s * dpi, magnify_at.y * s * dpi + inset_top}};
+    SetMouseScale(1 / (s * m), 1 / (s * m));
+    SetMouseOffset((int)(magnify_at.x * s * (m - 1)), (int)(-inset_top + magnify_at.y * s * (m - 1)));
     BeginMode2D(camera);
 }
 
@@ -162,14 +179,29 @@ float jd_screen_h(void)
     return ((float)GetScreenHeight() - inset_top - inset_bottom) / jd_scale;
 }
 
+float jd_pixel_scale(void)
+{
+    return camera.zoom ? camera.zoom : jd_scale;
+}
+
+Rectangle jd_to_pixels(Rectangle r)
+{
+    if (!camera.zoom) return (Rectangle){r.x * jd_scale, r.y * jd_scale + inset_top, r.width * jd_scale, r.height * jd_scale};
+    float z = camera.zoom;
+    return (Rectangle){(r.x - camera.target.x) * z + camera.offset.x, (r.y - camera.target.y) * z + camera.offset.y,
+                       r.width * z, r.height * z};
+}
+
 /* raylib's scissor does not nest: a stack of logical rectangles, each cut to the one around it */
 static Rectangle clips[16];
 static int nclips;
 
+/* in window coordinates (raylib applies the HiDPI scale), through the magnification */
 static void apply(Rectangle c)
 {
-    BeginScissorMode((int)(c.x * jd_scale), (int)(c.y * jd_scale + inset_top), (int)(c.width * jd_scale + 0.5f),
-                     (int)(c.height * jd_scale + 0.5f));
+    float s = jd_scale, m = magnify;
+    float x = (c.x - magnify_at.x) * s * m + magnify_at.x * s, y = (c.y - magnify_at.y) * s * m + magnify_at.y * s + inset_top;
+    BeginScissorMode((int)x, (int)y, (int)(c.width * s * m + 0.5f), (int)(c.height * s * m + 0.5f));
 }
 
 void jd_scissor(float x, float y, float w, float h)

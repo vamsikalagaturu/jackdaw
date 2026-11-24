@@ -57,6 +57,7 @@ typedef struct {
     int scale;           /* [view] scale, percent of the normal size, 80-160 */
     int compact;         /* [view] density = "comfortable" | "compact" */
     int snippets;        /* [view] snippets, default true */
+    int effects;         /* [view] effects: the paper plane, the burn, frosted and rising dialogs; default true */
     int prefer_plain;    /* [reading] format = "html" | "plain" */
     int remote_images;   /* [reading] remote_images = "ask" | "always" */
     char *image_senders; /* [reading] images_from: addresses whose remote images load, comma-separated */

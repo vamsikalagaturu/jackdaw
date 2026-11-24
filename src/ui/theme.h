@@ -41,8 +41,13 @@ void jd_scale_begin(void);
 /* screen pixels covered by the system at the top and bottom (phones: status bar, cutout, soft keyboard) */
 void jd_set_insets(float top, float bottom);
 void jd_scale_end(void);
+/* the view enlarged m times (1: as laid out) around the pointer, from the next jd_scale_begin; no relayout */
+void jd_magnify(float m);
 float jd_screen_w(void);
 float jd_screen_h(void);
+/* framebuffer pixels per logical pixel, and a logical rectangle in framebuffer pixels (what LoadImageFromScreen reads) */
+float jd_pixel_scale(void);
+Rectangle jd_to_pixels(Rectangle r);
 /* clipping in logical pixels; nests (each is cut to the one around it), every jd_scissor needs a jd_scissor_end */
 void jd_scissor(float x, float y, float w, float h);
 void jd_scissor_end(void);

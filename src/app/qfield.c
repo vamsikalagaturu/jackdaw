@@ -78,6 +78,13 @@ static void absorb(jd_qfield *q, int all)
     jd_buf_free(&keep);
 }
 
+void qfield_set(jd_qfield *q, const char *query)
+{
+    qfield_clear(q);
+    jd_field_set(&q->text, query);
+    absorb(q, 1);
+}
+
 static const char *typed_word(const jd_qfield *q)
 {
     if (q->text.cursor != q->text.len) return NULL;

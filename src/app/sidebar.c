@@ -8,6 +8,7 @@
 #include "app.h"
 #include "core/util.h"
 #include "platform.h"
+#include "ui/fx.h"
 #include "ui/icons.h"
 
 /* the accounts list under the sidebar's account (accounts_menu_draw draws it over everything) */
@@ -62,7 +63,7 @@ const char *folder_label(const jd_folder_row *f)
     return leaf ? leaf + 1 : f->path;
 }
 
-static const char *folder_icon(const jd_folder_row *f)
+const char *folder_icon(const jd_folder_row *f)
 {
     static const struct {
         const char *use, *icon;
@@ -95,6 +96,39 @@ static int has_children(jd_app *app, int i)
     return 0;
 }
 
+int folder_depth(const jd_folder_row *f) { return depth_of(f); }
+int folder_has_children(jd_app *app, int i) { return has_children(app, i); }
+
+/* Each folder followed by the folders inside it, at every level in the order the store gives (special folders
+   first, then by name): a special folder's subfolders (Archives' own) stay under it, not among the others. A
+   folder whose parent is not listed goes under its nearest listed ancestor. */
+static void tree_emit(jd_app *app, const int *parent, int i, jd_folder_row *out, int *n)
+{
+    out[(*n)++] = app->folders[i];
+    for (int j = 0; j < app->nfolders; j++)
+        if (parent[j] == i) tree_emit(app, parent, j, out, n);
+}
+
+void folders_tree_order(jd_app *app)
+{
+    int nf = app->nfolders;
+    if (nf < 2) return;
+    int *parent = jd_alloc(sizeof *parent * (size_t)nf);
+    for (int i = 0; i < nf; i++) {
+        parent[i] = -1;
+        for (int j = 0; j < nf; j++)
+            if (j != i && is_under(&app->folders[i], &app->folders[j]) &&
+                (parent[i] < 0 || depth_of(&app->folders[j]) > depth_of(&app->folders[parent[i]])))
+                parent[i] = j;
+    }
+    jd_folder_row *out = jd_alloc(sizeof *out * (size_t)nf);
+    int n = 0;
+    for (int i = 0; i < nf; i++)
+        if (parent[i] < 0) tree_emit(app, parent, i, out, &n);
+    memcpy(app->folders, out, sizeof *out * (size_t)nf);
+    free(out), free(parent);
+}
+
 int folder_hidden(jd_app *app, int i)
 {
     for (int j = 0; j < app->nfolders; j++)
@@ -102,7 +136,7 @@ int folder_hidden(jd_app *app, int i)
     return 0;
 }
 
-static void toggle_collapsed(jd_app *app, int i)
+void toggle_collapsed(jd_app *app, int i)
 {
     jd_folder_row *f = &app->folders[i];
     f->collapsed = !f->collapsed;
@@ -120,6 +154,8 @@ static void select_folder(jd_app *app, int i)
     reader_close(app);
     list_reload(app);
 }
+
+void folder_select(jd_app *app, int i) { select_folder(app, i); }
 
 /* the folder with this special use (RFC 6154), else one whose own name is it ("Sent" under "INBOX." too);
    "INBOX" is the Inbox. Shows it and returns 1, or 0 when there is none. */
@@ -318,6 +354,74 @@ static void rail_draw(jd_app *app, Rectangle r)
     if (tip) tooltip(app, tip, tip_at.x, tip_at.y);
 }
 
+/* A folder's unread count rolls when it changes, as an odometer's digits do: the old number rises out of its place
+   as the new one comes up from below (down for a count going down). By folder, for the folders on show. */
+static void rolling_count(jd_app *app, int64_t folder, int unread, Rectangle box, float y)
+{
+    static struct {
+        int64_t folder;
+        int now, was;
+        double at;
+    } counts[64];
+    int slot = -1, free_slot = 0;
+    for (int i = 0; i < 64 && slot < 0; i++) {
+        if (counts[i].folder == folder) slot = i;
+        else if (!counts[i].folder) free_slot = i;
+    }
+    if (slot < 0) slot = free_slot, counts[slot] = (typeof(counts[0])){folder, unread, unread, 0};
+    if (counts[slot].now != unread) counts[slot].was = counts[slot].now, counts[slot].now = unread, counts[slot].at = GetTime();
+    float u = fx_enabled() ? (float)(GetTime() - counts[slot].at) / 0.32f : 1;
+    char text[16];
+    if (u >= 1) {
+        if (!unread) return;
+        snprintf(text, sizeof text, "%d", unread);
+        jd_text(&app->ui, text, box.x + box.width - jd_text_width(&app->ui, text, 14, 1) - 10, y, 14, JD_NORD8, 1);
+        return;
+    }
+    float e = 1 - (1 - u) * (1 - u) * (1 - u), dir = counts[slot].now > counts[slot].was ? 1 : -1;
+    jd_scissor(box.x, box.y, box.width, box.height);
+    int values[2] = {counts[slot].was, unread};
+    for (int k = 0; k < 2; k++) {
+        if (!values[k]) continue;
+        snprintf(text, sizeof text, "%d", values[k]);
+        float shift = (k ? 1 - e : -e) * 14 * dir;
+        jd_text(&app->ui, text, box.x + box.width - jd_text_width(&app->ui, text, 14, 1) - 10, y + shift, 14,
+                ColorAlpha(JD_NORD8, k ? e : 1 - e), 1);
+    }
+    jd_scissor_end();
+}
+
+/* where the folders with a special use were drawn last, for effects flying to one (send later to Drafts) */
+static struct {
+    char use[16];
+    Rectangle box;
+    double at;
+} specials[8];
+
+static void special_seen(const char *use, Rectangle box)
+{
+    int slot = 0;
+    for (int i = 0; i < 8; i++) {
+        if (!strcmp(specials[i].use, use)) {
+            slot = i;
+            break;
+        }
+        if (specials[i].at < specials[slot].at) slot = i;
+    }
+    snprintf(specials[slot].use, sizeof specials[slot].use, "%s", use);
+    specials[slot].box = box, specials[slot].at = GetTime();
+}
+
+int sidebar_special_at(const char *use, Vector2 *at)
+{
+    for (int i = 0; i < 8; i++)
+        if (!strcmp(specials[i].use, use) && GetTime() - specials[i].at < 0.2) {
+            *at = (Vector2){specials[i].box.x + 30, specials[i].box.y + specials[i].box.height / 2};
+            return 1;
+        }
+    return 0;
+}
+
 void sidebar_draw(jd_app *app, Rectangle r)
 {
     jd_ui *ui = &app->ui;
@@ -375,13 +479,9 @@ void sidebar_draw(jd_app *app, Rectangle r)
     }
 
     Rectangle write = {r.x + 12, r.y + 102, r.width - 24, 38};
-    int hover_write = CheckCollisionPointRec(GetMousePosition(), write) && free_input;
-    DrawRectangleRounded(write, 0.3f, 6, hover_write && !plat_touch() ? ColorBrightness(JD_NORD10, 0.12f) : JD_NORD10);
-    jd_icon("pencil", write.x + 14, write.y + 11, 16, JD_ON_ACCENT);
-    jd_text(ui, "New message", write.x + 40, write.y + 11, 14, JD_ON_ACCENT, 1);
-    if (hover_write && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) drawer_done(app), compose_open(app, COMPOSE_NEW, 0);
+    if (jd_icon_button(ui, "pencil", "New message", write, 1) && free_input) drawer_done(app), compose_open(app, COMPOSE_NEW, 0);
 
-    float y = r.y + 154, bottom = r.y + r.height - 118;
+    float y = r.y + 154, bottom = r.y + r.height - 124;
     if (app->prefs.tabs_side && app->ntabs > 1) y = tab_rows(app, r, y, 0);
     Rectangle view = {r.x, y, r.width, bottom - 4 - y};
     float content = 0, sel = -1;
@@ -430,7 +530,8 @@ void sidebar_draw(jd_app *app, Rectangle r)
         if (f->unread) snprintf(count, sizeof count, "%d", f->unread);
         float cw = jd_text_width(ui, count, 14, 1);
         jd_text_fit(ui, folder_label(f), box.x + indent, y + 7, box.width - indent - cw - 20, 15, JD_NORD6, f->unread > 0);
-        if (f->unread) jd_text(ui, count, box.x + box.width - cw - 10, y + 7, 14, JD_NORD8, 1);
+        rolling_count(app, f->id, f->unread, box, y + 7);
+        if (f->special_use) special_seen(f->special_use, box);
         y += row;
     }
     jd_scissor_end();
@@ -440,22 +541,30 @@ void sidebar_draw(jd_app *app, Rectangle r)
     DrawRectangle((int)r.x + 12, (int)bottom, (int)r.width - 24, 1, JD_NORD2);
     struct {
         const char *icon, *label;
-    } foot[] = {{"calendar", "Calendar"}, {"settings", "Settings"}, {"circle-help", "Keys (?)"}};
-    /* the calendar on a line of its own, Settings and Keys under it */
+    } foot[] = {{"settings", "Settings"}, {"circle-help", "Keys (?)"}};
+    /* the calendar as a button of its own, the width of the sidebar; Settings and Keys under it */
     float fx = r.x + 12, fy = bottom + 8;
-    for (int k = 0; k < 3; k++) {
-        if (k == 1) fx = r.x + 12, fy += 36;
+    {
+        Rectangle b = {r.x + 12, fy, r.width - 24, 36};
+        int hover = CheckCollisionPointRec(GetMousePosition(), b) && free_input;
+        DrawRectangleRounded(b, 0.3f, 6, ColorAlpha(JD_NORD10, 0.16f));
+        jd_tap_face(b, hover && !plat_touch(), 0, 0.3f);
+        jd_tap_icon("calendar", (Rectangle){b.x + 4, b.y + 2, 32, 32}, 16, 1, JD_NORD8, JD_NORD8);
+        jd_text(ui, "Calendar", b.x + 38, b.y + 10, 14, JD_NORD6, 1);
+        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) drawer_done(app), calendar_open(app);
+        fy += 42;
+    }
+    /* a phone has no keyboard to show the keys of */
+    for (int k = 0; k < (plat_touch() ? 1 : 2); k++) {
         float fw = jd_text_width(ui, foot[k].label, 13, 0) + 40;
         Rectangle b = {fx, fy, fw, 32};
         int hover = CheckCollisionPointRec(GetMousePosition(), b) && free_input;
-        int lit = hover && !plat_touch();
-        if (lit) DrawRectangleRounded(b, 0.3f, 6, JD_NORD2);
-        jd_icon(foot[k].icon, fx + 10, fy + 8, 16, lit ? JD_NORD8 : JD_NORD4);
+        float lit = jd_tap_face(b, hover && !plat_touch(), 0, 0.3f);
+        jd_tap_icon(foot[k].icon, (Rectangle){fx + 2, fy, 32, 32}, 16, lit, JD_NORD4, JD_NORD8);
         jd_text(ui, foot[k].label, fx + 32, fy + 9, 13, JD_NORD4, 0);
         if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             drawer_done(app);
-            if (k == 0) calendar_open(app);
-            else if (k == 1) settings_open(app);
+            if (k == 0) settings_open(app);
             else app->help = 1;
         }
         fx += fw + 4;

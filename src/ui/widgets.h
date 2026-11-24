@@ -71,13 +71,25 @@ void jd_popup_open(jd_popup *p);
 int jd_popup_draw(jd_ui *ui, jd_popup *p, const jd_popup_item *items, int n);
 /* a button with an icon before its label (icon NULL: the label alone); label NULL: the icon alone */
 int jd_icon_button(jd_ui *ui, const char *icon, const char *label, Rectangle r, int primary);
+/* The background of a flat icon button the caller draws itself (toolbars, headers): shown while hovered or on, a
+   press ripples. Returns how lit it is, 0 to 1, eased with [view] effects; draw the icon with jd_tap_icon. */
+float jd_tap_face(Rectangle r, int hover, int on, float roundness);
+/* icon centred in r, from rest toward lit (and a little larger) as hover goes to 1 */
+void jd_tap_icon(const char *icon, Rectangle r, float size, float hover, Color rest, Color lit);
 /* A vertical scrollbar along the right edge of view (shown when content is taller than view): the thumb drags,
    a click on the track pages. *scroll is kept within 0..content - view. */
 void jd_scrollbar(Rectangle view, float content, float *scroll);
 /* a touch screen: scrollbars show no hover (the pointer is where the last finger was) */
 void jd_set_touch(int touch);
+/* Overlays drawn after the page (toasts, search results) record their box with jd_cover each frame; jd_covered: the
+   pointer is over one drawn last frame, so the page under it takes no click. jd_cover_frame once a frame, first. */
+void jd_cover(Rectangle r);
+int jd_covered(void);
+void jd_cover_frame(void);
+/* once a frame, before drawing: Ctrl + wheel magnifies around the pointer until Ctrl is let go (jd_magnify) */
+void jd_magnifier_frame(void);
 /* this frame's scroll in logical pixels, to subtract from the offset: a finger's exact movement, else wheel
-   notches times notch */
+   notches times notch; none while Ctrl is held (the wheel magnifies then) */
 float jd_wheel_y(float notch);
 float jd_wheel_x(float notch);
 /* the view between jd_follow_begin and jd_follow_end scrolls the focused field into sight when it just took the

@@ -75,9 +75,27 @@ static int header_caret_here(jd_conv *c, int id)
     return rv.active && rv.conv == c && rv.seg == id;
 }
 
+/* the reader's zoom for this session, on top of Settings > Message text; not saved */
+static const float zooms[] = {0.5f, 0.67f, 0.8f, 0.9f, 1, 1.1f, 1.25f, 1.5f, 1.75f, 2, 2.5f, 3};
+enum { ZOOM_NONE = 4, ZOOMS = sizeof zooms / sizeof *zooms };
+static int zoom_at = ZOOM_NONE;
+
+int reader_zoom_percent(void) { return (int)(zooms[zoom_at] * 100 + 0.5f); }
+
+void reader_zoom(jd_app *app, int dir)
+{
+    int to = dir ? zoom_at + dir : ZOOM_NONE;
+    if (to < 0 || to >= ZOOMS || to == zoom_at) return;
+    zoom_at = to;
+    /* the open messages laid out again at the new size, as a new Message text size does (apply_prefs) */
+    for (int t = 0; t < app->ntabs; t++)
+        if (app->tabs[t].conv.thread) conv_open(app, &app->tabs[t].conv, app->tabs[t].conv.thread, app->tabs[t].conv.message);
+    notify_user(app, "Message zoom %d%%", reader_zoom_percent());
+}
+
 static void text_size(jd_app *app)
 {
-    TEXT_SIZE = (float)(app->prefs.reader_text ? app->prefs.reader_text : 15);
+    TEXT_SIZE = roundf((float)(app->prefs.reader_text ? app->prefs.reader_text : 15) * zooms[zoom_at]);
     LINE_H = (float)(int)(TEXT_SIZE * 1.4f + 0.5f);
     K = TEXT_SIZE / 15.0f;
 }
@@ -203,7 +221,7 @@ static void load_text(jd_app *app, jd_reading *r)
     free(html), free(raw);
 }
 
-/* a link from an HTML mail: mailto: opens a compose tab, web links go to the system's browser */
+/* a link in a mail (HTML or plain text): mailto: opens a compose tab, web links go to the system's browser */
 static void follow_link(jd_app *app, const char *url)
 {
     if (strncasecmp(url, "mailto:", 7) == 0) {
@@ -838,7 +856,7 @@ static void sel_label(jd_app *app, jd_conv *c, int id, const char *text, float x
     Rectangle box = {x, y - 2, tw < w ? tw : w, size + 4};
     Vector2 mp = GetMousePosition();
     int over = CheckCollisionPointRec(mp, box) && CheckCollisionPointRec(mp, clip) && !app->dialog.kind &&
-               !app->menu.open && !reader_menu.open;
+               !app->menu.open && !reader_menu.open && !on_floating();
     if (over) SetMouseCursor(MOUSE_CURSOR_IBEAM);
     if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         clear_selections(c);
@@ -959,7 +977,7 @@ static float address_line(jd_app *app, jd_conv *c, int id, const char *label, co
 
     Vector2 mp = GetMousePosition();
     int free_mouse = CheckCollisionPointRec(mp, clip) && !app->dialog.kind && !app->menu.open && !chip_menu.open &&
-                     !reader_menu.open;
+                     !reader_menu.open && !on_floating();
     int under = -1;
     for (int k = 0; k < npc && free_mouse; k++) {
         float pw = label_x(ui, text + pc[k].start, pc[k].end - pc[k].start, ts, 0);
@@ -1089,7 +1107,7 @@ static float header_line(jd_app *app, jd_conv *c, int id, const char *label, con
 static int clicked(Rectangle box, Rectangle clip, jd_app *app)
 {
     return IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), box) &&
-           CheckCollisionPointRec(GetMousePosition(), clip) && !app->dialog.kind;
+           CheckCollisionPointRec(GetMousePosition(), clip) && !app->dialog.kind && !on_floating();
 }
 
 static char *sender_address(const jd_reading *m);
@@ -1275,7 +1293,7 @@ static float draw_files(jd_app *app, jd_reading *m, float x, float y, float w, R
         jd_icon("download", dl.x + iy, dl.y + iy, is, on_dl ? JD_NORD8 : hover ? JD_NORD4 : JD_MUTED);
         if (clicked(dl, clip, app)) save_attachment(app, m, f);
         else if (clicked(chip, clip, app)) open_attachment(app, m, f);
-        if (hover) jd_tooltip(on_dl ? "Save to Downloads" : "Open", on_dl ? dl.x : cx, y + ch + 4);
+        if (hover && !plat_touch()) jd_tooltip(on_dl ? "Save to Downloads" : "Open", on_dl ? dl.x : cx, y + ch + 4);
         cx += cw + 8;
     }
     if (m->nfiles > 1) {
@@ -1327,6 +1345,39 @@ static float span(jd_ui *ui, const char *text, int from, int to)
     return w;
 }
 
+/* Web and mail links in plain text. One starts with its scheme and runs to a space, a quote or an angle bracket (so
+   <https://...> is delimited as RFC 3986 Appendix C recommends for links in text), sentence punctuation left off its
+   end. url_end: where the link starting at i ends, i when none starts there. */
+static int url_end(const char *t, int i)
+{
+    int n = !strncasecmp(t + i, "https://", 8) ? 8 : !strncasecmp(t + i, "http://", 7) || !strncasecmp(t + i, "mailto:", 7) ? 7 : 0;
+    if (!n || (i > 0 && isalnum((unsigned char)t[i - 1]))) return i;
+    int j = i + n, open = 0;
+    for (; t[j] && !isspace((unsigned char)t[j]) && !strchr("<>\"'", t[j]); j++) open += t[j] == '(' ? 1 : t[j] == ')' ? -1 : 0;
+    while (j > i + n && strchr(".,;:!?)]}", t[j - 1])) {
+        if (t[j - 1] == ')' && open >= 0) break;
+        if (t[j - 1] == ')') open++;
+        j--;
+    }
+    return j > i + n ? j : i;
+}
+
+/* the link [*a, *b) covering byte at (one wrapped onto this line included), or the next starting before limit */
+static int url_from(const char *t, int at, int limit, int *a, int *b)
+{
+    int s = at;
+    while (s > 0 && at - s < 2048 && !isspace((unsigned char)t[s - 1]) && !strchr("<>\"'", t[s - 1])) s--;
+    for (int i = s; i < limit; i++) {
+        int e = url_end(t, i);
+        if (e > i && e > at) {
+            *a = i, *b = e;
+            return 1;
+        }
+        if (e > i) i = e - 1;
+    }
+    return 0;
+}
+
 /* the byte of plain text m under (x, y), relative to the text's top left; lines past shown are folded away */
 static int plain_hit(jd_ui *ui, const jd_reading *m, float x, float y, int shown)
 {
@@ -1344,6 +1395,19 @@ static int plain_hit(jd_ui *ui, const jd_reading *m, float x, float y, int shown
         i = next;
     }
     return i;
+}
+
+/* the link under (x, y) in plain text m, malloc'd; NULL when there is none (past a line's end is none) */
+static char *plain_link_at(jd_ui *ui, const jd_reading *m, float x, float y, int shown)
+{
+    if (!shown || y < 0 || y >= (float)shown * LINE_H || x < 0) return NULL;
+    int l = (int)(y / LINE_H), tlen = (int)strlen(m->text);
+    int from = m->line_starts[l], to = l + 1 < m->nlines ? m->line_starts[l + 1] : tlen;
+    if (x > span(ui, m->text, from, to)) return NULL;
+    int at = plain_hit(ui, m, x, y, shown), a, b;
+    if (at > from && at == to) at--;
+    if (!url_from(m->text, at, at + 1, &a, &b) || at < a || at >= b) return NULL;
+    return jd_printf("%.*s", b - a, m->text + a);
 }
 
 static void clear_selections(jd_conv *c)
@@ -1584,7 +1648,7 @@ static void text_mouse(jd_app *app, jd_conv *c, int i, Rectangle area, Rectangle
 {
     jd_reading *m = &c->reading[i];
     Vector2 mp = GetMousePosition(), at = {mp.x - ox, mp.y - oy};
-    int free_mouse = !app->dialog.kind && !app->menu.open && !reader_menu.open;
+    int free_mouse = !app->dialog.kind && !app->menu.open && !reader_menu.open && !on_floating();
     int over = free_mouse && CheckCollisionPointRec(mp, area) && CheckCollisionPointRec(mp, clip);
     if (app->ui.touch) {
         touch_mouse(app, c, i, clip, ox, oy, html, shown);
@@ -1608,7 +1672,16 @@ static void text_mouse(jd_app *app, jd_conv *c, int i, Rectangle area, Rectangle
             }
         }
     }
-    if (over) SetMouseCursor(MOUSE_CURSOR_IBEAM);
+    /* Ctrl + click opens a link (a plain click selects, as on any text); a phone's tap opens it on release */
+    int ctrl = !app->ui.touch && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
+    char *link = over && ctrl ? (html ? jd_html_link_at(m->html, at.x, at.y) : plain_link_at(&app->ui, m, at.x, at.y, shown)) : NULL;
+    if (over) SetMouseCursor(link ? MOUSE_CURSOR_POINTING_HAND : MOUSE_CURSOR_IBEAM);
+    if (link && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        follow_link(app, link);
+        free(link);
+        return;
+    }
+    free(link);
     if (over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         visual_end(c);
         clear_selections(c);
@@ -1620,7 +1693,7 @@ static void text_mouse(jd_app *app, jd_conv *c, int i, Rectangle area, Rectangle
     if (over && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
         menu_conv = c, menu_msg = i;
         free(menu_link);
-        menu_link = html ? jd_html_link_at(m->html, at.x, at.y) : NULL;
+        menu_link = html ? jd_html_link_at(m->html, at.x, at.y) : plain_link_at(&app->ui, m, at.x, at.y, shown);
         free(menu_label);
         menu_label = NULL;
         jd_popup_open(&reader_menu);
@@ -1636,8 +1709,9 @@ static void text_mouse(jd_app *app, jd_conv *c, int i, Rectangle area, Rectangle
         }
     }
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
-        if (!drag.moved && html) {
-            char *url = jd_html_link_at(m->html, drag.start.x, drag.start.y);
+        if (!drag.moved && app->ui.touch) {
+            char *url = html ? jd_html_link_at(m->html, drag.start.x, drag.start.y)
+                             : plain_link_at(&app->ui, m, drag.start.x, drag.start.y, shown);
             if (url) follow_link(app, url);
             free(url);
         }
@@ -1782,7 +1856,7 @@ static float card_icons(jd_app *app, jd_conv *c, int i, float right, float cy, R
     float bw = 30, w = bw * (float)(nshown + 1);
     if (!draw) return w;
     jd_reading *m = &c->reading[i];
-    int free_mouse = !app->dialog.kind && !app->menu.open && !card_menu.open && !reader_menu.open;
+    int free_mouse = !app->dialog.kind && !app->menu.open && !card_menu.open && !reader_menu.open && !on_floating();
     const char *tip = NULL;
     float tip_x = 0, x = right - w;
     for (int k = 0; k <= nshown; k++, x += bw) {
@@ -1804,7 +1878,7 @@ static float card_icons(jd_app *app, jd_conv *c, int i, float right, float cy, R
         card_menu.at = (Vector2){x + 28 - 240, cy + 16};
         card_opened_at = card_frames;
     }
-    if (tip) jd_tooltip(tip, tip_x, cy + 16);
+    if (tip && !plat_touch()) jd_tooltip(tip, tip_x, cy + 16);
     return w;
 }
 
@@ -1837,7 +1911,8 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
     for (int i = 0; i < c->n; i++) c->reading[i].body_y = -1;
     DrawRectangleRec(r, JD_NORD0);
     if (!c->n) {
-        jd_text(ui, app->nrows ? "Enter opens the selected conversation." : "", r.x + 28, r.y + 24, 14, JD_MUTED, 0);
+        jd_text(ui, !app->nrows ? "" : plat_touch() ? "Tap a conversation to read it." : "Enter opens the selected conversation.",
+                r.x + 28, r.y + 24, 14, JD_MUTED, 0);
         return;
     }
     const int narrow = r.width < 560;
@@ -2043,7 +2118,19 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
                 /* a wrapped quote keeps the quote colour on its continuation lines */
                 int src = from;
                 while (src > 0 && m->text[src - 1] != '\n') src--;
-                jd_text_range(ui, m->text, from, to, x, y, TEXT_SIZE, m->text[src] == '>' ? JD_NORD9 : JD_NORD4, 0);
+                Color plain = m->text[src] == '>' ? JD_NORD9 : JD_NORD4;
+                /* links in the accent colour, underlined; a link wrapped from the line above goes on here */
+                int p = from, a, b;
+                while (p < to && url_from(m->text, p, to, &a, &b)) {
+                    if (a < p) a = p;
+                    if (b > to) b = to;
+                    jd_text_range(ui, m->text, p, a, x + span(ui, m->text, from, p), y, TEXT_SIZE, plain, 0);
+                    float lx = x + span(ui, m->text, from, a), lw = span(ui, m->text, a, b);
+                    jd_text_range(ui, m->text, a, b, lx, y, TEXT_SIZE, JD_NORD8, 0);
+                    DrawRectangleV((Vector2){lx, y + TEXT_SIZE + 1}, (Vector2){lw, 1}, ColorAlpha(JD_NORD8, 0.6f));
+                    p = b;
+                }
+                jd_text_range(ui, m->text, p, to, x + span(ui, m->text, from, p), y, TEXT_SIZE, plain, 0);
             }
             jd_ui_use(ui, NULL);
             if (m->quote_at > 0) {
