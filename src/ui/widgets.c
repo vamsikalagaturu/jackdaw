@@ -9,6 +9,7 @@
 #include "fx.h"
 #include "icons.h"
 #include "platform.h"
+#include "rlgl.h"
 
 static const jd_fonts *role(jd_ui *ui)
 {
@@ -35,7 +36,7 @@ static float snap(float v)
 void jd_text(jd_ui *ui, const char *s, float x, float y, float size, Color c, int bold)
 {
     size = jd_text_size(size);
-    DrawTextEx(font(ui, bold, size), s, (Vector2){snap(x), snap(y)}, size, 0, c);
+    jd_text_draw(bold ? role(ui)->semibold : role(ui)->regular, s, (Vector2){snap(x), snap(y)}, size, c);
 }
 
 Rectangle jd_text_ink(jd_ui *ui, const char *s, float size, int bold)
@@ -809,24 +810,80 @@ static int ctrl_held(void)
 }
 
 /* Ctrl + wheel: a magnifier around the pointer while Ctrl is held (the wheel scrolls nothing then); letting go of
-   Ctrl glides back. Text is rasterised for the enlargement once it settles, so it is sharp, not stretched. */
+   Ctrl glides back. Text is rasterised at the wheel's step (1.25^k, to 5) at or above the enlargement, so it is
+   only ever drawn a little smaller than rasterised, never stretched, and each step's glyphs are reused; rasterising
+   only once the glide stopped showed blurred text that sharpened with a jump. */
+static RenderTexture2D shot;
+static int shoot;
+
 void jd_magnifier_frame(void)
 {
     static float want = 1, now = 1, settled = 1;
-    static double still_since;
     if (ctrl_held()) {
         float wheel = GetMouseWheelMove();
         if (wheel != 0) want = fminf(5, fmaxf(1, want * powf(1.25f, wheel)));
     } else {
         want = 1;
     }
-    float was = now;
+    /* the frame the magnification starts on is still drawn as laid out, for jd_magnifier_draw to take as its picture */
+    if (now == 1 && want > 1 && !shot.id && !shoot) {
+        shoot = 1;
+        return;
+    }
     now += (want - now) * (1 - expf(-GetFrameTime() / 0.06f));
     if (fabsf(now - want) < 0.003f) now = want;
-    if (now != was) still_since = GetTime();
-    float sharp = now == 1 ? 1 : GetTime() - still_since > 0.15 ? now : settled;
-    if (sharp != settled) jd_text_zoom(settled = sharp);
+    float sharp = 1;
+    while (sharp < now - 0.003f) sharp *= 1.25f;
+    if (sharp > 5) sharp = 5;
+    if (sharp != settled) jd_text_magnify(settled = sharp);
     jd_magnify(now);
+}
+
+/* the window as drawn, copied on the GPU, mipmapped so it shrinks into the box without shimmering */
+static void take_shot(void)
+{
+    int w = GetRenderWidth(), h = GetRenderHeight();
+    shot = LoadRenderTexture(w, h);
+    rlDrawRenderBatchActive();
+    rlBindFramebuffer(RL_READ_FRAMEBUFFER, 0);
+    rlBindFramebuffer(RL_DRAW_FRAMEBUFFER, shot.id);
+    rlBlitFramebuffer(0, 0, w, h, 0, 0, w, h, 0x00004000); /* GL_COLOR_BUFFER_BIT */
+    rlDisableFramebuffer();
+    GenTextureMipmaps(&shot.texture);
+    SetTextureFilter(shot.texture, TEXTURE_FILTER_TRILINEAR);
+}
+
+void jd_magnifier_draw(void)
+{
+    if (shoot) {
+        shoot = 0;
+        take_shot();
+        return;
+    }
+    Vector2 at;
+    float m = jd_magnified(&at);
+    if (m <= 1) {
+        if (shot.id) UnloadRenderTexture(shot), shot = (RenderTexture2D){0};
+        return;
+    }
+    float fade = fminf(1, (m - 1) / 0.25f), s = jd_scale;
+    float lw = jd_screen_w(), lh = jd_screen_h();
+    float bw = 220, bh = bw * lh / lw, gap = 16;
+    Rectangle box = {lw - bw - gap, lh - bh - gap, bw, bh};
+    /* it would hide what is magnified with the pointer over its corner: it moves to the other one */
+    if (at.x > box.x - gap && at.y > box.y - gap) box.x = gap;
+    float k = bw / lw;
+    Rectangle seen = {box.x + at.x * (1 - 1 / m) * k, box.y + at.y * (1 - 1 / m) * k, bw / m, bh / m};
+    box = (Rectangle){box.x * s, box.y * s, box.width * s, box.height * s};
+    seen = (Rectangle){seen.x * s, seen.y * s, seen.width * s, seen.height * s};
+    DrawRectangleRec(box, ColorAlpha(JD_NORD1, fade));
+    if (shot.id) {
+        Texture2D t = shot.texture;
+        DrawTexturePro(t, (Rectangle){0, 0, (float)t.width, -(float)t.height}, box, (Vector2){0}, 0, ColorAlpha(WHITE, fade));
+    }
+    DrawRectangleLinesEx(box, s, ColorAlpha(JD_NORD3, fade));
+    DrawRectangleRec(seen, ColorAlpha(JD_NORD8, 0.15f * fade));
+    DrawRectangleLinesEx(seen, 1.5f * s, ColorAlpha(JD_NORD8, fade));
 }
 
 float jd_wheel_y(float notch)

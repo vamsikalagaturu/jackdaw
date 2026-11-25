@@ -43,6 +43,8 @@ void jd_set_insets(float top, float bottom);
 void jd_scale_end(void);
 /* the view enlarged m times (1: as laid out) around the pointer, from the next jd_scale_begin; no relayout */
 void jd_magnify(float m);
+/* the enlargement in use, and the logical point it is around */
+float jd_magnified(Vector2 *at);
 float jd_screen_w(void);
 float jd_screen_h(void);
 /* framebuffer pixels per logical pixel, and a logical rectangle in framebuffer pixels (what LoadImageFromScreen reads) */
@@ -52,19 +54,22 @@ Rectangle jd_to_pixels(Rectangle r);
 void jd_scissor(float x, float y, float w, float h);
 void jd_scissor_end(void);
 
-/* a font file, drawn through jd_font_at */
+/* a font file, measured through jd_font_at and drawn through jd_text_draw */
 typedef struct jd_face jd_face;
 typedef struct {
     jd_face *regular;
     jd_face *semibold;
 } jd_fonts;
 
-/* f rasterised for size logical pixels at the current scale, cached per pixel size; draw and measure a text
-   with the same one */
+/* f rasterised for size logical pixels at the current scale, unmagnified, cached per pixel size */
 Font jd_font_at(jd_face *f, float size);
+/* s laid out by jd_font_at's metrics, its glyphs drawn from f rasterised for the jd_text_magnify magnification */
+void jd_text_draw(jd_face *f, const char *s, Vector2 at, float size, Color c);
 /* screen pixels per logical pixel of text: interface scale x display HiDPI x jd_text_zoom */
 float jd_text_density(void);
 void jd_text_zoom(float zoom);
+/* the magnifier's enlargement: sharper glyphs, the layout unchanged */
+void jd_text_magnify(float m);
 /* size rounded to whole screen pixels, so the atlas maps texel to pixel */
 float jd_text_size(float size);
 void jd_face_free(jd_face *f);

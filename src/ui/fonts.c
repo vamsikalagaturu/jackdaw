@@ -3,6 +3,7 @@
 #endif
 #include <math.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 #include <unistd.h>
 
 #include "theme.h"
+#include "rlgl.h"
 
 extern const unsigned char jd_font_regular[], jd_font_semibold[];
 extern const int jd_font_regular_size, jd_font_semibold_size;
@@ -73,9 +75,97 @@ struct jd_face {
     int nsizes;
 };
 
-static float text_zoom = 1;
+/* Sizes, widths and positions come from the font rasterised without the magnification, so text stays where it was
+   laid out; a magnification only draws each glyph rasterised for it, at those same places. */
+static float text_zoom = 1, text_magnify = 1;
 
 void jd_text_zoom(float zoom) { text_zoom = zoom > 0 ? zoom : 1; }
+
+/* The magnifier's glyphs, rasterised one at a time as they are first drawn, into one atlas dropped when the
+   magnification ends: a whole font per zoom step took up to 16 ms to build and stayed in memory. */
+enum { ATLAS_W = 4096, ATLAS_H = 2048, SLOTS = 1 << 13 };
+static struct zglyph {
+    jd_face *face;
+    int px, cp;
+    Rectangle rec; /* in the atlas, with a clear texel around the ink so bilinear sampling does not bleed */
+    float ox, oy;
+} *slots;
+static int nslots, shelf_x, shelf_y, shelf_h;
+static Texture2D atlas;
+
+static void zoom_glyphs_clear(void)
+{
+    rlDrawRenderBatchActive(); /* what is queued still samples the atlas as it was */
+    memset(slots, 0, sizeof *slots * SLOTS);
+    nslots = shelf_x = shelf_y = shelf_h = 0;
+}
+
+static void zoom_glyphs_drop(void)
+{
+    rlDrawRenderBatchActive();
+    if (atlas.id) UnloadTexture(atlas);
+    atlas = (Texture2D){0};
+    free(slots);
+    slots = NULL;
+    nslots = shelf_x = shelf_y = shelf_h = 0;
+}
+
+static struct zglyph *slot_of(jd_face *f, int px, int cp)
+{
+    unsigned h = (unsigned)((uintptr_t)f >> 4) * 2654435761u ^ (unsigned)px * 40503u ^ (unsigned)cp * 2246822519u;
+    unsigned i = h & (SLOTS - 1);
+    while (slots[i].face && !(slots[i].face == f && slots[i].px == px && slots[i].cp == cp)) i = (i + 1) & (SLOTS - 1);
+    return &slots[i];
+}
+
+static const struct zglyph *zoom_glyph(jd_face *f, int px, int cp)
+{
+    if (!slots) {
+        slots = calloc(SLOTS, sizeof *slots);
+        Image im = {calloc(ATLAS_W * ATLAS_H, 2), ATLAS_W, ATLAS_H, 1, PIXELFORMAT_UNCOMPRESSED_GRAY_ALPHA};
+        atlas = LoadTextureFromImage(im);
+        free(im.data);
+        SetTextureFilter(atlas, TEXTURE_FILTER_BILINEAR);
+    }
+    struct zglyph *z = slot_of(f, px, cp);
+    if (z->face) return z;
+    if (nslots > SLOTS * 3 / 4) zoom_glyphs_clear();
+    struct zglyph g = {.face = f, .px = px, .cp = cp};
+    int got = 0;
+    GlyphInfo *info = LoadFontData(f->bytes, f->len, px, &cp, 1, FONT_DEFAULT, &got);
+    if (info && got == 1) {
+        Image im = info->image;
+        int w = im.width + 2, h = im.height + 2;
+        if (im.data && im.width > 0 && im.height > 0 && w <= ATLAS_W && h <= ATLAS_H) {
+            if (shelf_x + w > ATLAS_W) shelf_y += shelf_h, shelf_x = shelf_h = 0;
+            if (shelf_y + h > ATLAS_H) zoom_glyphs_clear();
+            unsigned char *texels = calloc((size_t)(w * h), 2);
+            const unsigned char *ink = im.data;
+            for (int y = 0; y < im.height; y++)
+                for (int x = 0; x < im.width; x++) {
+                    unsigned char *p = texels + ((y + 1) * w + x + 1) * 2;
+                    p[0] = 255, p[1] = ink[y * im.width + x];
+                }
+            g.rec = (Rectangle){(float)shelf_x, (float)shelf_y, (float)w, (float)h};
+            UpdateTextureRec(atlas, g.rec, texels);
+            free(texels);
+            shelf_x += w;
+            if (h > shelf_h) shelf_h = h;
+            g.ox = (float)info->offsetX - 1, g.oy = (float)info->offsetY - 1;
+        }
+    }
+    if (info) UnloadFontData(info, got);
+    z = slot_of(f, px, cp);
+    *z = g;
+    nslots++;
+    return z;
+}
+
+void jd_text_magnify(float m)
+{
+    text_magnify = m > 1 ? m : 1;
+    if (text_magnify == 1) zoom_glyphs_drop();
+}
 
 float jd_text_density(void)
 {
@@ -93,9 +183,8 @@ float jd_text_size(float size)
     return (px < 4 ? 4 : px) / d;
 }
 
-Font jd_font_at(jd_face *f, float size)
+static Font at_px(jd_face *f, int px)
 {
-    int px = (int)(size * jd_text_density() + 0.5f);
     if (px < 4) px = 4;
     if (px > 200) px = 200;
     for (int i = 0; i < f->nsizes; i++)
@@ -110,6 +199,41 @@ Font jd_font_at(jd_face *f, float size)
     f->sizes[f->nsizes].px = px;
     f->sizes[f->nsizes++].font = font;
     return font;
+}
+
+Font jd_font_at(jd_face *f, float size)
+{
+    return at_px(f, (int)(size * jd_text_density() + 0.5f));
+}
+
+void jd_text_draw(jd_face *f, const char *s, Vector2 at, float size, Color c)
+{
+    Font base = jd_font_at(f, size);
+    if (text_magnify == 1) {
+        DrawTextEx(base, s, at, size, 0, c);
+        return;
+    }
+    int px = (int)(size * jd_text_density() * text_magnify + 0.5f);
+    float scale = size / (float)base.baseSize, zs = size / (float)px, x = 0, y = 0;
+    for (int i = 0; s[i];) {
+        int n = 0, cp = GetCodepointNext(s + i, &n);
+        i += n > 0 ? n : 1;
+        if (cp == '\n') {
+            y += size + 2; /* raylib's default line spacing, as DrawTextEx */
+            x = 0;
+            continue;
+        }
+        int g = GetGlyphIndex(base, cp);
+        /* the base font's glyph, which may be its stand-in for what it lacks or blank for an invisible character */
+        if (cp != ' ' && cp != '\t' && base.recs[g].width > 0) {
+            const struct zglyph *z = zoom_glyph(f, px, base.glyphs[g].value);
+            if (z->rec.width > 0)
+                DrawTexturePro(atlas, z->rec,
+                               (Rectangle){at.x + x + z->ox * zs, at.y + y + z->oy * zs, z->rec.width * zs, z->rec.height * zs},
+                               (Vector2){0}, 0, c);
+        }
+        x +=(base.glyphs[g].advanceX ? (float)base.glyphs[g].advanceX : base.recs[g].width) * scale;
+    }
 }
 
 void jd_face_free(jd_face *f)

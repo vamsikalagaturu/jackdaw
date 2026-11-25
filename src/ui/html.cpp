@@ -190,7 +190,7 @@ public:
         }
         Color c = text_color(color);
         Font font = f->font();
-        DrawTextEx(font, text, Vector2{snap(pos.x), snap(top)}, f->size, 0, c);
+        jd_text_draw(f->face, text, Vector2{snap(pos.x), snap(top)}, f->size, c);
         float w = MeasureTextEx(font, text, f->size, 0).x, t = std::max(1.0f, f->size / 14);
         if (f->decoration & litehtml::text_decoration_line_underline)
             DrawRectangleV(Vector2{pos.x, top + f->size * ASCENT + t}, Vector2{w, t}, c);
@@ -251,7 +251,7 @@ public:
             auto *f = reinterpret_cast<font_handle *>(m.font);
             std::string n = std::to_string(m.index) + ".";
             float w = f ? MeasureTextEx(f->font(), n.c_str(), f->size, 0).x : 0;
-            if (f) DrawTextEx(f->font(), n.c_str(), Vector2{snap(m.pos.x + m.pos.width - w), snap(m.pos.y - f->size * 0.1f)}, f->size, 0, c);
+            if (f) jd_text_draw(f->face, n.c_str(), Vector2{snap(m.pos.x + m.pos.width - w), snap(m.pos.y - f->size * 0.1f)}, f->size, c);
         }
         }
     }
