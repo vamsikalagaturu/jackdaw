@@ -7,7 +7,7 @@ Translate.
 
 | Where | Keys |
 |---|---|
-| Anywhere | `Ctrl+Tab` / `Ctrl+1..9` tabs, `Ctrl+W` close tab, `Ctrl+R` sync now, `Ctrl+,` settings, `Ctrl+B` sidebar full/icons, `?` keys (type to find one), `Ctrl` + wheel magnifies around the pointer until `Ctrl` is let go |
+| Anywhere | `Ctrl+Tab` / `Ctrl+1..9` tabs, `Ctrl+W` close tab, `Ctrl+R` sync now, `Ctrl+,` settings, `Ctrl+B` sidebar full/icons, `?` keys (type to find one), `Ctrl` + wheel magnifies around the pointer until `Ctrl` is let go, a corner box marking the part shown |
 | Modes | the footer shows NORMAL, VISUAL or INSERT; `v` in the list starts visual selection, `Esc` in compose goes to normal (`j` `k` fields), `i` back to insert |
 | Mail | `Tab` / `h` / `l` panes, `j` `k` `gg` `G` move, `gi` `gs` `gd` `ga` `gt` `gj` Inbox, Sent, Drafts, Archive, Trash, Junk, `gc` calendar, `Enter` open, `Shift+Enter` or middle click open in a tab, `p` reading pane right/bottom/off, right click for a menu |
 | Messages | `r` reply, `R` reply all, `F` forward, `Ctrl+N` new, `u` read/unread, `s` flag, `e` archive, `b` snooze (into Snoozed until later today, tomorrow morning, Monday morning or a typed time; back in the Inbox unread then), `dd` delete (`d` on a visual selection, or `Delete`), `m` move, `c` copy, `z` undo |

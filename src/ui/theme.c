@@ -141,6 +141,12 @@ static Vector2 magnify_at;
 
 void jd_magnify(float m) { magnify = m > 1 ? m : 1; }
 
+float jd_magnified(Vector2 *at)
+{
+    *at = magnify_at;
+    return magnify;
+}
+
 void jd_scale_begin(void)
 {
 #ifdef __ANDROID__
@@ -150,17 +156,20 @@ void jd_scale_begin(void)
     float dpi = GetWindowScaleDPI().x;
 #endif
     float s = jd_scale, m = magnify;
-    /* the mouse as last mapped is magnified: from it, where the pointer is in unmagnified logical pixels */
+    /* the window point under the pointer, undoing last frame's mapping with the whole-pixel offset raylib was given:
+       deriving it from the unrounded offset fed the rounding back into the view, which shook by up to m-1 pixels */
+    static int ofs_x, ofs_y;
     if (camera.zoom) {
         Vector2 p = GetMousePosition();
-        float was = camera.zoom / (s * dpi);
-        magnify_at = (Vector2){p.x * was - magnify_at.x * (was - 1), p.y * was - magnify_at.y * (was - 1)};
+        float was = camera.zoom / dpi;
+        magnify_at = (Vector2){(p.x * was - ofs_x) / s, (p.y * was - ofs_y - inset_top) / s};
     }
     if (m == 1) magnify_at = (Vector2){0};
     camera = (Camera2D){.zoom = s * dpi * m, .target = magnify_at,
                         .offset = {magnify_at.x * s * dpi, magnify_at.y * s * dpi + inset_top}};
+    ofs_x = (int)(magnify_at.x * s * (m - 1)), ofs_y = (int)(-inset_top + magnify_at.y * s * (m - 1));
     SetMouseScale(1 / (s * m), 1 / (s * m));
-    SetMouseOffset((int)(magnify_at.x * s * (m - 1)), (int)(-inset_top + magnify_at.y * s * (m - 1)));
+    SetMouseOffset(ofs_x, ofs_y);
     BeginMode2D(camera);
 }
 

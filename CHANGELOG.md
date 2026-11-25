@@ -4,6 +4,20 @@ What changed in each release, newest first, in the form of [Keep a Changelog 1.1
 `platform/release.sh` publishes a version's section as its GitHub release notes, and stops when the version has
 none: add it with the change. Releases before 0.3.4 have their notes on GitHub.
 
+## [0.3.5] - 2026-11-25
+
+### Added
+
+- While `Ctrl` + wheel magnifies, a corner box shows the window in small with the magnified part marked; it moves to
+  the other corner when the pointer is over it.
+
+### Fixed
+
+- The magnified view no longer shakes with the pointer still.
+- Magnified text is sharp all the way through the zoom, without a jump into focus once it stops, and no letter moves
+  as it zooms.
+- The first magnification no longer stalls, and magnifying no longer keeps memory once it ends.
+
 ## [0.3.4] - 2026-11-24
 
 ### Added

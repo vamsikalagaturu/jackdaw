@@ -196,6 +196,7 @@ int main(int argc, char **argv)
         jd_field_menu_draw(&app.ui);
         fx_frame();
         jd_scale_end();
+        jd_magnifier_draw();
         EndDrawing();
         if (app.print_tab) {
             if (app.print_tab <= app.ntabs) print_conv(&app, &app.tabs[app.print_tab - 1].conv);

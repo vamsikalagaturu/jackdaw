@@ -88,6 +88,8 @@ int jd_covered(void);
 void jd_cover_frame(void);
 /* once a frame, before drawing: Ctrl + wheel magnifies around the pointer until Ctrl is let go (jd_magnify) */
 void jd_magnifier_frame(void);
+/* after jd_scale_end: a corner box, the window in small, marking the part magnified */
+void jd_magnifier_draw(void);
 /* this frame's scroll in logical pixels, to subtract from the offset: a finger's exact movement, else wheel
    notches times notch; none while Ctrl is held (the wheel magnifies then) */
 float jd_wheel_y(float notch);
