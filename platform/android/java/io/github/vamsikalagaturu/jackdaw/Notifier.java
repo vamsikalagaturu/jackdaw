@@ -6,6 +6,10 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Typeface;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.StyleSpan;
 
 final class Notifier {
     static final String CHANNEL = "mail";
@@ -76,8 +80,9 @@ final class Notifier {
             .build();
     }
 
-    /* one per message id; false when notifications are turned off */
-    static boolean post(Context ctx, String title, String text, long message) {
+    /* one per message id; false when notifications are turned off. Expanded, the text (the subject) in bold over the
+       body's opening, when there is one. */
+    static boolean post(Context ctx, String title, String text, String body, long message) {
         NotificationManager nm = ctx.getSystemService(NotificationManager.class);
         if (nm == null || !nm.areNotificationsEnabled()) return false;
         channel(ctx);
@@ -87,11 +92,17 @@ final class Notifier {
         int id = (int) (message ^ (message >>> 32));
         PendingIntent tap = PendingIntent.getActivity(ctx, id, open,
                                                       PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        CharSequence expanded = text;
+        if (body != null && !body.isEmpty()) {
+            SpannableStringBuilder b = new SpannableStringBuilder(text);
+            b.setSpan(new StyleSpan(Typeface.BOLD), 0, b.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            expanded = b.append("\n").append(body);
+        }
         Notification n = new Notification.Builder(ctx, CHANNEL)
                              .setSmallIcon(icon(ctx))
                              .setContentTitle(title)
                              .setContentText(text)
-                             .setStyle(new Notification.BigTextStyle().bigText(text))
+                             .setStyle(new Notification.BigTextStyle().bigText(expanded))
                              .setCategory(Notification.CATEGORY_EMAIL)
                              .setContentIntent(tap)
                              .setAutoCancel(true)

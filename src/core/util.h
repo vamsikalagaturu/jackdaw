@@ -10,6 +10,10 @@ char *jd_strdup(const char *s);
 void jd_wipe(void *p, size_t n);
 char *jd_strndup(const char *s, size_t n);char *jd_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 int jd_streq(const char *a, const char *b);
+/* Web and mail links in text. One starts with its scheme and runs to a space, a quote or an angle bracket (so
+   <https://...> is delimited as RFC 3986 Appendix C recommends for links in text), sentence punctuation left off its
+   end. Where the link starting at byte i of t ends; i when none starts there. */
+int jd_url_end(const char *t, int i);
 
 typedef struct {
     char *s;

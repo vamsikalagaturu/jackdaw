@@ -88,7 +88,7 @@ struct jd_sync {
     int nops;
     int64_t inbox;
     int first_sync_done, want_full;
-    int prefetch_days, check_minutes; /* from [sync], read each round */
+    int prefetch_days, prefetch_all, check_minutes; /* from [sync], read each round */
     char **held; /* Message-IDs of drafts open in compose, not sent while open; under lock */
     int nheld;
     int64_t outbox_at; /* when to look at the outbox again, 0 when it is empty */
@@ -223,11 +223,17 @@ static void on_body(void *data, uint32_t uid, const char *raw, size_t len)
     free(dir), free(path);
 }
 
-static int fetch_bodies(jd_sync *s, int64_t folder, uint32_t uidvalidity, const uint32_t *uids, int n)
+/* what, when set, goes to the status line with how far it is */
+static int fetch_bodies(jd_sync *s, int64_t folder, uint32_t uidvalidity, const uint32_t *uids, int n, const char *what)
 {
     body_ctx c = {s, folder, uidvalidity};
     for (int i = 0; i < n && !quitting(s); i += BODY_BATCH) {
         int k = n - i < BODY_BATCH ? n - i : BODY_BATCH;
+        if (what) {
+            char *line = jd_printf("%s: %d%% (%d of %d)", what, i * 100 / n, i, n);
+            status(s, "%s", line);
+            free(line);
+        }
         jd_store_begin(s->store);
         int r = jd_imap_fetch_bodies(s->imap, uids + i, k, on_body, &c);
         jd_store_commit(s->store);
@@ -256,13 +262,17 @@ static void notify_fresh(jd_sync *s, int64_t inbox, const int64_t *ids, int n)
     jd_list_query q = {.folder = inbox, .unread = 1, .only = ids, .nonly = n};
     int nrows;
     jd_thread_row *rows = jd_store_list(s->store, &q, &nrows);
-    if (nrows) emit(s, JD_EV_NEW_MAIL, rows[0].senders, rows[0].subject, rows[0].latest, nrows);
+    const char *preview = nrows && rows[0].snippet && rows[0].snippet[0] ? rows[0].snippet : NULL;
+    if (nrows)
+        emit_ev(s, (jd_event){.kind = JD_EV_NEW_MAIL, .text = jd_strdup(rows[0].senders), .text2 = jd_strdup(rows[0].subject),
+                              .text3 = jd_strdup(preview), .id = rows[0].latest, .count = nrows});
     if (nrows && jd_sync_new_mail_hook)
-        jd_sync_new_mail_hook(s->account.address, rows[0].senders, rows[0].subject, rows[0].latest, nrows);
+        jd_sync_new_mail_hook(s->account.address, rows[0].senders, rows[0].subject, preview, rows[0].latest, nrows);
     jd_thread_rows_free(rows, nrows);
 }
 
-void (*jd_sync_new_mail_hook)(const char *account, const char *from, const char *subject, int64_t id, int count);
+void (*jd_sync_new_mail_hook)(const char *account, const char *from, const char *subject, const char *preview,
+                              int64_t id, int count);
 void (*jd_sync_scheduled_hook)(const char *subject, const char *err);
 
 /* [[rule]]s in order; a message moved or deleted by one is out of reach of the next */
@@ -324,6 +334,25 @@ static void apply_rules(jd_sync *s, int64_t inbox, const int64_t *fresh, int nfr
     if (applied) emit(s, JD_EV_CHANGED, NULL, NULL, 0, 0);
     free(left);
     jd_prefs_free(&p);
+}
+
+/* the bodies [sync] keeps offline that are not here yet; sel NULL when the folder is not selected */
+static int prefetch(jd_sync *s, int64_t folder, const char *name, const jd_selected *sel)
+{
+    if (!s->prefetch_days) return JD_IMAP_OK;
+    int64_t since = s->prefetch_days < 0 ? 0 : jd_now() - (int64_t)s->prefetch_days * 86400;
+    int n;
+    uint32_t *want = jd_folder_uncached(s->store, folder, since, PREFETCH_MAX_SIZE, &n);
+    jd_selected now;
+    int r = JD_IMAP_OK;
+    if (n && !sel && (r = jd_imap_select(s->imap, name, &now)) == JD_IMAP_OK) sel = &now;
+    if (n && r == JD_IMAP_OK) {
+        char *what = jd_printf("Downloading mail in %s for offline use", name);
+        r = fetch_bodies(s, folder, sel->uidvalidity, want, n, what);
+        free(what);
+    }
+    free(want);
+    return r;
 }
 
 static int sync_folder(jd_sync *s, int64_t folder, const char *name)
@@ -428,16 +457,7 @@ static int sync_folder(jd_sync *s, int64_t folder, const char *name)
         jd_folder_state_set(s->store, folder, sel.uidvalidity, sel.uidnext, sel.highestmodseq);
         jd_store_commit(s->store);
     }
-    if (r == JD_IMAP_OK && c.is_inbox) {
-        int n;
-        uint32_t *want = s->prefetch_days
-                             ? jd_folder_uncached(s->store, folder, jd_now() - (int64_t)s->prefetch_days * 86400,
-                                                  PREFETCH_MAX_SIZE, &n)
-                             : (n = 0, NULL);
-        if (n) status(s, "Downloading recent mail in %s", name);
-        r = fetch_bodies(s, folder, sel.uidvalidity, want, n);
-        free(want);
-    }
+    if (r == JD_IMAP_OK && c.is_inbox) r = prefetch(s, folder, name, &sel);
     /* rules run on mail that arrived since the folder was last synced, not on a new account's whole Inbox */
     if (c.nfresh && st.uidvalidity) apply_rules(s, folder, c.fresh, c.nfresh);
     if (c.nfresh && s->first_sync_done) notify_fresh(s, folder, c.fresh, c.nfresh);
@@ -475,6 +495,9 @@ static int sync_all(jd_sync *s)
     for (int pass = 0; pass < 2 && r == JD_IMAP_OK; pass++)
         for (int i = 0; i < n && r == JD_IMAP_OK && !quitting(s); i++)
             if (ids[i] && (ids[i] == s->inbox) == (pass == 0)) r = sync_folder(s, ids[i], boxes[i].name);
+    /* after every folder's headers, so the first, long download holds none of them back */
+    for (int i = 0; s->prefetch_all && i < n && r == JD_IMAP_OK && !quitting(s); i++)
+        if (ids[i] && ids[i] != s->inbox) r = prefetch(s, ids[i], boxes[i].name, NULL);
     free(ids);
     jd_mailboxes_free(boxes, n);
     return r;
@@ -586,8 +609,20 @@ static int search_folder(jd_sync *s, int64_t folder, const char *name, const cha
         int64_t id = jd_message_id(s->store, folder, uids[i]);
         if (id) ev->ids[ev->nids++] = id;
     }
+    /* the list keeps a match only when its text has the word as typed, which needs the body here */
+    int r = JD_IMAP_OK;
+    if (jd_text_exact(words)) {
+        int nc, nwant = 0;
+        uint32_t *cached = jd_folder_cached(s->store, folder, &nc);
+        uint32_t *want = jd_alloc(sizeof *want * (size_t)(n + 1));
+        for (int i = 0; i < n; i++)
+            if (!contains(cached, nc, uids[i]) && jd_message_id(s->store, folder, uids[i])) want[nwant++] = uids[i];
+        char *what = jd_printf("Downloading the server's matches in %s to check them", name);
+        r = fetch_bodies(s, folder, sel.uidvalidity, want, nwant, what);
+        free(what), free(cached), free(want);
+    }
     free(uids);
-    return JD_IMAP_OK;
+    return r;
 }
 
 static int run_search(jd_sync *s, op *o)
@@ -1003,7 +1038,7 @@ static int run_op(jd_sync *s, op *o)
         return r;
     }
     case OP_DESTROY: return jd_imap_expunge(s->imap, o->uids, o->n);
-    case OP_BODY: return fetch_bodies(s, o->folder, sel.uidvalidity, o->uids, o->n);
+    case OP_BODY: return fetch_bodies(s, o->folder, sel.uidvalidity, o->uids, o->n, NULL);
     case OP_SEARCH: return run_search(s, o);
     case OP_CREATE: s->want_full = 1; return jd_imap_create(s->imap, o->a);
     case OP_RENAME: s->want_full = 1; return jd_imap_rename(s->imap, o->a, o->b);
@@ -1099,6 +1134,7 @@ static void *worker(void *arg)
         jd_prefs p;
         jd_prefs_load(&p);
         s->prefetch_days = p.prefetch_days;
+        s->prefetch_all = p.prefetch_all;
         s->check_minutes = p.check_minutes;
         jd_prefs_free(&p);
         apply_requests(s);
@@ -1371,6 +1407,6 @@ int jd_sync_poll(jd_sync *s, jd_event *ev)
 
 void jd_event_free(jd_event *ev)
 {
-    free(ev->text), free(ev->text2), free(ev->ids);
+    free(ev->text), free(ev->text2), free(ev->text3), free(ev->ids);
     *ev = (jd_event){0};
 }

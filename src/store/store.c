@@ -771,6 +771,31 @@ static char *fts_query(const char *text)
     return b.s;
 }
 
+static int word_exact(const char *w, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if ((unsigned char)w[i] < 0x80 && ispunct((unsigned char)w[i]) && w[i] != '"') return 1;
+    return 0;
+}
+
+/* calls fn on each word of text with punctuation; their count */
+static int exact_words(const char *text, void (*fn)(void *, const char *, size_t, int), void *data)
+{
+    int k = 0;
+    for (const char *p = text; p && *p;) {
+        while (*p == ' ') p++;
+        const char *w = p;
+        while (*p && *p != ' ') p++;
+        if (p > w && word_exact(w, (size_t)(p - w))) {
+            if (fn) fn(data, w, (size_t)(p - w), k);
+            k++;
+        }
+    }
+    return k;
+}
+
+int jd_text_exact(const char *text) { return exact_words(text, NULL, NULL) > 0; }
+
 static char *like_of(const char *s)
 {
     jd_buf b = {0};
@@ -781,6 +806,24 @@ static char *like_of(const char *s)
     }
     jd_buf_adds(&b, "%");
     return b.s;
+}
+
+typedef struct {
+    jd_buf *w;
+    sqlite3_stmt *st;
+    const char *p;
+} exact_ctx;
+
+/* the index splits gringotts.secoro into two words, so the word itself is looked for in the indexed text */
+static void exact_where(void *data, const char *word, size_t n, int k)
+{
+    (void)word, (void)n;
+    exact_ctx *c = data;
+    jd_buf_addf(c->w,
+                " AND instr(lower((SELECT coalesce(subject, '') || char(10) || coalesce(sender, '') || char(10) ||"
+                " coalesce(recipients, '') || char(10) || coalesce(body, '') FROM search WHERE rowid = m.id)),"
+                " lower(:exact%sx%d))",
+                c->p, k);
 }
 
 /* q's conditions ANDed, its parameters named :<field><p>; an OR group's alternatives get p plus their place */
@@ -809,6 +852,8 @@ static void where_of(jd_buf *w, const jd_list_query *q, const char *p)
         if (q->nextra) jd_buf_addf(w, " OR m.id IN (SELECT value FROM json_each(:extra%s))", p);
         jd_buf_adds(w, ")");
     }
+    /* after the server's matches too: its index splits the word as well */
+    exact_words(q->text, exact_where, &(exact_ctx){.w = w, .p = p});
     for (int g = 0; g < q->nany; g++) {
         jd_buf_adds(w, " AND (0");
         for (int a = 0; a < q->any[g].n; a++) {
@@ -847,6 +892,18 @@ static void bind_ids(sqlite3_stmt *st, const char *field, const char *p, const i
     jd_buf_free(&b);
 }
 
+static void exact_bind(void *data, const char *word, size_t n, int k)
+{
+    exact_ctx *c = data;
+    jd_buf b = {0};
+    for (size_t i = 0; i < n; i++)
+        if (word[i] != '"') jd_buf_add(&b, word + i, 1);
+    char *field = jd_printf("exact%sx%d", c->p, k);
+    bind_named(c->st, field, "", b.s);
+    free(field);
+    jd_buf_free(&b);
+}
+
 static void bind_query(sqlite3_stmt *st, const jd_list_query *q, const char *p)
 {
     bind_named_int(st, "folder", p, q->folder);
@@ -859,6 +916,7 @@ static void bind_query(sqlite3_stmt *st, const jd_list_query *q, const char *p)
     char *fts = q->text ? fts_query(q->text) : NULL;
     bind_named(st, "fts", p, fts);
     free(fts);
+    exact_words(q->text, exact_bind, &(exact_ctx){.st = st, .p = p});
     if (q->nextra) bind_ids(st, "extra", p, q->extra, q->nextra);
     if (q->only) bind_ids(st, "only", p, q->only, q->nonly);
     for (int g = 0; g < q->nany; g++)
@@ -1136,7 +1194,7 @@ static char *addresses_of(jd_store *s, int64_t id, int role)
 jd_message_row *jd_store_conversation(jd_store *s, int64_t thread, int *n)
 {
     sqlite3_stmt *st = prep(s, "SELECT m.id, m.folder_id, m.date, m.uid, f.uidvalidity, m.flags, m.body_cached,"
-                               " m.has_attachment, m.subject, f.name, f.special_use FROM messages m"
+                               " m.has_attachment, m.subject, f.name, f.special_use, m.snippet FROM messages m"
                                " JOIN folders f ON f.id = m.folder_id WHERE m.thread_id = ? ORDER BY m.date, m.id");
     sqlite3_bind_int64(st, 1, thread);
     jd_message_row *rows = NULL;
@@ -1156,6 +1214,7 @@ jd_message_row *jd_store_conversation(jd_store *s, int64_t thread, int *n)
             .subject = col_dup(st, 8),
             .folder_name = col_dup(st, 9),
             .special_use = col_dup(st, 10),
+            .snippet = col_dup(st, 11),
         };
     }
     sqlite3_finalize(st);
@@ -1171,7 +1230,7 @@ jd_message_row *jd_store_conversation(jd_store *s, int64_t thread, int *n)
 void jd_message_row_clear(jd_message_row *r)
 {
     free(r->subject), free(r->from), free(r->to), free(r->cc), free(r->reply_to), free(r->folder_name);
-    free(r->special_use);
+    free(r->special_use), free(r->snippet);
     *r = (jd_message_row){0};
 }
 

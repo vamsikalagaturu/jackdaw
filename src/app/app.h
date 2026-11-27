@@ -31,6 +31,7 @@ typedef struct {
 /* a message in an open conversation, with its text wrapped for the view width */
 typedef struct {
     jd_message_row row;
+    int loaded;        /* its body read (text, files, HTML), on its first showing: until then row.snippet stands for it */
     char *text;
     int *line_starts; /* byte offsets into text */
     int nlines;
@@ -44,6 +45,7 @@ typedef struct {
     int show_quote;
     int load_images;   /* remote images allowed for this message; asked for once */
     int images_asked;
+    int files_open;    /* the attachments shown whole, not as one summary chip */
     struct jd_html *html; /* the text/html part, when there is one */
     float html_w, html_h;
     float wrapped_size;   /* the text size line_starts were wrapped for */
@@ -66,6 +68,7 @@ typedef struct {
     float content; /* the height drawn last frame, 0 before the first */
     float top;     /* the screen y of the view's top, last frame */
     int plain; /* show the plain text even where there is HTML */
+    double opened_at; /* when conv_open filled it: its cards come in from then */
 } jd_conv;
 
 typedef enum { TAB_MAIL, TAB_CONV, TAB_COMPOSE, TAB_FILTERS, TAB_SETTINGS, TAB_CALENDAR } tab_kind;
@@ -376,6 +379,8 @@ int update_checking(void);
 void conv_close(jd_conv *c);
 void conv_refresh(jd_app *app, jd_conv *c);
 void conv_body_ready(jd_app *app, jd_conv *c, int64_t id);
+/* every message's body read, collapsed ones too (opening reads only what shows) */
+void conv_load_all(jd_app *app, jd_conv *c);
 /* a fetched remote image (ok 0: it failed) for every open message that shows it */
 void images_arrived(jd_app *app, const char *url, int ok);
 void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused);

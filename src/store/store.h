@@ -130,7 +130,7 @@ struct jd_list_query {
     int grouped;    /* one row per conversation, else one per message */
     int unread, read, flagged, attachment;
     char *from, *to, *subject; /* substrings of names/addresses, of the subject */
-    char *text;                /* words for the full-text index, all must match */
+    char *text;                /* words for the full-text index, all must match; one with punctuation as typed */
     int64_t after, before;     /* message date range, 0 = open */
     const int64_t *extra;      /* messages the server found for text, shown as matches too */
     int nextra;
@@ -152,6 +152,9 @@ typedef struct {
 } jd_thread_row;
 
 jd_thread_row *jd_store_list(jd_store *s, const jd_list_query *q, int *n);
+/* 1 when a word of text has punctuation (gringotts.secoro, a@b, re-run): it then matches only as typed, apart
+   from ASCII case, where the full-text index and the server would split it into words */
+int jd_text_exact(const char *text);
 void jd_thread_rows_free(jd_thread_row *rows, int n);
 int64_t jd_store_folder_by_name(jd_store *s, const char *name);
 /* the folder with this RFC 6154 special use, 0 when none */
@@ -185,6 +188,7 @@ typedef struct {
     int flags, body_cached, has_attachment;
     char *subject, *from, *to, *cc, *reply_to, *folder_name;
     char *special_use; /* of its folder */
+    char *snippet;     /* the opening of its body, as the list shows it; NULL until the body is downloaded */
 } jd_message_row;
 
 void jd_message_row_clear(jd_message_row *r);

@@ -66,7 +66,8 @@ typedef struct {
     int notify_focused;  /* [notifications] when_focused: also while jackdaw is in front, default true */
     int push;            /* [notifications] push: Android keeps IMAP IDLE open while closed, default true */
     int update_check;    /* [updates] check: look for a new release once a day, default true */
-    int prefetch_days;   /* [sync] prefetch_days, default 30; 0 downloads bodies only when opened */
+    int prefetch_days;   /* [sync] prefetch_days, default 30; 0 downloads bodies only when opened, -1 every one */
+    int prefetch_all;    /* [sync] prefetch_folders = "all": every folder kept offline, else "inbox" */
     int check_minutes;   /* [sync] check_minutes, default 5: all folders; the Inbox waits in IDLE */
     int share;           /* [sync] settings, default true: the JD_SHARE_* groups shared through the mail account */
     char *signature_new, *signature_reply;      /* [signature] new, reply */

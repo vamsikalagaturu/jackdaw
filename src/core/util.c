@@ -1,12 +1,14 @@
 #define _GNU_SOURCE
 #include "util.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
@@ -56,6 +58,20 @@ char *jd_printf(const char *fmt, ...)
 int jd_streq(const char *a, const char *b)
 {
     return a && b && strcmp(a, b) == 0;
+}
+
+int jd_url_end(const char *t, int i)
+{
+    int n = !strncasecmp(t + i, "https://", 8) ? 8 : !strncasecmp(t + i, "http://", 7) || !strncasecmp(t + i, "mailto:", 7) ? 7 : 0;
+    if (!n || (i > 0 && isalnum((unsigned char)t[i - 1]))) return i;
+    int j = i + n, open = 0;
+    for (; t[j] && !isspace((unsigned char)t[j]) && !strchr("<>\"'", t[j]); j++) open += t[j] == '(' ? 1 : t[j] == ')' ? -1 : 0;
+    while (j > i + n && strchr(".,;:!?)]}", t[j - 1])) {
+        if (t[j - 1] == ')' && open >= 0) break;
+        if (t[j - 1] == ')') open++;
+        j--;
+    }
+    return j > i + n ? j : i;
 }
 
 void jd_buf_add(jd_buf *b, const char *s, size_t n)

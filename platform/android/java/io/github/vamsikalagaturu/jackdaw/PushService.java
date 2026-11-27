@@ -41,9 +41,9 @@ public class PushService extends Service {
     }
 
     /* called from nativePush */
-    static void posted(String title, String text, long message) {
+    static void posted(String title, String text, String body, long message) {
         Context ctx = context;
-        if (ctx != null) Notifier.post(ctx, title, text, message);
+        if (ctx != null) Notifier.post(ctx, title, text, body, message);
     }
 
     @Override

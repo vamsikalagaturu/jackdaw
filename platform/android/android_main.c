@@ -200,7 +200,8 @@ static int account_named(const char *address, jd_account *out, int *index)
     return found >= 0 ? 0 : -1;
 }
 
-static void on_new_mail(const char *account, const char *from, const char *subject, int64_t id, int count)
+static void on_new_mail(const char *account, const char *from, const char *subject, const char *preview, int64_t id,
+                        int count)
 {
     jd_account a;
     int index = 0;
@@ -226,10 +227,12 @@ static void on_new_mail(const char *account, const char *from, const char *subje
     jobject act = GetAndroidApp()->activity->clazz;
     jclass c = (*e)->GetObjectClass(e, act);
     jmethodID m = (*e)->GetMethodID(e, c, "postNewMail",
-                                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+                                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)"
+                                    "Ljava/lang/String;");
     if (m)
         (*e)->CallObjectMethod(e, act, m, (*e)->NewStringUTF(e, title), (*e)->NewStringUTF(e, text),
-                               (*e)->NewStringUTF(e, ids), (*e)->NewStringUTF(e, focused ? "1" : "0"));
+                               (*e)->NewStringUTF(e, preview ? preview : ""), (*e)->NewStringUTF(e, ids),
+                               (*e)->NewStringUTF(e, focused ? "1" : "0"));
     if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
     (*e)->PopLocalFrame(e, NULL);
     free(title), free(text);
@@ -259,10 +262,11 @@ static void on_scheduled(const char *subject, const char *err)
     jobject act = GetAndroidApp()->activity->clazz;
     jclass c = (*e)->GetObjectClass(e, act);
     jmethodID m = (*e)->GetMethodID(e, c, "postNewMail",
-                                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;");
+                                    "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)"
+                                    "Ljava/lang/String;");
     if (m)
         (*e)->CallObjectMethod(e, act, m, (*e)->NewStringUTF(e, title), (*e)->NewStringUTF(e, text),
-                               (*e)->NewStringUTF(e, "0"), (*e)->NewStringUTF(e, "0"));
+                               (*e)->NewStringUTF(e, ""), (*e)->NewStringUTF(e, "0"), (*e)->NewStringUTF(e, "0"));
     if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
     (*e)->PopLocalFrame(e, NULL);
     free(title), free(text);
@@ -367,7 +371,7 @@ JNIEXPORT void JNICALL Java_io_github_vamsikalagaturu_jackdaw_PushService_native
     push_quit = 0;
     jclass activity = (*e)->FindClass(e, "io/github/vamsikalagaturu/jackdaw/JackdawActivity");
     jfieldID app_running = activity ? (*e)->GetStaticFieldID(e, activity, "running", "Z") : NULL;
-    jmethodID posted = (*e)->GetStaticMethodID(e, cls, "posted", "(Ljava/lang/String;Ljava/lang/String;J)V");
+    jmethodID posted = (*e)->GetStaticMethodID(e, cls, "posted", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;J)V");
     if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
     if (!dir_files || !password || !address || !app_running || !posted) goto done;
     setup_env(dir_files);
@@ -395,7 +399,7 @@ JNIEXPORT void JNICALL Java_io_github_vamsikalagaturu_jackdaw_PushService_native
                                            : jd_printf("%s: %s", ev.text ? ev.text : "", ev.text2 ? ev.text2 : "");
                 (*e)->PushLocalFrame(e, 4);
                 (*e)->CallStaticVoidMethod(e, cls, posted, (*e)->NewStringUTF(e, title), (*e)->NewStringUTF(e, text),
-                                           (jlong)notify_tag(index, ev.id));
+                                           (*e)->NewStringUTF(e, ev.text3 ? ev.text3 : ""), (jlong)notify_tag(index, ev.id));
                 if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
                 (*e)->PopLocalFrame(e, NULL);
                 free(title), free(text);
@@ -405,7 +409,7 @@ JNIEXPORT void JNICALL Java_io_github_vamsikalagaturu_jackdaw_PushService_native
                 scheduled_note(ev.text2, ev.text, &title, &text);
                 (*e)->PushLocalFrame(e, 4);
                 (*e)->CallStaticVoidMethod(e, cls, posted, (*e)->NewStringUTF(e, title), (*e)->NewStringUTF(e, text),
-                                           (jlong)0);
+                                           (*e)->NewStringUTF(e, ""), (jlong)0);
                 if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e);
                 (*e)->PopLocalFrame(e, NULL);
                 free(title), free(text);
@@ -465,22 +469,23 @@ JNIEXPORT jstring JNICALL Java_io_github_vamsikalagaturu_jackdaw_MailJobService_
                 else if (ev.kind == JD_EV_STATUS && busy) finished = 1;
                 else if (ev.kind == JD_EV_AUTH || (ev.kind == JD_EV_ERROR && busy)) finished = 1;
                 else if (ev.kind == JD_EV_NEW_MAIL && ev.count > 0 && notify) {
-                    /* a tab or line break in a sender or subject would break the lines apart */
+                    /* a tab or line break in a sender, subject or preview would break the lines apart */
                     char *from = jd_strdup(ev.text ? ev.text : ""), *subject = jd_strdup(ev.text2 ? ev.text2 : "");
-                    for (char *c = from; *c; c++)
-                        if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
-                    for (char *c = subject; *c; c++)
-                        if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
+                    char *preview = jd_strdup(ev.text3 ? ev.text3 : "");
+                    char *fields[] = {from, subject, preview};
+                    for (int f = 0; f < 3; f++)
+                        for (char *c = fields[f]; *c; c++)
+                            if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
                     long long tag = (long long)notify_tag(index, ev.id);
-                    if (ev.count == 1) jd_buf_addf(&lines, "%lld\t%s\t%s\n", tag, from, subject);
-                    else jd_buf_addf(&lines, "%lld\t%d new messages\t%s: %s\n", tag, ev.count, from, subject);
-                    free(from), free(subject);
+                    if (ev.count == 1) jd_buf_addf(&lines, "%lld\t%s\t%s\t%s\n", tag, from, subject, preview);
+                    else jd_buf_addf(&lines, "%lld\t%d new messages\t%s: %s\t%s\n", tag, ev.count, from, subject, preview);
+                    free(from), free(subject), free(preview);
                 } else if (ev.kind == JD_EV_SCHEDULED) {
                     char *title, *text;
                     scheduled_note(ev.text2, ev.text, &title, &text);
                     for (char *c = text; *c; c++)
                         if (*c == '\t' || *c == '\n' || *c == '\r') *c = ' ';
-                    jd_buf_addf(&lines, "0\t%s\t%s\n", title, text);
+                    jd_buf_addf(&lines, "0\t%s\t%s\t\n", title, text);
                     free(title), free(text);
                 }
                 jd_event_free(&ev);

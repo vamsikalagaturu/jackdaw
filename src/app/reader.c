@@ -12,8 +12,10 @@
 #include "mail/fetch.h"
 #include "mail/mime.h"
 #include "platform.h"
+#include "ui/fx.h"
 #include "ui/html.h"
 #include "ui/icons.h"
+#include <rlgl.h>
 
 /* the message text size of the settings ([view] reader_text), and its line height; set by text_size().
    Everything else in the reader (subject, headers, attachments) follows it: K is that size against the default 15. */
@@ -184,6 +186,7 @@ static void load_text(jd_app *app, jd_reading *r)
     r->html = NULL;
     r->nfiles = 0;
     r->wrapped_for = r->html_w = 0;
+    r->loaded = 1;
     size_t len;
     char *raw = read_raw(app, &r->row, &len);
     if (!raw) return;
@@ -266,17 +269,19 @@ void conv_open(jd_app *app, jd_conv *c, int64_t thread, int64_t only)
         }
         jd_reading *r = &c->reading[c->n++];
         *r = (jd_reading){.row = rows[i]};
-        load_text(app, r);
         if (!r->row.body_cached && app->sync) jd_sync_fetch_body(app->sync, r->row.id);
         if (!(r->row.flags & JD_SEEN)) unread[nunread++] = r->row.id;
     }
     free(rows);
+    /* only what opens expanded is read now: a long thread's collapsed cards show their row's snippet */
     for (int i = 0; i < c->n; i++) {
         c->reading[i].expanded = !(c->reading[i].row.flags & JD_SEEN) || i == c->n - 1;
         c->reading[i].open = (float)c->reading[i].expanded;
+        if (c->reading[i].expanded) load_text(app, &c->reading[i]);
     }
     if (nunread && app->sync && app->prefs.mark_read) jd_sync_set_flag(app->sync, unread, nunread, JD_SEEN, 1);
     c->plain = app->prefs.prefer_plain;
+    c->opened_at = GetTime();
     free(unread);
 }
 
@@ -304,7 +309,7 @@ void conv_refresh(jd_app *app, jd_conv *c)
             *old = (jd_reading){0};
             r->row = rows[i];
             rows[i] = (jd_message_row){0};
-            if (!had_body && r->row.body_cached) load_text(app, r);
+            if (!had_body && r->row.body_cached && r->loaded) load_text(app, r);
         } else {
             *r = (jd_reading){.row = rows[i], .expanded = 1};
             load_text(app, r);
@@ -317,12 +322,18 @@ void conv_refresh(jd_app *app, jd_conv *c)
     c->n = k;
 }
 
+void conv_load_all(jd_app *app, jd_conv *c)
+{
+    for (int i = 0; i < c->n; i++)
+        if (!c->reading[i].loaded) load_text(app, &c->reading[i]);
+}
+
 void conv_body_ready(jd_app *app, jd_conv *c, int64_t id)
 {
     for (int i = 0; i < c->n; i++)
         if (c->reading[i].row.id == id) {
             c->reading[i].row.body_cached = 1;
-            load_text(app, &c->reading[i]);
+            if (c->reading[i].loaded) load_text(app, &c->reading[i]);
         }
 }
 
@@ -780,6 +791,7 @@ int conv_keys(jd_app *app, jd_conv *c)
         app->print_tab = (int)(c == preview(app) ? 0 : app->tab) + 1;
     else if (IsKeyPressed(KEY_A) && shift) {
         for (int i = 0; i < c->n; i++) {
+            if (!c->reading[i].loaded && c->reading[i].row.has_attachment) load_text(app, &c->reading[i]);
             if (c->reading[i].nfiles > 1) save_all_zip(app, &c->reading[i]);
             else if (c->reading[i].nfiles) save_attachment(app, &c->reading[i], 0);
         }
@@ -1248,6 +1260,26 @@ static float remote_images(jd_app *app, jd_reading *m, float x, float y, float w
 static float draw_files(jd_app *app, jd_reading *m, float x, float y, float w, Rectangle clip)
 {
     jd_ui *ui = &app->ui;
+    float ch = 28 * K, ts = 13 * K, is = 14 * K, ty = (ch - ts) / 2, iy = (ch - is) / 2;
+    /* more than one row of them (several files, or an image preview) folds into one chip until opened */
+    int thumbs = 0;
+    int64_t total = 0;
+    for (int f = 0; f < m->nfiles; f++) thumbs += m->thumbs && m->thumbs[f].id, total += m->files[f].size;
+    if (m->nfiles > 1 || thumbs) {
+        char size[32], label[96];
+        size_text(total, size, sizeof size);
+        snprintf(label, sizeof label, "%d attachment%s · %s", m->nfiles, m->nfiles == 1 ? "" : "s", size);
+        float lw = jd_text_width(ui, label, ts, 0), cw = lw + is + is + 36;
+        Rectangle chip = {x, y, cw, ch};
+        int hover = CheckCollisionPointRec(GetMousePosition(), chip) && CheckCollisionPointRec(GetMousePosition(), clip);
+        DrawRectangleRounded(chip, 0.3f, 6, hover ? JD_NORD3 : JD_NORD2);
+        jd_icon("paperclip", x + 8, y + iy, is, JD_NORD4);
+        jd_text(ui, label, x + 14 + is, y + ty, ts, JD_NORD6, 0);
+        jd_icon(m->files_open ? "chevron-down" : "chevron-right", x + cw - is - 10, y + iy, is, hover ? JD_NORD8 : JD_NORD4);
+        if (clicked(chip, clip, app)) m->files_open = !m->files_open;
+        y += ch + 8;
+        if (!m->files_open) return y + 4;
+    }
     /* image previews first, up to 240x160 each, a click saves the image */
     float tx = x, row_h = 0;
     for (int f = 0; m->thumbs && f < m->nfiles; f++) {
@@ -1273,7 +1305,7 @@ static float draw_files(jd_app *app, jd_reading *m, float x, float y, float w, R
         tx += tw + 8;
     }
     if (row_h) y += row_h + 10;
-    float cx = x, ch = 28 * K, ts = 13 * K, is = 14 * K, ty = (ch - ts) / 2, iy = (ch - is) / 2;
+    float cx = x;
     for (int f = 0; f < m->nfiles; f++) {
         char size[32], label[300];
         size_text(m->files[f].size, size, sizeof size);
@@ -1345,30 +1377,13 @@ static float span(jd_ui *ui, const char *text, int from, int to)
     return w;
 }
 
-/* Web and mail links in plain text. One starts with its scheme and runs to a space, a quote or an angle bracket (so
-   <https://...> is delimited as RFC 3986 Appendix C recommends for links in text), sentence punctuation left off its
-   end. url_end: where the link starting at i ends, i when none starts there. */
-static int url_end(const char *t, int i)
-{
-    int n = !strncasecmp(t + i, "https://", 8) ? 8 : !strncasecmp(t + i, "http://", 7) || !strncasecmp(t + i, "mailto:", 7) ? 7 : 0;
-    if (!n || (i > 0 && isalnum((unsigned char)t[i - 1]))) return i;
-    int j = i + n, open = 0;
-    for (; t[j] && !isspace((unsigned char)t[j]) && !strchr("<>\"'", t[j]); j++) open += t[j] == '(' ? 1 : t[j] == ')' ? -1 : 0;
-    while (j > i + n && strchr(".,;:!?)]}", t[j - 1])) {
-        if (t[j - 1] == ')' && open >= 0) break;
-        if (t[j - 1] == ')') open++;
-        j--;
-    }
-    return j > i + n ? j : i;
-}
-
 /* the link [*a, *b) covering byte at (one wrapped onto this line included), or the next starting before limit */
 static int url_from(const char *t, int at, int limit, int *a, int *b)
 {
     int s = at;
     while (s > 0 && at - s < 2048 && !isspace((unsigned char)t[s - 1]) && !strchr("<>\"'", t[s - 1])) s--;
     for (int i = s; i < limit; i++) {
-        int e = url_end(t, i);
+        int e = jd_url_end(t, i);
         if (e > i && e > at) {
             *a = i, *b = e;
             return 1;
@@ -1901,6 +1916,28 @@ static void card_menu_draw(jd_app *app, jd_conv *c)
     if (a >= 0 && card_pending_msg < c->n) card_act(app, c, card_pending_msg, a);
 }
 
+/* A conversation's entrance, as the list's rows come in: the subject, then each card on screen, 30 ms apart, from
+   16 px to the right, fading in over 0.24 s. Between enter_begin and enter_end the drawing is shifted; how far in
+   it has come is returned. */
+static float enter_begin(int entering, double since, int k)
+{
+    if (!entering) return 1;
+    float u = fminf(1, fmaxf(0, (float)(since - 0.03 * k) / 0.24f));
+    float came = 1 - (1 - u) * (1 - u) * (1 - u);
+    rlDrawRenderBatchActive();
+    rlPushMatrix();
+    rlTranslatef(roundf(16 * (1 - came)), 0, 0);
+    return came;
+}
+
+static void enter_end(int entering, float came, Rectangle box)
+{
+    if (!entering) return;
+    rlDrawRenderBatchActive();
+    rlPopMatrix();
+    if (came < 1) DrawRectangleRec(box, ColorAlpha(JD_NORD0, 1 - came));
+}
+
 void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
 {
     jd_ui *ui = &app->ui;
@@ -1926,6 +1963,9 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
 
     jd_scissor(r.x, r.y, r.width, r.height);
     float y = r.y + 20 - c->scroll;
+    double since = GetTime() - c->opened_at;
+    int entering = fx_enabled() && since < 1.5, entered = 0;
+    float came = enter_begin(entering, since, entered++);
     const char *subject = c->reading[c->n - 1].row.subject;
     if (!subject || !subject[0]) subject = "(no subject)";
     float ss = 21 * K;
@@ -1945,6 +1985,7 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         jd_text(ui, count, x, y + 2, 13 * K, JD_MUTED, 0);
         y += 20 * K;
     }
+    enter_end(entering, came, (Rectangle){r.x, r.y, r.width, y - r.y});
     y += 14;
     float newest_y = y;
     /* each message is a card: a collapsed one shows its sender, date and first line; a click opens or closes it */
@@ -1952,6 +1993,10 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         jd_reading *m = &c->reading[i];
         const float pad = narrow ? 8 : 16, ar = 16 * K;
         float card_y = y, ix = x + pad, iw = w - 2 * pad;
+        /* counted among those on screen only: a long thread opens at its end */
+        int on_screen = card_y < r.y + r.height && card_y + fmaxf(m->card_h, 1) > r.y;
+        float card_came = enter_begin(entering && on_screen, since, entered);
+        entered += on_screen;
         newest_y = card_y;
         float head_h = 2 * ar;
         /* opening and closing ease over OPEN_S: the open card is drawn throughout, cut to a height between the
@@ -1960,6 +2005,7 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         float step = GetFrameTime() / OPEN_S;
         m->open = m->expanded ? fminf(1, m->open + step) : fmaxf(0, m->open - step);
         int shown = m->expanded || m->open > 0;
+        if (shown && !m->loaded) load_text(app, m);
         int moving = m->open > 0 && m->open < 1;
         float closed_h = head_h + 2 * pad, ease = m->open * m->open * (3 - 2 * m->open);
         float moving_h = closed_h + (fmaxf(m->full_h, closed_h) - closed_h) * ease;
@@ -1990,8 +2036,8 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         /* in an open card the sender and date are text to select; a click elsewhere on the header closes it */
         float icons_right = tx + tw - dw - 26 * K, icons_cy = y + ar;
         float icons_w = shown ? card_icons(app, c, i, icons_right, icons_cy, r, narrow, 0) : 0;
-        /* before its body is downloaded only the server knows a message has attachments, not how many */
-        int clip = !shown && (m->nfiles > 0 || (!m->row.body_cached && m->row.has_attachment));
+        /* before its body is downloaded and read only the server knows a message has attachments, not how many */
+        int clip = !shown && (m->nfiles > 0 || ((!m->row.body_cached || !m->loaded) && m->row.has_attachment));
         char nfiles[16] = "";
         if (clip && m->nfiles) snprintf(nfiles, sizeof nfiles, "%d", m->nfiles);
         float clip_w = clip ? 14 * K + (nfiles[0] ? 3 + jd_text_width(ui, nfiles, 12 * K, 0) : 0) + 8 * K : 0;
@@ -2020,9 +2066,10 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
         jd_text(ui, date, tx + tw - dw, name_y + 2 * K, 13 * K, JD_NORD4, 0);
         if (shown) card_icons(app, c, i, icons_right, icons_cy, r, narrow, 1);
         if (!shown) {
-            /* the first line of what was written, quotes left out */
-            char line[200] = "";
-            for (const char *p = m->text; p && *p;) {
+            /* the first line of what was written, quotes left out; the stored snippet while it is not read */
+            char line[256] = "";
+            if (!m->loaded && m->row.snippet) snprintf(line, sizeof line, "%s", m->row.snippet);
+            for (const char *p = m->loaded ? m->text : NULL; p && *p;) {
                 const char *nl = strchr(p, '\n');
                 int len = nl ? (int)(nl - p) : (int)strlen(p);
                 while (len && (*p == ' ' || *p == '\t')) p++, len--;
@@ -2037,6 +2084,7 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
                         JD_MUTED, 0);
             y += head_h + pad;
             m->card_h = y - card_y;
+            enter_end(entering && on_screen, card_came, (Rectangle){r.x, card_y, r.width, m->card_h});
             y += 8;
             continue;
         }
@@ -2152,6 +2200,7 @@ void conv_draw(jd_app *app, jd_conv *c, Rectangle r, int focused)
             y = card_y + moving_h;
         }
         m->card_h = y - card_y;
+        enter_end(entering && on_screen, card_came, (Rectangle){r.x, card_y, r.width, m->card_h});
         y += 8;
     }
     jd_scissor_end();

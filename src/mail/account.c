@@ -167,7 +167,8 @@ void jd_prefs_load(jd_prefs *p)
     if (jd_toml_int(t, "view", "scale", &v) == 0 && v >= 50 && v <= 200) p->scale = (int)v;
     if (jd_toml_int(t, "view", "list_text", &v) == 0 && v >= 8 && v <= 40) p->list_text = (int)v;
     if (jd_toml_int(t, "view", "reader_text", &v) == 0 && v >= 8 && v <= 40) p->reader_text = (int)v;
-    if (jd_toml_int(t, "sync", "prefetch_days", &v) == 0 && v >= 0 && v <= 3650) p->prefetch_days = (int)v;
+    if (jd_toml_int(t, "sync", "prefetch_days", &v) == 0 && v >= -1 && v <= 3650) p->prefetch_days = (int)v;
+    p->prefetch_all = jd_streq(jd_toml_str(t, "sync", "prefetch_folders"), "all");
     if (jd_toml_int(t, "sync", "check_minutes", &v) == 0 && v >= 1 && v <= 1440) p->check_minutes = (int)v;
     p->share = jd_toml_bool(t, "sync", "settings", 1);
     /* [[calendar]] entries, or the single [calendar] files had before */
@@ -470,8 +471,8 @@ int jd_settings_save(const jd_account *const *accounts, int naccounts, const jd_
     put(&b, "mono", p->font_mono ? p->font_mono : "");
     jd_buf_addf(&b, "mono_plain = %s\n", p->mono_plain ? "true" : "false");
     compose_text(&b, p);
-    jd_buf_addf(&b, "\n[sync]\nprefetch_days = %d\ncheck_minutes = %d\n", p->prefetch_days,
-                p->check_minutes ? p->check_minutes : 5);
+    jd_buf_addf(&b, "\n[sync]\nprefetch_days = %d\nprefetch_folders = \"%s\"\ncheck_minutes = %d\n", p->prefetch_days,
+                p->prefetch_all ? "all" : "inbox", p->check_minutes ? p->check_minutes : 5);
     put_bool(&b, "settings", p->share);
     if (p->ncals)
         jd_buf_adds(&b, "\n# Calendar accounts: provider is caldav (url: the server, or a calendar's address) or google\n"
