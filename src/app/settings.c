@@ -224,7 +224,8 @@ static const struct {
     {S_NOTIFY, "Also while jackdaw is in front", "focused notifications"},
     {S_NOTIFY, "Instant (push)", "push"},
     {S_NOTIFY, "Check for updates automatically", "update release version"},
-    {S_SYNC, "Keep recent mail offline", "offline prefetch download"},
+    {S_SYNC, "Keep mail offline", "offline prefetch download all folders"},
+    {S_SYNC, "How far back", "offline prefetch download all"},
     {S_SYNC, "Check other folders", "sync interval minutes"},
     {S_SYNC, "Share settings with my other jackdaws", "share sync devices"},
     {S_CALENDAR, "Calendar", "caldav google calendars account"},
@@ -729,8 +730,20 @@ static void sync_section(jd_app *app, float x, float y, float w)
 {
     jd_prefs *p = &app->prefs;
     y = heading(app, x, y, "Sync", "The Inbox updates at once (IMAP IDLE); other folders on a timer.");
-    float cx = label(app, x, &y, "Keep recent mail offline", "Inbox messages this many days back are downloaded whole");
-    if (stepper(app, cx, y + 6, &p->prefetch_days, 7, 0, 365, " days")) changed(app);
+    static const char *const scopes[] = {"Inbox", "All folders"};
+    float cx = label(app, x, &y, "Keep mail offline", "Downloaded whole, to read and search without the server");
+    int sc = jd_segmented(&app->ui, cx, y + 6, scopes, 2, p->prefetch_all);
+    if (sc != p->prefetch_all) p->prefetch_all = sc, changed(app);
+    y = divider(x, y + row_h, w);
+    cx = label(app, x, &y, "How far back", "None: a message downloads when opened, as one over 25 MB always does");
+    static const char *const spans[] = {"None", "30 days", "90 days", "1 year", "All"};
+    static const int span_days[] = {0, 30, 90, 365, -1};
+    /* a hand-set [sync] prefetch_days shows as the next span up */
+    int span = p->prefetch_days < 0 ? 4 : 3;
+    for (int i = 3; i >= 0; i--)
+        if (p->prefetch_days >= 0 && span_days[i] >= p->prefetch_days) span = i;
+    int pick = jd_segmented(&app->ui, cx, y + 6, spans, 5, span);
+    if (pick != span) p->prefetch_days = span_days[pick], changed(app);
     y = divider(x, y + row_h, w);
     cx = label(app, x, &y, "Check other folders", "How often every folder is synced");
     if (stepper(app, cx, y + 6, &p->check_minutes, 1, 1, 120, " min")) changed(app);

@@ -1,7 +1,9 @@
 # On main, which only a PR that passed CI reaches (the ruleset): when project() VERSION in CMakeLists.txt has no
-# release yet, platform/release.sh builds both apps with JD_RELEASE=1 and publishes vX.Y.Z. The APK is signed with
-# the key every earlier release used (secret ANDROID_KEYSTORE_B64), or phones would refuse the update.
-# The caches it saves on main are the ones the next PRs restore.
+# release yet, platform/release.sh publishes vX.Y.Z. The release builds are the ones CI made on that PR, when main's
+# tree is the one they were built from (the ruleset merges only a PR up to date with main); otherwise they are built
+# here. The APK is signed here with the key every earlier release used (secret ANDROID_KEYSTORE_B64), or phones
+# would refuse the update. PRs restore the caches saved on main: the caches job makes the third-party builds when
+# their pinned versions change.
 name: Release
 
 on:
@@ -14,6 +16,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   release:
@@ -37,14 +40,35 @@ jobs:
           v=$(sed -n 's/^project(jackdaw VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
           echo "tag=v$v" >>"$GITHUB_OUTPUT"
           if gh release view "v$v" >/dev/null 2>&1; then echo "new=0" >>"$GITHUB_OUTPUT"; else echo "new=1" >>"$GITHUB_OUTPUT"; fi
-      - name: Packages
+      # the PR this commit came from, the CI run on its head, and that run's release builds when they were made from
+      # exactly this tree
+      - name: Release builds from the PR
+        id: prebuilt
         if: steps.version.outputs.new == '1'
+        run: |
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" -q '.[0].number' 2>/dev/null || true)
+          head=$([ -n "$pr" ] && gh pr view "$pr" -R "$GITHUB_REPOSITORY" --json headRefOid -q .headRefOid 2>/dev/null || true)
+          run=$([ -n "$head" ] && gh run list -R "$GITHUB_REPOSITORY" -w ci.yml -c "$head" -s success -L 1 \
+                  --json databaseId -q '.[0].databaseId' 2>/dev/null || true)
+          tree=$(git rev-parse 'HEAD^{tree}')
+          if [ -n "$run" ] &&
+             gh run download "$run" -R "$GITHUB_REPOSITORY" -n jackdaw-release-linux -D ~/prebuilt/linux &&
+             gh run download "$run" -R "$GITHUB_REPOSITORY" -n jackdaw-release-android -D ~/prebuilt/android &&
+             [ "$(cat ~/prebuilt/linux/tree)" = "$tree" ] && [ "$(cat ~/prebuilt/android/tree)" = "$tree" ]; then
+            echo "use=1" >>"$GITHUB_OUTPUT"
+            echo "publishing the release builds of CI run $run (PR #$pr)"
+          else
+            echo "no release builds of this tree from CI: building them here"
+          fi
+      - name: Packages
+        if: steps.version.outputs.new == '1' && steps.prebuilt.outputs.use != '1'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends cmake ninja-build pkg-config autoconf automake libtool make ccache \
             libssl-dev libcurl4-openssl-dev zlib1g-dev libexpat1-dev perl libsystemd-dev libsecret-1-dev libfontconfig1-dev \
             libwayland-dev libxkbcommon-dev wayland-protocols libx11-dev libxrandr-dev libxinerama-dev \
             libxcursor-dev libxi-dev libgl1-mesa-dev
+      # Java and build-tools: apksigner signs either way
       - uses: actions/setup-java@v4
         if: steps.version.outputs.new == '1'
         with:
@@ -58,7 +82,7 @@ jobs:
           path: /home/runner/android-sdk
           key: android-sdk-home-ndk28.2.13676358-bt36.1.0-p36.1
       - name: Cache Linux third-party builds
-        if: steps.version.outputs.new == '1'
+        if: steps.version.outputs.new == '1' && steps.prebuilt.outputs.use != '1'
         uses: actions/cache@v4
         with:
           path: |
@@ -67,7 +91,7 @@ jobs:
             !~/.cache/jackdaw/linux/build-debug
           key: linux-${{ hashFiles('platform/versions.sh', 'platform/linux/deps.sh') }}
       - name: Cache Android third-party builds
-        if: steps.version.outputs.new == '1'
+        if: steps.version.outputs.new == '1' && steps.prebuilt.outputs.use != '1'
         uses: actions/cache@v4
         with:
           path: |
@@ -78,7 +102,7 @@ jobs:
             !~/.cache/jackdaw/android/build-*
           key: android-${{ hashFiles('platform/versions.sh', 'platform/android/deps.sh') }}
       - name: Cache compiler output
-        if: steps.version.outputs.new == '1'
+        if: steps.version.outputs.new == '1' && steps.prebuilt.outputs.use != '1'
         uses: actions/cache@v4
         with:
           path: ~/.cache/ccache
@@ -102,4 +126,62 @@ jobs:
           echo "$KEYSTORE" | base64 -d >~/.cache/jackdaw/android/debug.keystore
       - name: Release ${{ steps.version.outputs.tag }}
         if: steps.version.outputs.new == '1'
+        env:
+          JD_PREBUILT: ${{ steps.prebuilt.outputs.use == '1' && '/home/runner/prebuilt' || '' }}
         run: platform/release.sh
+
+  # The third-party builds, for the caches PRs restore, only when their pinned versions changed (a key not saved yet)
+  caches:
+    runs-on: ubuntu-24.04
+    env:
+      ANDROID_HOME: /home/runner/android-sdk
+      ANDROID_NDK: /home/runner/android-sdk/ndk/28.2.13676358
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache Linux third-party builds
+        id: linux
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/jackdaw/linux
+            !~/.cache/jackdaw/linux/build
+            !~/.cache/jackdaw/linux/build-debug
+          key: linux-${{ hashFiles('platform/versions.sh', 'platform/linux/deps.sh') }}
+      - name: Cache Android third-party builds
+        id: android
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/jackdaw/android
+            !~/.cache/jackdaw/android/debug.keystore
+            !~/.cache/jackdaw/android/out
+            !~/.cache/jackdaw/android/apk
+            !~/.cache/jackdaw/android/build-*
+          key: android-${{ hashFiles('platform/versions.sh', 'platform/android/deps.sh') }}
+      - name: Packages
+        if: steps.linux.outputs.cache-hit != 'true' || steps.android.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build pkg-config autoconf automake libtool make \
+            libssl-dev libcurl4-openssl-dev zlib1g-dev libexpat1-dev perl libsystemd-dev libsecret-1-dev libfontconfig1-dev \
+            libwayland-dev libxkbcommon-dev wayland-protocols libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxi-dev libgl1-mesa-dev
+      - name: Linux third-party builds
+        if: steps.linux.outputs.cache-hit != 'true'
+        run: platform/linux/deps.sh
+      - name: Cache Android SDK packages
+        id: sdk
+        if: steps.android.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/android-sdk
+          key: android-sdk-home-ndk28.2.13676358-bt36.1.0-p36.1
+      - name: SDK packages
+        if: steps.android.outputs.cache-hit != 'true' && steps.sdk.outputs.cache-hit != 'true'
+        run: |
+          SM=/usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager
+          yes | "$SM" --sdk_root="$ANDROID_HOME" --licenses >/dev/null
+          "$SM" --sdk_root="$ANDROID_HOME" "ndk;28.2.13676358" "build-tools;36.1.0" "platforms;android-36.1" >/dev/null
+      - name: Android third-party builds
+        if: steps.android.outputs.cache-hit != 'true'
+        run: platform/android/deps.sh

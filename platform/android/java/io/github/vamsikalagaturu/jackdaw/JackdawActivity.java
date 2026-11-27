@@ -149,14 +149,18 @@ public class JackdawActivity extends NativeActivity {
     /* ---- notifications ---- */
 
     /* on_new_mail, on the sync thread; whenVisible "0": not while the app is on screen */
-    public String postNewMail(String title, String text, String message, String whenVisible) {
+    public String postNewMail(String title, String text, String body, String message, String whenVisible) {
         if (PushService.appVisible && "0".equals(whenVisible)) return null;
-        return postNotification(title, text, message);
+        return post(title, text, body, message);
     }
 
     public String postNotification(String title, String text, String message) {
+        return post(title, text, "", message);
+    }
+
+    private String post(String title, String text, String body, String message) {
         try {
-            return Notifier.post(this, title, text, Long.parseLong(message)) ? "1" : null;
+            return Notifier.post(this, title, text, body, Long.parseLong(message)) ? "1" : null;
         } catch (NumberFormatException e) {
             return null;
         }

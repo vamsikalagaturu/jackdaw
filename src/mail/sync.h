@@ -14,7 +14,8 @@ typedef enum {
     JD_EV_ERROR,    /* text: why the last attempt failed */
     JD_EV_AUTH,     /* text: the server refused the password; the worker stops */
     JD_EV_CHANGED,  /* the store changed: re-read what is shown */
-    JD_EV_NEW_MAIL, /* count new unread Inbox messages, id the newest, text its sender, text2 its subject */
+    JD_EV_NEW_MAIL, /* count new unread Inbox messages, id the newest, text its sender, text2 its subject, text3 the
+                       opening of its body (the list's snippet; NULL while the body is not downloaded) */
     JD_EV_BODY,     /* id: that message's body is cached */
     JD_EV_SEARCH,   /* id: the search's serial; ids: messages the server found */
     JD_EV_SENT,     /* id: the send's serial; text: why it failed, NULL when sent */
@@ -27,7 +28,7 @@ typedef enum {
 
 typedef struct {
     jd_event_kind kind;
-    char *text, *text2;
+    char *text, *text2, *text3;
     int64_t id;
     int count;
     int64_t *ids;
@@ -40,7 +41,8 @@ void jd_sync_now(jd_sync *s);
 int jd_sync_poll(jd_sync *s, jd_event *ev);
 /* called on the worker's thread, besides JD_EV_NEW_MAIL, for a platform whose event loop stops in the
    background (account: the worker's address); NULL by default */
-extern void (*jd_sync_new_mail_hook)(const char *account, const char *from, const char *subject, int64_t id, int count);
+extern void (*jd_sync_new_mail_hook)(const char *account, const char *from, const char *subject, const char *preview,
+                                     int64_t id, int count);
 /* the same for JD_EV_SCHEDULED: err NULL when sent */
 extern void (*jd_sync_scheduled_hook)(const char *subject, const char *err);
 void jd_event_free(jd_event *ev);

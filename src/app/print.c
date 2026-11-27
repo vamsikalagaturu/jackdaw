@@ -98,6 +98,7 @@ static int quiet_row(Image *im, int from, int span)
 void print_conv(jd_app *app, jd_conv *c)
 {
     if (!c->n) return;
+    conv_load_all(app, c);
     float total = doc(app, c, 0, 0);
     RenderTexture2D rt = LoadRenderTexture(PX_W, PX_H);
     unsigned char **pages = NULL;

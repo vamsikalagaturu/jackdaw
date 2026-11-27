@@ -75,8 +75,9 @@ public class MailJobService extends JobService {
                     String found = password == null ? null : nativeCheck(files, account, password);
                     if (found != null)
                         for (String line : found.split("\n")) {
-                            String[] f = line.split("\t", 3);
-                            if (f.length == 3) Notifier.post(this, f[1], f[2], Long.parseLong(f[0]));
+                            String[] f = line.split("\t", 4);
+                            if (f.length >= 3)
+                                Notifier.post(this, f[1], f[2], f.length == 4 ? f[3] : "", Long.parseLong(f[0]));
                         }
                 }
                 SendAlarm.set(this, nativeNextSend(files));

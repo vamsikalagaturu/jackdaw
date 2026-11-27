@@ -4,6 +4,34 @@ What changed in each release, newest first, in the form of [Keep a Changelog 1.1
 `platform/release.sh` publishes a version's section as its GitHub release notes, and stops when the version has
 none: add it with the change. Releases before 0.3.4 have their notes on GitHub.
 
+## [0.3.6] - 2026-11-27
+
+### Added
+
+- Search the server from the list: a button where nothing on this device matches, and a link after the count where
+  something does, on Android too.
+- A search word with punctuation (`gringotts.secoro`, `a@b.de`, `re-run`) matches only as typed, case aside. The
+  server's matches for it are downloaded and checked, since mail servers split such words. Rules for new mail match
+  such words the same way.
+- Every folder can be kept offline: Settings > Sync chooses Inbox or All folders, and how far back (None, 30 days,
+  90 days, 1 year or All); `[sync] prefetch_folders`, and `prefetch_days = -1` for all. Downloads show their progress.
+- Web addresses written as text in HTML mail are links, also where the mail splits one over several styled pieces.
+- Android: an expanded new-mail notification shows the opening of the message under its subject.
+- A message's attachments, when they would take more than a row, fold into one chip with their count and size; a tap
+  shows them.
+- A conversation comes in as it opens: its subject, then each message on screen, one after another.
+
+### Changed
+
+- Long conversations open at once: a collapsed message is read only when it is opened.
+
+### Fixed
+
+- Underlined and struck-through text in HTML mail is underlined across the spaces too.
+- HTML mail built of deeply nested tables (an order confirmation 13 deep took 10 s) opens at once: litehtml
+  measured every table cell again at each level (`platform/patches/`).
+- Prices with a raised currency sign and cents in HTML mail show them, where they were left out.
+
 ## [0.3.5] - 2026-11-25
 
 ### Added

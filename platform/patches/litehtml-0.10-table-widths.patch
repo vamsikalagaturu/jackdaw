@@ -1,0 +1,121 @@
+--- a/src/render_table.cpp
++++ b/src/render_table.cpp
+@@ -1,6 +1,43 @@
+ #include "render_table.h"
+ #include "document.h"
+ #include "iterators.h"
++#include <map>
++#include <set>
++#include <tuple>
++
++namespace
++{
++	// A table measures each cell at its minimum and its maximum width before laying it out, so a table nested n
++	// deep laid its innermost cells out about 3^n times. A cell is a block formatting context: at the same width it
++	// measures the same, so within one document::render each measurement is made once.
++	using measure_key = std::tuple<const litehtml::render_item*, float, int, float, float, int, float, float, uint32_t>;
++	std::map<measure_key, litehtml::rendered_width> measures;
++
++	// A cell whose measurement was kept goes into stale: its layout is not this measurement's, and the second
++	// pass that lays it out finally relies on the first (it skips absolutely positioned children).
++	litehtml::rendered_width measure(const std::shared_ptr<litehtml::render_item>& el,
++									 const litehtml::containing_block_context& cb, litehtml::formatting_context* fmt_ctx,
++									 std::set<const litehtml::render_item*>& stale)
++	{
++		measure_key key{el.get(), cb.width.value, (int)cb.width.type, cb.render_width.value, cb.height.value,
++						(int)cb.height.type, cb.min_width.value, cb.max_width.value, cb.size_mode};
++		auto found = measures.find(key);
++		if(found != measures.end())
++		{
++			stale.insert(el.get());
++			return found->second;
++		}
++		stale.erase(el.get());
++		auto rw = el->render(0, 0, cb, fmt_ctx);
++		measures[key] = rw;
++		return rw;
++	}
++}
++
++void litehtml::table_measures_clear()
++{
++	measures.clear();
++}
+ 
+ 
+ litehtml::render_item_table::render_item_table(std::shared_ptr<element> _src_el) :
+@@ -18,6 +55,7 @@
+ 		return {0, 0};
+ 
+ 	containing_block_context self_size = calculate_containing_block_context(containing_block_size);
++	std::set<const render_item*> stale;
+ 
+     // Calculate table spacing
+     pixel_t table_width_spacing = 0;
+@@ -55,8 +93,7 @@
+             table_cell* cell = m_grid->cell(0, row);
+             if (cell && cell->el)
+             {
+-				auto rw =
+-					cell->el->render(0, 0, self_size.new_width(self_size.render_width - table_width_spacing), fmt_ctx);
++				auto rw = measure(cell->el, self_size.new_width(self_size.render_width - table_width_spacing), fmt_ctx, stale);
+ 				cell->min_width = rw.min_width;
+ 				cell->max_width = rw.natural_width;
+ 			}
+@@ -74,7 +111,7 @@
+ 					   m_grid->column(col).css_width.units() != css_units_percentage)
+ 					{
+ 						pixel_t css_w = m_grid->column(col).css_width.calc_percent(self_size.width);
+-						pixel_t el_w	= cell->el->render(0, 0, self_size.new_width(css_w), fmt_ctx).natural_width;
++						pixel_t el_w	= measure(cell->el, self_size.new_width(css_w), fmt_ctx, stale).natural_width;
+ 						cell->min_width = cell->max_width = std::max(css_w, el_w);
+ 						cell->el->pos().width =
+ 							cell->min_width - cell->el->content_offset_left() - cell->el->content_offset_right();
+@@ -82,13 +119,10 @@
+ 					{
+ 						// calculate minimum content width
+ 						cell->min_width =
+-							cell->el->render(0, 0, self_size.new_width(cell->el->content_offset_width()), fmt_ctx)
+-								.natural_width;
++							measure(cell->el, self_size.new_width(cell->el->content_offset_width()), fmt_ctx, stale).natural_width;
+ 						// calculate maximum content width
+ 						cell->max_width =
+-							cell->el
+-								->render(0, 0, self_size.new_width(self_size.render_width - table_width_spacing),
+-										 fmt_ctx)
++							measure(cell->el, self_size.new_width(self_size.render_width - table_width_spacing), fmt_ctx, stale)
+ 								.natural_width;
+ 					}
+ 				}
+@@ -196,7 +230,8 @@
+                 //if (cell->el->pos().width != cell_width - cell->el->content_offset_left() -
+ 				//									 cell->el->content_offset_right())
+                 {
+-                    cell->el->render(m_grid->column(col).left, 0, self_size.new_width(cell_width), fmt_ctx, true);
++                    cell->el->render(m_grid->column(col).left, 0, self_size.new_width(cell_width), fmt_ctx,
++                                     stale.count(cell->el.get()) == 0);
+                     cell->el->pos().width = cell_width - cell->el->content_offset_left() -
+ 							cell->el->content_offset_right();
+                 }
+--- a/src/document.cpp
++++ b/src/document.cpp
+@@ -498,6 +498,7 @@
+ pixel_t document::render( pixel_t max_width, render_type rt )
+ {
+ 	pixel_t ret = 0;
++	table_measures_clear();
+ 	if(m_root && m_root_render)
+ 	{
+ 		position viewport;
+--- a/include/litehtml/render_table.h
++++ b/include/litehtml/render_table.h
+@@ -5,6 +5,9 @@
+ 
+ namespace litehtml
+ {
++	// forgets the table cells' width measurements: each document::render starts without them
++	void table_measures_clear();
++
+ 	class render_item_table : public render_item
+ 	{
+ 	protected:

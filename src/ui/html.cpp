@@ -11,6 +11,10 @@
 #include <string>
 #include <vector>
 
+extern "C" {
+#include "core/util.h"
+}
+
 namespace {
 
 /* Inter's vertical metrics as fractions of the em (hhea ascender 0.969, descender 0.242) */
@@ -27,6 +31,8 @@ std::string user_css(float size)
            std::to_string((int)size) + "px; }"
            /* litehtml turns a cell's align into an inherited text-align; browsers centre only the nested table */
            " table { text-align: left; }"
+           /* litehtml 0.10 loses a relatively positioned superscript (a price's currency and cents) */
+           " sup, sub { position: static !important; }"
            " td[align=center] > table, th[align=center] > table, td[align=middle] > table, center > table,"
            " div[align=center] > table { margin-left: auto; margin-right: auto; }";
 }
@@ -146,6 +152,16 @@ public:
     std::vector<run> runs;
     bool collecting = false;
 
+    /* Web addresses written as text, not made links by the mail (find_links): per run, its bytes [from, to) and the
+       address, which may run on over the next runs. drawn_at finds a run's index from where draw_text puts it. */
+    struct auto_link {
+        int from, to;
+        std::string url;
+    };
+    std::vector<std::vector<auto_link>> links;
+    std::map<std::pair<long, long>, int> drawn_at;
+    static std::pair<long, long> place(float x, float y) { return {std::lround(x * 8), std::lround(y * 8)}; }
+
     litehtml::uint_ptr create_font(const litehtml::font_description &d, const litehtml::document *,
                                    litehtml::font_metrics *fm) override
     {
@@ -160,7 +176,8 @@ public:
             fm->height = fm->ascent + fm->descent;
             fm->x_height = f->size * 0.53f;
             fm->ch_width = MeasureTextEx(f->font(), "0", f->size, 0).x;
-            fm->draw_spaces = false;
+            /* an underline or strike runs on through the spaces, as litehtml's own containers draw it */
+            fm->draw_spaces = d.decoration_line != litehtml::text_decoration_line_none;
             fm->sub_shift = f->size * 0.2f;
             fm->super_shift = f->size * 0.35f;
         }
@@ -183,15 +200,37 @@ public:
         float top = pos.y + pos.height - f->size * (ASCENT + DESCENT);
         if (collecting) {
             content_bottom = std::max(content_bottom, (float)(pos.y + pos.height));
-            if (text && text[0])
+            /* the spaces drawn for an underline are not text to select: the gaps between runs stand for them */
+            if (text && text[strspn(text, " ")])
                 runs.push_back(run{pos.x, top, MeasureTextEx(f->font(), text, f->size, 0).x, f->size * (ASCENT + DESCENT),
                                    text, f->face, f->size});
             return;
         }
         Color c = text_color(color);
         Font font = f->font();
-        jd_text_draw(f->face, text, Vector2{snap(pos.x), snap(top)}, f->size, c);
         float w = MeasureTextEx(font, text, f->size, 0).x, t = std::max(1.0f, f->size / 14);
+        auto linked = drawn_at.find(place(pos.x, top));
+        if (linked == drawn_at.end()) {
+            jd_text_draw(f->face, text, Vector2{snap(pos.x), snap(top)}, f->size, c);
+        } else {
+            /* the address in the colour an <a> gets, underlined; the rest of the word as it was */
+            Color lc = text_color(litehtml::web_color(0, 0, 0xff));
+            std::string s = text;
+            int at = 0;
+            auto piece = [&](int to, Color pc, bool underline) {
+                if (to <= at) return;
+                float x0 = at ? MeasureTextEx(font, s.substr(0, (size_t)at).c_str(), f->size, 0).x : 0;
+                float x1 = MeasureTextEx(font, s.substr(0, (size_t)to).c_str(), f->size, 0).x;
+                jd_text_draw(f->face, s.substr((size_t)at, (size_t)(to - at)).c_str(), Vector2{snap(pos.x + x0), snap(top)}, f->size, pc);
+                if (underline) DrawRectangleV(Vector2{pos.x + x0, top + f->size * ASCENT + t}, Vector2{x1 - x0, t}, pc);
+                at = to;
+            };
+            for (const auto &l : links[(size_t)linked->second]) {
+                piece(l.from, c, false);
+                piece(l.to, lc, true);
+            }
+            piece((int)s.size(), c, false);
+        }
         if (f->decoration & litehtml::text_decoration_line_underline)
             DrawRectangleV(Vector2{pos.x, top + f->size * ASCENT + t}, Vector2{w, t}, c);
         if (f->decoration & litehtml::text_decoration_line_line_through)
@@ -760,6 +799,58 @@ extern "C" int jd_html_has_image(jd_html *h, const char *src)
     return h->box.images.count(src) > 0;
 }
 
+/* the href of the <a> at (x, y) in the document's units, empty when none */
+static std::string anchor_at(jd_html *h, float x, float y)
+{
+    litehtml::position::vector boxes;
+    h->box.clicked.clear();
+    h->doc->on_lbutton_down(x, y, x, y, boxes);
+    h->doc->on_lbutton_up(x, y, x, y, boxes);
+    return h->box.clicked;
+}
+
+/* Addresses read across the runs in reading order, as plain text is: a mail may split one over several elements
+   (<font>https://</font><font>host</font>). Runs on a line touching each other are one word; a line broken after a
+   hyphen (split_text) continues the word, any other gap is a space. Those inside an <a> are the mail's own. */
+static void find_links(jd_html *h)
+{
+    auto &box = h->box;
+    const auto &runs = box.runs;
+    box.links.assign(runs.size(), {});
+    box.drawn_at.clear();
+    std::string text;
+    std::vector<int> run_of, byte_of;
+    for (int i = 0; i < (int)runs.size(); i++) {
+        const auto &r = runs[(size_t)i];
+        if (i) {
+            const auto &p = runs[(size_t)i - 1];
+            bool joined = same_line(p, r) ? r.x <= p.x + p.w + 0.5f : !p.text.empty() && p.text.back() == '-';
+            if (!joined) text += ' ', run_of.push_back(-1), byte_of.push_back(0);
+        }
+        for (int k = 0; k < (int)r.text.size(); k++) text += r.text[(size_t)k], run_of.push_back(i), byte_of.push_back(k);
+    }
+    for (int p = 0; p < (int)text.size(); p++) {
+        int e = jd_url_end(text.c_str(), p);
+        if (e == p) continue;
+        const auto &first = runs[(size_t)run_of[(size_t)p]];
+        if (anchor_at(h, first.x + 1, first.y + first.h / 2).empty()) {
+            std::string url = text.substr((size_t)p, (size_t)(e - p));
+            for (int q = p; q < e; q++) {
+                int i = run_of[(size_t)q];
+                if (i < 0) continue;
+                auto &ls = box.links[(size_t)i];
+                if (ls.empty() || ls.back().url != url || ls.back().to != byte_of[(size_t)q])
+                    ls.push_back({byte_of[(size_t)q], byte_of[(size_t)q] + 1, url});
+                else
+                    ls.back().to++;
+            }
+        }
+        p = e - 1;
+    }
+    for (int i = 0; i < (int)runs.size(); i++)
+        if (!box.links[(size_t)i].empty()) box.drawn_at[container::place(runs[(size_t)i].x, runs[(size_t)i].y)] = i;
+}
+
 /* fixed-width mail wider than the page shrinks to fit, as phone mail apps do, down to FIT_MIN */
 static const float FIT_MIN = 0.45f;
 
@@ -800,6 +891,7 @@ extern "C" float jd_html_layout(jd_html *h, float width)
     litehtml::position all(0, 0, w + 100000, h->height + 100000);
     h->doc->draw(0, 0, 0, &all);
     h->box.collecting = false;
+    find_links(h);
     /* a page stretched to the viewport by litehtml 0.10's height:100% ends where its content does */
     if (h->height >= VIEW_H / 2 && h->box.content_bottom > 0) h->height = std::min(h->height, h->box.content_bottom);
     return h->height * h->zoom;
@@ -841,11 +933,20 @@ extern "C" void jd_html_draw(jd_html *h, float x, float y, float clip_top, float
 extern "C" char *jd_html_link_at(jd_html *h, float x, float y)
 {
     x /= h->zoom, y /= h->zoom;
-    litehtml::position::vector boxes;
-    h->box.clicked.clear();
-    h->doc->on_lbutton_down(x, y, x, y, boxes);
-    h->doc->on_lbutton_up(x, y, x, y, boxes);
-    return h->box.clicked.empty() ? nullptr : strdup(h->box.clicked.c_str());
+    std::string url = anchor_at(h, x, y);
+    if (!url.empty()) return strdup(url.c_str());
+    zoom_scope zs(h->zoom);
+    const auto &runs = h->box.runs;
+    for (size_t i = 0; i < h->box.links.size() && i < runs.size(); i++) {
+        const auto &r = runs[i];
+        if (h->box.links[i].empty() || y < r.y || y >= r.y + r.h || x < r.x || x >= r.x + r.w) continue;
+        for (const auto &l : h->box.links[i]) {
+            float x0 = l.from ? MeasureTextEx(r.font(), r.text.substr(0, (size_t)l.from).c_str(), r.size, 0).x : 0;
+            float x1 = MeasureTextEx(r.font(), r.text.substr(0, (size_t)l.to).c_str(), r.size, 0).x;
+            if (x >= r.x + x0 && x < r.x + x1) return strdup(l.url.c_str());
+        }
+    }
+    return nullptr;
 }
 
 extern "C" void jd_html_free(jd_html *h)

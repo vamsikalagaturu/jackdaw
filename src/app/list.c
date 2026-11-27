@@ -1744,13 +1744,22 @@ void list_draw(jd_app *app, Rectangle r)
             if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !app->dialog.kind) bar[k].fn(app);
         }
         y += 36;
-    } else if (app->query) {
+    } else if (app->query && app->nrows) {
         char line[160];
         if (app->server_searching) snprintf(line, sizeof line, "%d found here. Searching the server...", app->nrows);
         else if (app->nserver_hits) snprintf(line, sizeof line, "%d found, the server's matches included.", app->nrows);
-        else if (plat_touch()) snprintf(line, sizeof line, "%d found here.", app->nrows);
-        else snprintf(line, sizeof line, "%d found here.  Shift+S searches the server too.", app->nrows);
+        else if (app->server_hits) snprintf(line, sizeof line, "%d found; the server has none besides.", app->nrows);
+        else snprintf(line, sizeof line, "%d found here.", app->nrows);
         jd_text(ui, line, x, y + 2, 13, JD_MUTED, 0);
+        /* server_hits stays NULL until the server has answered this search */
+        if (!app->server_searching && !app->server_hits && app->sync) {
+            const char *link = plat_touch() ? "Search the server too" : "Search the server too (Shift+S)";
+            float lx = x + jd_text_width(ui, line, 13, 0) + 12;
+            Rectangle lr = {lx - 6, y - 4, jd_text_width(ui, link, 13, 0) + 12, 26};
+            int hover = CheckCollisionPointRec(GetMousePosition(), lr) && !app->dialog.kind && !app->menu.open && !under_hints;
+            jd_text(ui, link, lx, y + 2, 13, hover ? JD_NORD8 : JD_NORD9, 0);
+            if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) server_search(app);
+        }
         y += 24;
     }
 
@@ -1769,7 +1778,18 @@ void list_draw(jd_app *app, Rectangle r)
             jd_text(ui, sub, area.x + (area.width - jd_text_width(ui, sub, 14, 0)) / 2, hy + 28, 14, JD_MUTED, 0);
             return;
         }
-        jd_text(ui, app->query ? "Nothing matches." : "No messages here.", x, y + 16, 15, JD_MUTED, 0);
+        if (!app->query) {
+            jd_text(ui, "No messages here.", x, y + 16, 15, JD_MUTED, 0);
+            return;
+        }
+        const char *line = app->server_searching ? "Nothing in the mail on this device. Searching the server..."
+                           : app->server_hits    ? "Nothing matches, here or on the server."
+                                                 : "Nothing in the mail on this device.";
+        jd_text_fit(ui, line, x, y + 16, w, 15, JD_MUTED, 0);
+        if (!app->server_searching && !app->server_hits && app->sync &&
+            jd_icon_button(ui, "search", "Search the server", (Rectangle){x, y + 48, 200, 38}, 1) && !app->dialog.kind &&
+            !app->menu.open && !under_hints)
+            server_search(app);
         return;
     }
     float rh = row_h(app);
