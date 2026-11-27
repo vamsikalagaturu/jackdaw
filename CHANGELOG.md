@@ -28,6 +28,9 @@ none: add it with the change. Releases before 0.3.4 have their notes on GitHub.
 ### Fixed
 
 - Underlined and struck-through text in HTML mail is underlined across the spaces too.
+- HTML mail built of deeply nested tables (an order confirmation 13 deep took 10 s) opens at once: litehtml
+  measured every table cell again at each level (`platform/patches/`).
+- Prices with a raised currency sign and cents in HTML mail show them, where they were left out.
 
 ## [0.3.5] - 2026-11-25
 

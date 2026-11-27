@@ -31,6 +31,8 @@ std::string user_css(float size)
            std::to_string((int)size) + "px; }"
            /* litehtml turns a cell's align into an inherited text-align; browsers centre only the nested table */
            " table { text-align: left; }"
+           /* litehtml 0.10 loses a relatively positioned superscript (a price's currency and cents) */
+           " sup, sub { position: static !important; }"
            " td[align=center] > table, th[align=center] > table, td[align=middle] > table, center > table,"
            " div[align=center] > table { margin-left: auto; margin-right: auto; }";
 }

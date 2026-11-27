@@ -89,6 +89,21 @@ fetch_unpacked_xz() {
     mv "$4/thirdparty/$3.part" "$4/thirdparty/$3"
 }
 
+# platform/patches/$2-*.patch applied to thirdparty/$2 ($1 = repo root), each once: a .patched-<name> file remembers
+# it, and a tree that already has a patch (reverses cleanly) is only marked
+apply_patches() {
+    local p name dir="$1/thirdparty/$2"
+    for p in "$1"/platform/patches/"$2"-*.patch; do
+        [ -f "$p" ] || continue
+        name=$(basename "$p")
+        [ -f "$dir/.patched-$name" ] && continue
+        if ! patch -d "$dir" -p1 -R --dry-run -s -f <"$p" >/dev/null 2>&1; then
+            patch -d "$dir" -p1 -N -s <"$p" || { echo "patch $name does not apply to $dir" >&2; return 1; }
+        fi
+        touch "$dir/.patched-$name"
+    done
+}
+
 fetch_sources() {
     mkdir -p "$1/thirdparty"
     [ -d "$1/thirdparty/raylib" ] || git clone --depth 1 --branch "$RAYLIB_TAG" "$RAYLIB_URL" "$1/thirdparty/raylib"
@@ -98,6 +113,8 @@ fetch_sources() {
     fetch "$NANOSVG_URL/LICENSE.txt" "$1/thirdparty/nanosvg/LICENSE.txt" "$NANOSVG_LICENSE_SHA256"
     fetch_unpacked "$LIBETPAN_URL" "$LIBETPAN_SHA256" "libetpan-$LIBETPAN_VERSION" "$1"
     fetch_unpacked "$LITEHTML_URL" "$LITEHTML_SHA256" "litehtml-$LITEHTML_VERSION" "$1"
+    # nested tables measured each cell again at every level: an order mail 13 tables deep took 10 s to lay out
+    apply_patches "$1" "litehtml-$LITEHTML_VERSION"
     fetch_unpacked "$SQLITE_URL" "$SQLITE_SHA256" "sqlite-$SQLITE_VERSION" "$1"
     fetch_unpacked "$LIBICAL_URL" "$LIBICAL_SHA256" "libical-$LIBICAL_VERSION" "$1"
     mkdir -p "$1/thirdparty/cjson-$CJSON_VERSION"
