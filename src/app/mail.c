@@ -125,9 +125,12 @@ void mail_view_reset(jd_app *app)
     reader_close(app);
     jd_folder_rows_free(app->folders, app->nfolders);
     jd_thread_rows_free(app->rows, app->nrows);
+    free(app->row_group);
+    app->row_group = NULL;
     app->folders = NULL;
     app->rows = NULL;
     app->nfolders = app->folder = app->nrows = app->row = 0;
+    app->home = 1;
     free(app->status), free(app->error), free(app->query), free(app->server_hits), free(app->filter_from);
     app->status = app->error = app->query = app->filter_from = NULL;
     app->server_hits = NULL;
@@ -146,7 +149,9 @@ void mail_reload(jd_app *app)
     if (!app->view) return;
     int64_t keep = app->nfolders ? app->folders[app->folder].id : 0;
     jd_folder_rows_free(app->folders, app->nfolders);
+    jd_store_set_new_exclude(app->view, app->prefs.new_exclude, app->prefs.nnew_exclude);
     app->folders = jd_store_folders(app->view, &app->nfolders);
+    app->new_unread = jd_store_new_mail_unread(app->view);
     folders_tree_order(app);
     share_check(app);
     app->folder = 0;
@@ -168,7 +173,7 @@ void mail_body_ready(jd_app *app, int64_t id)
 
 void mail_open_message(jd_app *app, int64_t id)
 {
-    mail_select_inbox(app);
+    mail_select_home(app);
     int64_t thread = app->view ? jd_message_thread(app->view, id) : 0;
     /* a test notification names no message */
     if (!thread) return;
@@ -184,15 +189,18 @@ void mail_open_message(jd_app *app, int64_t id)
     conv_open(app, &t->conv, thread, app->grouped ? 0 : id);
 }
 
-void mail_select_inbox(jd_app *app)
+void mail_select_home(jd_app *app)
 {
     app->tab = 0;
     for (int i = 0; i < app->nfolders; i++)
-        if (strcasecmp(app->folders[i].name, "INBOX") == 0 && app->folder != i) {
+        if (strcasecmp(app->folders[i].name, "INBOX") == 0 && (app->folder != i || !app->home)) {
             app->folder = i;
+            app->home = 1;
             reader_close(app);
             list_reload(app);
         }
+    /* Home is its own view: a search or a filter left on (its "+N more" search) ends there */
+    list_search_end(app);
 }
 
 void cycle_reader(jd_app *app)
@@ -552,11 +560,12 @@ static void footer(jd_app *app, float sw, float sh)
     char counts[200] = "";
     if (app->tab == 0 && app->nfolders) {
         const jd_folder_row *f = &app->folders[app->folder];
-        int n = snprintf(counts, sizeof counts, "%s", app->query ? "Search" : folder_label(f));
+        int n = snprintf(counts, sizeof counts, "%s", app->query ? "Search" : app->home ? "Home" : folder_label(f));
         if (app->npicked) n += snprintf(counts + n, sizeof counts - (size_t)n, "  ·  %d selected", app->npicked);
         n += snprintf(counts + n, sizeof counts - (size_t)n, "  ·  %d %s", app->nrows,
                       app->grouped ? (app->nrows == 1 ? "conversation" : "conversations") : (app->nrows == 1 ? "message" : "messages"));
-        if (!app->query && f->unread) snprintf(counts + n, sizeof counts - (size_t)n, "  ·  %d unread", f->unread);
+        int unread = app->home ? app->new_unread : f->unread;
+        if (!app->query && unread) snprintf(counts + n, sizeof counts - (size_t)n, "  ·  %d unread", unread);
     }
     float cw = jd_text_width(ui, counts, 14, 0);
     jd_text_fit(ui, line, x + 22, y + 7, sw - x - 40 - cw - 24, 14, line == error ? JD_NORD13 : JD_NORD4, 0);
@@ -700,7 +709,7 @@ void mail_frame(jd_app *app)
     /* a phone has no Esc to close what is open: a back bar does it, to the folder it came from */
     Rectangle actions = {0};
     if (plat_touch() && (t->kind == TAB_CONV || t->kind == TAB_COMPOSE || t->kind == TAB_FILTERS || t->kind == TAB_CALENDAR)) {
-        const char *to = app->nfolders ? folder_label(&app->folders[app->folder]) : "Back";
+        const char *to = app->home ? "Home" : app->nfolders ? folder_label(&app->folders[app->folder]) : "Back";
         Rectangle back = {page.x, page.y, page.width, 44};
         int hover = CheckCollisionPointRec(GetMousePosition(), back) && !app->dialog.kind && !app->menu.open;
         DrawRectangleRec(back, hover ? JD_NORD2 : JD_NORD1);

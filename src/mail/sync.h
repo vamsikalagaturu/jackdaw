@@ -14,7 +14,7 @@ typedef enum {
     JD_EV_ERROR,    /* text: why the last attempt failed */
     JD_EV_AUTH,     /* text: the server refused the password; the worker stops */
     JD_EV_CHANGED,  /* the store changed: re-read what is shown */
-    JD_EV_NEW_MAIL, /* count new unread Inbox messages, id the newest, text its sender, text2 its subject, text3 the
+    JD_EV_NEW_MAIL, /* count new unread messages in a folder (jd_folder_gets_new_mail), id the newest, text its sender, text2 its subject, text3 the
                        opening of its body (the list's snippet; NULL while the body is not downloaded) */
     JD_EV_BODY,     /* id: that message's body is cached */
     JD_EV_SEARCH,   /* id: the search's serial; ids: messages the server found */

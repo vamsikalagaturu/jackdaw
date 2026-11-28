@@ -100,11 +100,18 @@ const float MID_LUMINANCE = 0.2f;
 
 Color original(const litehtml::web_color &c) { return Color{c.red, c.green, c.blue, c.alpha}; }
 
-/* backgrounds and borders */
+/* Backgrounds and borders. A saturated colour keeps about its lightness inverted (a #FFD916 button stays bright
+   yellow), while the dark text on it went light: it is darkened further, hue kept, until text as light as
+   text_color makes dark text (relative luminance about 0.7) has 4.5:1 on it, WCAG 2.2 SC 1.4.3. */
 Color to_color(const litehtml::web_color &c)
 {
     Color o = original(c);
-    return dark_page && luminance(o) > MID_LUMINANCE ? invert(c) : o;
+    if (!dark_page || luminance(o) <= MID_LUMINANCE) return o;
+    Color d = invert(c);
+    const float most = 0.75f / 4.5f - 0.05f;
+    for (int i = 0; i < 30 && luminance(d) > most; i++)
+        d = Color{(unsigned char)(d.r * 0.9f), (unsigned char)(d.g * 0.9f), (unsigned char)(d.b * 0.9f), d.a};
+    return d;
 }
 
 /* Text on the dark page, then lightened towards white, hue kept, until it has WCAG 2.2's 4.5:1 against the page
@@ -231,10 +238,12 @@ public:
             }
             piece((int)s.size(), c, false);
         }
+        /* litehtml rounds each word's and space's x on its own (el_text::draw), so a line as wide as the text ends
+           up to a pixel short of the next one's start: a pixel more always meets it */
         if (f->decoration & litehtml::text_decoration_line_underline)
-            DrawRectangleV(Vector2{pos.x, top + f->size * ASCENT + t}, Vector2{w, t}, c);
+            DrawRectangleV(Vector2{pos.x, top + f->size * ASCENT + t}, Vector2{w + 1, t}, c);
         if (f->decoration & litehtml::text_decoration_line_line_through)
-            DrawRectangleV(Vector2{pos.x, top + f->size * ASCENT * 0.65f}, Vector2{w, t}, c);
+            DrawRectangleV(Vector2{pos.x, top + f->size * ASCENT * 0.65f}, Vector2{w + 1, t}, c);
     }
 
     /* litehtml breaks lines only between these words. Besides spaces and CJK characters (as litehtml's own), a word

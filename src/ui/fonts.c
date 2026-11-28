@@ -16,36 +16,45 @@
 extern const unsigned char jd_font_regular[], jd_font_semibold[];
 extern const int jd_font_regular_size, jd_font_semibold_size;
 
-/* Latin, Greek, Cyrillic and common punctuation and symbols */
+/* Latin, Greek, Cyrillic, punctuation, currency, and the symbols block (arrows, circled letters such as the
+   university lists' "Ⓘ", checks, stars); a codepoint the font file lacks costs nothing */
 static const int ranges[][2] = {
-    {0x20, 0x7e}, {0xa0, 0x24f}, {0x370, 0x3ff}, {0x400, 0x4ff}, {0x2000, 0x203a}, {0x205f, 0x2064},
-    {0x20ac, 0x20ac}, {0x2122, 0x2122}, {0x2190, 0x2193}, {0x2500, 0x257f}, {0xfeff, 0xfeff}, {0xfffd, 0xfffd},
+    {0x20, 0x7e}, {0xa0, 0x24f}, {0x370, 0x3ff}, {0x400, 0x4ff}, {0x1e00, 0x1eff}, {0x2000, 0x20bf},
+    {0x2100, 0x27ff}, {0xfeff, 0xfeff}, {0xfffd, 0xfffd},
 };
 
-/* Unicode's spaces (Zs) other than U+0020, and its invisible format characters (Cf): mail pads its preview text
-   with them (U+2007, U+FEFF...), and a font without their glyphs had them drawn as raylib's fallback '?' */
+/* Unicode's spaces (Zs) other than U+0020, and its invisible characters: format (Cf), the soft hyphen, the grapheme
+   joiner, variation selectors, the object replacement. Mail pads its preview text with them (U+2007, U+200C,
+   U+FEFF...); raylib keeps no glyph for what the font file lacks (Inter has no U+200C), and draws its '?' for it. */
+static const int blanks[][2] = {
+    {0xad, 0xad},       {0x34f, 0x34f},     {0x180e, 0x180e}, {0x2000, 0x200f}, {0x2028, 0x202f},
+    {0x205f, 0x206f},   {0xfe00, 0xfe0f},   {0xfeff, 0xfeff}, {0xfffc, 0xfffc},
+};
+
 static int is_space(int cp)
 {
     return (cp >= 0x2000 && cp <= 0x200a) || cp == 0x202f || cp == 0x205f;
 }
 
-static int is_invisible(int cp)
-{
-    return (cp >= 0x200b && cp <= 0x200f) || (cp >= 0x2028 && cp <= 0x202e) || (cp >= 0x2060 && cp <= 0x2064) ||
-           cp == 0xfeff;
-}
-
-/* those glyphs as a space's width without ink, and as nothing */
+/* those glyphs as a space's width without ink, and as nothing; added where the font has none */
 static void blank_glyphs(Font *font)
 {
     int space = GetGlyphIndex(*font, ' ');
-    for (int i = 0; i < font->glyphCount; i++) {
-        int cp = font->glyphs[i].value;
-        if (!is_space(cp) && !is_invisible(cp)) continue;
-        font->glyphs[i].advanceX = is_space(cp) ? font->glyphs[space].advanceX : 0;
-        font->glyphs[i].offsetX = font->glyphs[i].offsetY = 0;
-        font->recs[i].width = font->recs[i].height = 0;
-    }
+    float space_w = (float)font->glyphs[space].advanceX;
+    for (size_t r = 0; r < sizeof blanks / sizeof *blanks; r++)
+        for (int cp = blanks[r][0]; cp <= blanks[r][1]; cp++) {
+            int i = 0;
+            while (i < font->glyphCount && font->glyphs[i].value != cp) i++;
+            if (i == font->glyphCount) {
+                font->glyphs = RL_REALLOC(font->glyphs, sizeof *font->glyphs * (size_t)(i + 1));
+                font->recs = RL_REALLOC(font->recs, sizeof *font->recs * (size_t)(i + 1));
+                font->glyphs[i] = (GlyphInfo){.value = cp};
+                font->glyphCount++;
+            }
+            font->glyphs[i].advanceX = is_space(cp) ? (int)space_w : 0;
+            font->glyphs[i].offsetX = font->glyphs[i].offsetY = 0;
+            font->recs[i] = (Rectangle){0};
+        }
 }
 
 static int *codepoints(int *n)

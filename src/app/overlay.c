@@ -10,7 +10,7 @@
 
 typedef enum {
     M_NONE, M_NOT_JUNK, M_OPEN_TAB, M_REPLY, M_REPLY_ALL, M_FORWARD, M_READ, M_FLAG, M_ARCHIVE, M_SNOOZE, M_MOVE, M_COPY, M_DELETE,
-    M_F_NEW, M_F_RENAME, M_F_DELETE, M_F_ALL_READ, M_SEP
+    M_F_NEW, M_F_RENAME, M_F_DELETE, M_F_ALL_READ, M_F_IN_NEW, M_SEP, M_BACK, M_SNOOZE_AT /* + snooze_items' index */
 } menu_item;
 
 typedef struct {
@@ -29,7 +29,8 @@ static const entry row_menu[] = {
 };
 
 static const entry folder_menu[] = {
-    {M_F_ALL_READ, "Mark all as read", "mail-open", NULL}, {M_SEP, NULL, NULL, NULL},
+    {M_F_ALL_READ, "Mark all as read", "mail-open", NULL}, {M_F_IN_NEW, "Leave out of Home", "house", NULL},
+    {M_SEP, NULL, NULL, NULL},
     {M_F_NEW, "New folder inside...", "folder-plus", "a"}, {M_F_RENAME, "Rename...", "pencil", "Shift+R"},
     {M_F_DELETE, "Delete folder...", "trash-2", "Shift+D"}, {M_NONE, NULL, NULL, NULL},
 };
@@ -47,7 +48,12 @@ static void run(jd_app *app, menu_item item)
     case M_READ: act_toggle_read(app); break;
     case M_FLAG: act_toggle_flag(app); break;
     case M_ARCHIVE: act_archive(app); break;
-    case M_SNOOZE: act_snooze(app); break;
+    case M_SNOOZE:
+    case M_BACK:
+        app->menu.open = 1;
+        app->menu.snooze = item == M_SNOOZE;
+        app->menu.since = GetTime();
+        break;
     case M_MOVE: dialog_open(app, DLG_PICK_FOLDER, ACT_MOVE, "Move to", NULL); break;
     case M_COPY: dialog_open(app, DLG_PICK_FOLDER, ACT_COPY, "Copy to", NULL); break;
     case M_DELETE: act_delete(app); break;
@@ -62,6 +68,9 @@ static void run(jd_app *app, menu_item item)
             free(ids);
             jd_thread_rows_free(rows, n);
         }
+        break;
+    case M_F_IN_NEW:
+        if (f) folder_toggle_new(app, f->name);
         break;
     case M_F_NEW:
         if (f) {
@@ -80,7 +89,9 @@ static void run(jd_app *app, menu_item item)
             free(title);
         }
         break;
-    default: break;
+    default:
+        if (item >= M_SNOOZE_AT && item < M_SNOOZE_AT + 4) snooze_selection(app, (int)(item - M_SNOOZE_AT));
+        break;
     }
 }
 
@@ -92,16 +103,46 @@ void menu_draw(jd_app *app)
     const entry *items = m->on_folder ? folder_menu : row_menu;
     /* Not junk (and the line after it) only in a Junk folder */
     if (items == row_menu && !in_junk(app)) items += 2;
+    /* New's item only for a folder New would show, saying what a click does */
+    entry shown[24];
     int n = 0;
+    const jd_folder_row *f = m->on_folder && m->index >= 0 && m->index < app->nfolders ? &app->folders[m->index] : NULL;
+    for (int i = 0; items[i].item != M_NONE && n < 23; i++) {
+        /* the Inbox's mail is always news: its notifications come with IDLE, before any list is read */
+        if (items[i].item == M_F_IN_NEW && !(f && strcasecmp(f->name, "INBOX") && (f->gets_new || folder_left_out(app, f))))
+            continue;
+        shown[n] = items[i];
+        if (items[i].item == M_F_IN_NEW && folder_left_out(app, f)) shown[n].label = "Show in Home";
+        n++;
+    }
+    shown[n] = (entry){M_NONE, NULL, NULL, NULL};
+    items = shown;
     float h = 8;
-    for (; items[n].item != M_NONE; n++) h += items[n].item == M_SEP ? 9 : 30;
+    for (int i = 0; i < n; i++) h += items[i].item == M_SEP ? 9 : 30;
     float w = 250, x = m->at.x, y = m->at.y;
     if (x + w > jd_screen_w() - 4) x = jd_screen_w() - w - 4;
     if (y + h > jd_screen_h() - 4) y = jd_screen_h() - h - 4;
+    /* Snooze's times take the rows' place in the same box, under a row back to them */
+    jd_popup_item times[4];
+    char labels[3][80];
+    entry sub[7];
+    if (m->snooze && !m->on_folder) {
+        snooze_items(times, labels);
+        sub[0] = (entry){M_BACK, "Snooze", "chevron-left", NULL};
+        sub[1] = (entry){M_SEP, NULL, NULL, NULL};
+        for (int i = 0; i < 4; i++) sub[2 + i] = (entry){(menu_item)(M_SNOOZE_AT + i), times[i].label, times[i].icon, NULL};
+        sub[6] = (entry){M_NONE, NULL, NULL, NULL};
+        items = sub, n = 6, h = 8 + 5 * 30 + 9;
+    }
     Rectangle box = {x, y, w, h};
     DrawRectangleRounded((Rectangle){x + 3, y + 4, w, h}, 0.04f, 6, ColorAlpha(BLACK, 0.25f));
     DrawRectangleRounded(box, 0.04f, 6, JD_NORD1);
     DrawRectangleRoundedLinesEx(box, 0.04f, 6, 1, JD_NORD2);
+    /* the new rows slide in from the side they come from: the times from the right, back from the left */
+    float u = m->since && fx_enabled() ? (float)(GetTime() - m->since) / 0.16f : 1;
+    float slide = u < 1 ? (1 - (1 - u) * (1 - u) * (1 - u)) : 1;
+    x += (1 - slide) * w * 0.35f * (m->snooze ? 1 : -1);
+    jd_scissor(box.x, box.y, box.width, box.height);
     float yy = y + 4;
     for (int i = 0; i < n; i++) {
         if (items[i].item == M_SEP) {
@@ -119,14 +160,17 @@ void menu_draw(jd_app *app)
             jd_text(ui, items[i].keys, row.x + row.width - kw - 8, yy + 8, 12, JD_MUTED, 0);
         }
         if (hover && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
+            jd_scissor_end();
             m->open = 0;
             run(app, items[i].item);
             return;
         }
         yy += 30;
     }
+    jd_scissor_end();
     int outside = !CheckCollisionPointRec(GetMousePosition(), box);
-    if (IsKeyPressed(KEY_ESCAPE) || (outside && (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))))
+    if (IsKeyPressed(KEY_ESCAPE) && m->snooze) run(app, M_BACK);
+    else if (IsKeyPressed(KEY_ESCAPE) || (outside && (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))))
         m->open = 0;
 }
 

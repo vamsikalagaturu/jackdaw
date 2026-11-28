@@ -47,7 +47,7 @@ typedef struct {
     char *font_ui, *font_list, *font_reader, *font_mono; /* [fonts] ui, list, reader, mono: family names, "" = Inter */
     int attachment_list; /* [compose] attachment_list: a numbered list of the attached files in the body */
     int markdown;        /* [compose] markdown: the body is also sent as HTML, rendered from Markdown */
-    int undo_seconds;    /* [compose] undo_seconds: a sent message waits this long for Undo; 0, 5, 10 (default), 20, 30 */
+    int undo_seconds;    /* [compose] undo_seconds: a sent message waits this long for Undo; 0 to 10, 5 by default */
     int mono_plain;      /* [fonts] mono_plain: plain-text mail in the monospace font */
     int sidebar_width, list_width, list_height; /* [view], pixels; 0 = default */
     int light;           /* the theme in use: scheme, with "system" resolved (apply_prefs) */
@@ -70,6 +70,8 @@ typedef struct {
     int prefetch_all;    /* [sync] prefetch_folders = "all": every folder kept offline, else "inbox" */
     int check_minutes;   /* [sync] check_minutes, default 5: all folders; the Inbox waits in IDLE */
     int share;           /* [sync] settings, default true: the JD_SHARE_* groups shared through the mail account */
+    char **new_exclude;  /* [home] exclude ([new] before): full folder names kept out of Home and its notifications */
+    int nnew_exclude;
     char *signature_new, *signature_reply;      /* [signature] new, reply */
     jd_cal_account *cals; /* [[calendar]], one per calendar account; an older file's single [calendar] is the first */
     int ncals;

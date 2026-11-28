@@ -227,6 +227,7 @@ static const struct {
     {S_SYNC, "Keep mail offline", "offline prefetch download all folders"},
     {S_SYNC, "How far back", "offline prefetch download all"},
     {S_SYNC, "Check other folders", "sync interval minutes"},
+    {S_SYNC, "Left out of Home", "home new exclude folders notifications quiet"},
     {S_SYNC, "Share settings with my other jackdaws", "share sync devices"},
     {S_CALENDAR, "Calendar", "caldav google calendars account"},
     {S_CALENDAR, "Opens in", "calendar view week month day agenda"},
@@ -654,13 +655,7 @@ static void compose(jd_app *app, float x, float y, float w)
     if (jd_switch(ui, cx, y + 10, p->attachment_list)) p->attachment_list = !p->attachment_list, changed(app);
     y = divider(x, y + row_h, w);
     cx = label(app, x, &y, "Undo send", "A sent message waits this long, with Undo, before it goes");
-    static const char *const waits[] = {"Off", "5 s", "10 s", "20 s", "30 s"};
-    static const int wait_s[] = {0, 5, 10, 20, 30};
-    int cur = 2;
-    for (int i = 0; i < 5; i++)
-        if (wait_s[i] == p->undo_seconds) cur = i;
-    int pick = jd_segmented(ui, cx, y + 6, waits, 5, cur);
-    if (pick != cur) p->undo_seconds = wait_s[pick], changed(app);
+    if (stepper(app, cx, y + 6, &p->undo_seconds, 1, 0, 10, " s")) changed(app);
     y = divider(x, y + row_h, w);
     find_here(app, "Signatures", x, y);
     y = para(app, "Signatures go below what you write, after a \"-- \" line (RFC 3676).", x, y, w, 14, JD_MUTED) + 14;
@@ -748,6 +743,30 @@ static void sync_section(jd_app *app, float x, float y, float w)
     cx = label(app, x, &y, "Check other folders", "How often every folder is synced");
     if (stepper(app, cx, y + 6, &p->check_minutes, 1, 1, 120, " min")) changed(app);
     y = divider(x, y + row_h, w);
+    cx = label(app, x, &y, "Left out of Home",
+               "Their mail stays in the folder, without notifications; a dot beside it marks mail that came in since you "
+               "last opened it");
+    float cy = y + 6, cw = x + w - cx < 360 ? x + w - cx : 360;
+    for (int i = 0; i < p->nnew_exclude; i++) {
+        const char *name = p->new_exclude[i];
+        for (int k = 0; k < app->nfolders; k++)
+            if (jd_streq(app->folders[k].name, p->new_exclude[i])) name = app->folders[k].path;
+        Rectangle chip = {cx, cy, cw, 32};
+        DrawRectangleRounded(chip, 0.3f, 6, JD_NORD1);
+        jd_icon("folder", chip.x + 10, cy + 8, 16, JD_NORD4);
+        jd_text_fit(&app->ui, name, chip.x + 34, cy + 8, cw - 34 - 40, 14, JD_NORD6, 0);
+        if (jd_icon_button(&app->ui, "x", NULL, (Rectangle){chip.x + cw - 34, cy + 2, 28, 28}, 0)) {
+            char *gone = jd_strdup(p->new_exclude[i]);
+            folder_toggle_new(app, gone);
+            free(gone);
+            break;
+        }
+        cy += 38;
+    }
+    if (jd_icon_button(&app->ui, "folder-plus", "Leave a folder out", (Rectangle){cx, cy, 200, 34}, 0) && app->nfolders)
+        dialog_open(app, DLG_PICK_FOLDER, ACT_LEAVE_OUT, "Leave out of Home", NULL);
+    cy += 34 + 12;
+    y = divider(x, cy > y + row_h ? cy : y + row_h, w);
     cx = label(app, x, &y, "Share settings with my other jackdaws",
                "Shared: theme, reading, notifications, compose, signatures, rules and calendars, through the folder "
                "\"jackdaw\" on the mail server.\n"

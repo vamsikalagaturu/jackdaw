@@ -7,7 +7,8 @@
 
 typedef struct {
     char *table, *key, *value;
-    int is_string;
+    int is_string; /* 2: an array of strings, value holding them one after another, each with its NUL */
+    int nitems;
 } entry;
 
 struct jd_toml {
@@ -131,6 +132,28 @@ jd_toml *jd_toml_parse(const char *text, char *err, size_t errlen)
             if (*p == '"') {
                 e.value = parse_string(&p);
                 e.is_string = 1;
+            } else if (*p == '[') {
+                jd_buf items = {0};
+                p++;
+                skip_space(&p);
+                while (*p == '"') {
+                    char *s = parse_string(&p);
+                    if (!s) break;
+                    jd_buf_add(&items, s, strlen(s) + 1);
+                    free(s);
+                    e.nitems++;
+                    skip_space(&p);
+                    if (*p != ',') break;
+                    p++;
+                    skip_space(&p);
+                }
+                if (*p != ']') {
+                    jd_buf_free(&items);
+                    goto bad_entry;
+                }
+                p++;
+                e.value = items.s ? items.s : jd_strdup("");
+                e.is_string = 2;
             } else {
                 const char *v = p;
                 while (*p && !isspace((unsigned char)*p) && *p != '#') p++;
@@ -204,7 +227,18 @@ static const entry *find(const jd_toml *t, const char *table, const char *key)
 const char *jd_toml_str(const jd_toml *t, const char *table, const char *key)
 {
     const entry *e = find(t, table, key);
-    return e && e->is_string ? e->value : NULL;
+    return e && e->is_string == 1 ? e->value : NULL;
+}
+
+int jd_toml_strs(const jd_toml *t, const char *table, const char *key, char ***out)
+{
+    const entry *e = find(t, table, key);
+    *out = NULL;
+    if (!e || e->is_string != 2 || !e->nitems) return 0;
+    *out = jd_alloc(sizeof **out * (size_t)e->nitems);
+    const char *s = e->value;
+    for (int i = 0; i < e->nitems; i++, s += strlen(s) + 1) (*out)[i] = jd_strdup(s);
+    return e->nitems;
 }
 
 int jd_toml_int(const jd_toml *t, const char *table, const char *key, long long *out)

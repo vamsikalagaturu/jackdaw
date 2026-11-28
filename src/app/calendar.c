@@ -2066,6 +2066,38 @@ int calendar_find(const char *text, cal_found *out, int max)
     return k;
 }
 
+int calendar_upcoming(jd_app *app, cal_found *out, int max, int *total)
+{
+    int64_t now = jd_now(), today = local_midnight(now);
+    *total = 0;
+    for (int d = 0; d < 7; d++) {
+        int n, k = 0;
+        occ *o = gather(app, add_days(today, d), add_days(today, d + 1), &n);
+        for (int i = 0; i < n; i++) {
+            if (o[i].end <= now) continue;
+            if (k < max) {
+                out[k] = (cal_found){.id = o[i].event, .start = o[i].start, .all_day = o[i].all_day};
+                snprintf(out[k].title, sizeof out[k].title, "%s", o[i].summary ? o[i].summary : "(no title)");
+                snprintf(out[k].place, sizeof out[k].place, "%s", o[i].location ? o[i].location : "");
+            }
+            k++;
+        }
+        occs_free(o, n);
+        if (k) {
+            *total = k;
+            return k < max ? k : max;
+        }
+    }
+    return 0;
+}
+
+void calendar_open_at(jd_app *app, int64_t t)
+{
+    calendar_open(app);
+    cv.anchor = local_midnight(t);
+    cv.stale = 1;
+}
+
 void calendar_show_event(jd_app *app, const char *text, int64_t id)
 {
     calendar_open(app);
