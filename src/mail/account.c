@@ -113,12 +113,12 @@ static void put(jd_buf *b, const char *key, const char *value)
     jd_buf_adds(b, "\n");
 }
 
-/* [compose] undo_seconds, one of the offered waits; 10 when absent or another */
+/* [compose] undo_seconds, 0 to 10; 5 when absent, the longest when longer */
 static int undo_of(const jd_toml *t)
 {
     long long v;
-    if (jd_toml_int(t, "compose", "undo_seconds", &v) != 0) return 10;
-    return v == 0 || v == 5 || v == 10 || v == 20 || v == 30 ? (int)v : 10;
+    if (jd_toml_int(t, "compose", "undo_seconds", &v) != 0 || v < 0) return 5;
+    return v > 10 ? 10 : (int)v;
 }
 
 void jd_prefs_load(jd_prefs *p)
@@ -126,7 +126,7 @@ void jd_prefs_load(jd_prefs *p)
     *p = (jd_prefs){.conversations = 1, .scale = 100, .snippets = 1, .mark_read = 1, .notify = 1, .notify_focused = 1, .push = 1, .update_check = 1,
                     .prefetch_days = 30, .check_minutes = 5, .list_text = 15, .reader_text = 15,
                     .attachment_list = 1, .markdown = 1, .cal_reminders = 1, .cal_view = -1, .share = 1,
-                    .undo_seconds = 10, .effects = 1};
+                    .undo_seconds = 5, .effects = 1};
     jd_toml *t = jd_toml_load(jd_settings_path(), NULL, 0);
     if (!t) return;
     p->attachment_list = jd_toml_bool(t, "compose", "attachment_list", 1);
@@ -171,6 +171,9 @@ void jd_prefs_load(jd_prefs *p)
     p->prefetch_all = jd_streq(jd_toml_str(t, "sync", "prefetch_folders"), "all");
     if (jd_toml_int(t, "sync", "check_minutes", &v) == 0 && v >= 1 && v <= 1440) p->check_minutes = (int)v;
     p->share = jd_toml_bool(t, "sync", "settings", 1);
+    p->nnew_exclude = jd_toml_strs(t, "home", "exclude", &p->new_exclude);
+    /* the name it had before Home was called Home */
+    if (!p->nnew_exclude) p->nnew_exclude = jd_toml_strs(t, "new", "exclude", &p->new_exclude);
     /* [[calendar]] entries, or the single [calendar] files had before */
     int ncal = jd_toml_count(t, "calendar");
     for (int i = 0; i < (ncal ? ncal : 1); i++) {
@@ -266,6 +269,8 @@ void jd_prefs_free(jd_prefs *p)
     free(p->cals);
     free(p->font_ui), free(p->font_list), free(p->font_reader), free(p->font_mono);
     for (int i = 0; i < 13; i++) free(p->theme_roles[i]);
+    for (int i = 0; i < p->nnew_exclude; i++) free(p->new_exclude[i]);
+    free(p->new_exclude);
     *p = (jd_prefs){0};
 }
 
@@ -474,6 +479,12 @@ int jd_settings_save(const jd_account *const *accounts, int naccounts, const jd_
     jd_buf_addf(&b, "\n[sync]\nprefetch_days = %d\nprefetch_folders = \"%s\"\ncheck_minutes = %d\n", p->prefetch_days,
                 p->prefetch_all ? "all" : "inbox", p->check_minutes ? p->check_minutes : 5);
     put_bool(&b, "settings", p->share);
+    jd_buf_adds(&b, "\n[home]\nexclude = [");
+    for (int i = 0; i < p->nnew_exclude; i++) {
+        if (i) jd_buf_adds(&b, ", ");
+        jd_toml_quote(&b, p->new_exclude[i]);
+    }
+    jd_buf_adds(&b, "]\n");
     if (p->ncals)
         jd_buf_adds(&b, "\n# Calendar accounts: provider is caldav (url: the server, or a calendar's address) or google\n"
                         "# (username: the address). Passwords and Google's sign-ins are kept in the system keystore.\n");

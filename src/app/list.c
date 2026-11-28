@@ -66,7 +66,7 @@ static uint64_t view_of(jd_app *app)
                  (uint64_t)app->grouped;
     /* the scope only matters with a search in effect: opening the search box sets it without searching */
     h = h * 31u + (uint64_t)(app->filter_unread | app->filter_flagged << 1 | app->filter_attachment << 2 |
-                             (app->query ? app->search_here << 3 : 0));
+                             (app->query ? app->search_here << 3 : 0) | (app->home && !app->query) << 4);
     for (const char *s = app->query ? app->query : ""; *s; s++) h = h * 131u + (unsigned char)*s;
     for (const char *s = app->filter_from ? app->filter_from : ""; *s; s++) h = h * 131u + (unsigned char)*s;
     return h;
@@ -297,19 +297,108 @@ static int hidden(jd_app *app, const jd_thread_row *r)
     return 0;
 }
 
+static int home_stale = 1;
+
+static void row_free(jd_thread_row *r)
+{
+    free(r->subject), free(r->senders), free(r->snippet), free(r->sender_addr), free(r->folders);
+}
+
+enum { HOME_FLAGGED_ROWS = 3 };
+
+/* Home: snoozed mail back within a day and every scheduled send, then the newest flagged mail (not in Trash or
+   Junk), above the new mail app->rows holds; each row's section in app->row_group, a conversation in the first
+   section that has it. The quick filters narrow them all. */
+static void home_rows(jd_app *app)
+{
+    jd_list_query base = {.grouped = app->grouped, .unread = app->filter_unread, .flagged = app->filter_flagged,
+                          .attachment = app->filter_attachment, .from = app->filter_from};
+    int64_t ids[64];
+    int nids = 0, n;
+    int64_t now = jd_now(), snoozed = jd_store_snoozed_folder(app->view, NULL);
+    jd_snoozed *z = snoozed ? jd_store_snoozed(app->view, snoozed, &n) : (n = 0, NULL);
+    for (int i = 0; i < n && nids < 64; i++)
+        if (z[i].at <= now + 86400) ids[nids++] = z[i].id;
+    jd_snoozed_free(z, n);
+    int64_t drafts = jd_store_special(app->view, "Drafts", NULL);
+    jd_scheduled *d = drafts ? jd_store_scheduled(app->view, drafts, &n) : (n = 0, NULL);
+    for (int i = 0; i < n && nids < 64; i++) ids[nids++] = d[i].id;
+    free(d);
+    int nback = 0, nflag = 0;
+    jd_thread_row *back = NULL, *flag = NULL;
+    if (nids) {
+        jd_list_query b = base;
+        b.only = ids, b.nonly = nids;
+        back = jd_store_list(app->view, &b, &nback);
+    }
+    jd_list_query f = base;
+    f.flagged = 1;
+    flag = jd_store_list(app->view, &f, &nflag);
+
+    jd_thread_row *out = jd_alloc(sizeof *out * (size_t)(nback + nflag + app->nrows + 1));
+    unsigned char *group = jd_alloc((size_t)(nback + nflag + app->nrows + 1));
+    int k = 0;
+    char *trash = NULL, *junk = NULL;
+    jd_store_special(app->view, "Trash", &trash);
+    jd_store_special(app->view, "Junk", &junk);
+    app->home_more = 0;
+    struct {
+        jd_thread_row *rows;
+        int n, group;
+    } parts[] = {{back, nback, HOME_BACK}, {flag, nflag, HOME_FLAGGED}, {app->rows, app->nrows, HOME_NEW}};
+    int shown_flagged = 0;
+    for (int p = 0; p < 3; p++)
+        for (int i = 0; i < parts[p].n; i++) {
+            jd_thread_row *r = &parts[p].rows[i];
+            int64_t key = app->grouped ? r->thread : r->latest;
+            int dup = 0;
+            for (int j = 0; j < k && !dup; j++) dup = (app->grouped ? out[j].thread : out[j].latest) == key;
+            int bin = parts[p].group == HOME_FLAGGED && (jd_streq(r->folders, trash) || jd_streq(r->folders, junk));
+            if (!dup && !bin && parts[p].group == HOME_FLAGGED && shown_flagged == HOME_FLAGGED_ROWS) {
+                app->home_more++;
+                bin = 1;
+            }
+            if (dup || bin) {
+                row_free(r);
+                continue;
+            }
+            if (parts[p].group == HOME_FLAGGED) shown_flagged++;
+            group[k] = (unsigned char)parts[p].group;
+            out[k++] = *r;
+        }
+    free(trash), free(junk);
+    free(back), free(flag), free(app->rows);
+    app->rows = out, app->nrows = k, app->row_group = group;
+}
+
 void list_reload(jd_app *app)
 {
     if (!app->view) return;
+    home_stale = 1;
     int64_t keep = app->nrows ? app->rows[app->row].latest : 0, keep_thread = app->nrows ? app->rows[app->row].thread : 0;
     jd_thread_rows_free(app->rows, app->nrows);
     app->rows = NULL;
     app->nrows = 0;
+    free(app->row_group);
+    app->row_group = NULL;
 
     jd_search parsed = {0};
     if (app->query) jd_search_parse(app->query, &parsed);
     jd_list_query q = parsed.q;
     q.grouped = app->grouped;
     q.folder = app->query && !app->search_here ? 0 : current_folder(app);
+    jd_list_query alt[2] = {{.unread = 1}};
+    jd_query_any unread_or_open = {alt, 2};
+    int64_t *open_ids = NULL;
+    if (app->home && !app->query) {
+        /* the conversation opened from New stays in it while it is read, so the selection does not jump */
+        jd_conv *c = preview(app);
+        open_ids = jd_alloc(sizeof *open_ids * (size_t)(c->n + 1));
+        for (int i = 0; i < c->n; i++) open_ids[i] = c->reading[i].row.id;
+        alt[1] = (jd_list_query){.only = open_ids, .nonly = c->n};
+        q.folder = 0, q.new_mail = 1;
+        q.any = &unread_or_open, q.nany = 1;
+    }
     if (parsed.folder_name) {
         q.folder = jd_store_folder_by_name(app->view, parsed.folder_name);
         if (!q.folder) q.folder = -1;
@@ -323,16 +412,18 @@ void list_reload(jd_app *app)
         q.nextra = app->nserver_hits;
     }
     app->rows = jd_store_list(app->view, &q, &app->nrows);
+    free(open_ids);
     jd_search_free(&parsed);
+    if (app->home && !app->query) home_rows(app);
 
     if (app->pending.n) {
         int k = 0;
         for (int i = 0; i < app->nrows; i++) {
             if (hidden(app, &app->rows[i])) {
-                free(app->rows[i].subject), free(app->rows[i].senders), free(app->rows[i].snippet), free(app->rows[i].sender_addr);
-                free(app->rows[i].folders);
+                row_free(&app->rows[i]);
                 continue;
             }
+            if (app->row_group) app->row_group[k] = app->row_group[i];
             app->rows[k++] = app->rows[i];
         }
         app->nrows = k;
@@ -355,7 +446,7 @@ static int64_t *ids_for_row(jd_app *app, int i, int *n)
         *n = 1;
         return one;
     }
-    return jd_store_thread_ids(app->view, r->thread, app->query ? 0 : current_folder(app), n);
+    return jd_store_thread_ids(app->view, r->thread, app->query || app->home ? 0 : current_folder(app), n);
 }
 
 /* the picked rows, else the current one */
@@ -544,7 +635,7 @@ void act_delete(jd_app *app)
 {
     int n;
     int64_t *ids = selection_ids(app, &n);
-    delete_ids(app, ids, n, app->query ? 0 : current_folder(app), 0);
+    delete_ids(app, ids, n, app->query || app->home ? 0 : current_folder(app), 0);
 }
 
 static int64_t *one_id(int64_t id)
@@ -612,9 +703,9 @@ void snooze_typed(jd_app *app, const char *text)
     snooze_until(app, at);
 }
 
-void snooze_draw(jd_app *app)
+/* the times offered, at[0..2], and the tomorrow morning "Pick a time..." starts from */
+static void snooze_times(int64_t at[3], struct tm *tomorrow_out)
 {
-    if (!snooze_pop.open) return;
     time_t now = time(NULL);
     struct tm today;
     localtime_r(&now, &today);
@@ -627,26 +718,56 @@ void snooze_draw(jd_app *app)
     /* later today: this evening, or three hours on once the evening is near */
     int64_t later = mktime(&evening);
     if (later - now < 2 * 3600) later = (now + 3 * 3600) / 3600 * 3600;
-    int64_t at[3] = {later, mktime(&tomorrow), mktime(&monday)};
+    at[0] = later, at[1] = mktime(&tomorrow), at[2] = mktime(&monday);
+    if (tomorrow_out) *tomorrow_out = tomorrow;
+}
+
+void snooze_items(jd_popup_item items[4], char labels[3][80])
+{
+    int64_t at[3];
+    snooze_times(at, NULL);
     static const char *names[] = {"Later today", "Tomorrow morning", "Monday morning"};
-    char labels[3][80];
+    static const char *icons[] = {"bell", "sun", "calendar"};
     for (int i = 0; i < 3; i++) {
         char when[40];
         time_t t = (time_t)at[i];
         struct tm tm;
         localtime_r(&t, &tm);
         strftime(when, sizeof when, i == 0 ? "%H:%M" : "%a %H:%M", &tm);
-        snprintf(labels[i], sizeof labels[i], "%s (%s)", names[i], when);
+        snprintf(labels[i], 80, "%s (%s)", names[i], when);
+        items[i] = (jd_popup_item){labels[i], icons[i], NULL, 0};
     }
-    jd_popup_item items[] = {{labels[0], "bell", NULL, 0}, {labels[1], "sun", NULL, 0}, {labels[2], "calendar", NULL, 0},
-                             {"Pick a time...", "pencil", NULL, 0}};
-    int i = jd_popup_draw(&app->ui, &snooze_pop, items, 4);
+    items[3] = (jd_popup_item){"Pick a time...", "pencil", NULL, 0};
+}
+
+/* choice i of snooze_items for the messages snooze_ids holds */
+static void snooze_choose(jd_app *app, int i)
+{
+    int64_t at[3];
+    struct tm tomorrow;
+    snooze_times(at, &tomorrow);
     if (i >= 0 && i < 3) snooze_until(app, at[i]);
     else if (i == 3) {
         char typed[32];
         strftime(typed, sizeof typed, "%Y-%m-%d %H:%M", &tomorrow);
         dialog_open(app, DLG_PROMPT, ACT_SNOOZE_AT, "Snooze until (YYYY-MM-DD HH:MM)", typed);
     }
+}
+
+void snooze_selection(jd_app *app, int i)
+{
+    free(snooze_ids);
+    snooze_ids = selection_ids(app, &nsnooze);
+    if (nsnooze) snooze_choose(app, i);
+}
+
+void snooze_draw(jd_app *app)
+{
+    if (!snooze_pop.open) return;
+    jd_popup_item items[4];
+    char labels[3][80];
+    snooze_items(items, labels);
+    snooze_choose(app, jd_popup_draw(&app->ui, &snooze_pop, items, 4));
 }
 
 int snooze_open_now(void)
@@ -831,7 +952,7 @@ static void move_row(jd_app *app, int to, int extend)
 /* a new search starts in the folder on show (the scope pill); removing that pill widens it to every folder */
 static void focus_search(jd_app *app)
 {
-    if (!app->searching && !app->query) app->search_here = 1;
+    if (!app->searching && !app->query) app->search_here = !app->home;
     app->searching = 1;
     app->pane = PANE_LIST;
 }
@@ -1030,6 +1151,13 @@ static void search_clear(jd_app *app)
     app->searching = 0;
     app->search_here = 1;
     run_search(app);
+}
+
+void list_search_end(jd_app *app)
+{
+    if (app->query || app->searching || app->npills || app->search.len || app->filter_unread || app->filter_flagged ||
+        app->filter_attachment || app->filter_from)
+        search_clear(app);
 }
 
 static int hint_keys(jd_app *app);
@@ -1419,7 +1547,7 @@ static void draw_search(jd_app *app, float x, float y, float w)
     jd_scissor_end();
 
     static char placeholder[160];
-    snprintf(placeholder, sizeof placeholder, plat_touch() ? "Search %s" : "Search %s   (/)", folder_name_now(app));
+    snprintf(placeholder, sizeof placeholder, plat_touch() ? "Search %s" : "Search %s   (/)", app->home && !app->query ? "all folders" : folder_name_now(app));
     app->search.placeholder = n ? (app->searching ? "Add words or from: to: subject: after: …" : NULL)
                                 : app->searching ? "Search  (from: to: subject: is: has: after:DD-MM-YYYY)"
                                                  : placeholder;
@@ -1659,6 +1787,119 @@ void search_focus(jd_app *app)
     app->settings_focus = -1;
 }
 
+/* ---- Home's top: the day's agenda on one line, and the folders kept out of Home that have news. The mail below is
+   the list's own rows (home_rows). Built again when the list is, and each minute for the clock. ---- */
+
+enum { HOME_EVENTS = 4 };
+
+static struct {
+    double at;
+    char day[32]; /* Today, Tomorrow or the weekday */
+    cal_found ev[HOME_EVENTS];
+    int nev, more;
+} hs;
+
+static void home_build(jd_app *app)
+{
+    hs.at = GetTime();
+    home_stale = 0;
+    int total;
+    hs.nev = calendar_upcoming(app, hs.ev, HOME_EVENTS, &total);
+    hs.more = total - hs.nev;
+    if (hs.nev) {
+        cal_found *ev = hs.ev;
+        time_t t = (time_t)ev[0].start, now = time(NULL);
+        struct tm a, b;
+        localtime_r(&t, &a);
+        localtime_r(&now, &b);
+        int days = (int)((mktime(&(struct tm){.tm_year = a.tm_year, .tm_mon = a.tm_mon, .tm_mday = a.tm_mday, .tm_isdst = -1}) -
+                          mktime(&(struct tm){.tm_year = b.tm_year, .tm_mon = b.tm_mon, .tm_mday = b.tm_mday, .tm_isdst = -1}) + 43200) /
+                         86400);
+        if (days <= 0) snprintf(hs.day, sizeof hs.day, "Today");
+        else if (days == 1) snprintf(hs.day, sizeof hs.day, "Tomorrow");
+        else strftime(hs.day, sizeof hs.day, "%A", &a);
+    }
+}
+
+/* One card the list's width: the day, then its events as "09:15 Title" while they fit, "+N" for the rest; a click
+   opens the calendar on that day. Under it, the quiet folders with news as chips on one line. Their height, 0 off
+   Home. */
+static float home_strip(jd_app *app, float x, float y, float w)
+{
+    if (!app->home || app->query || !app->view) return 0;
+    if (home_stale || GetTime() - hs.at > 60) home_build(app);
+    jd_ui *ui = &app->ui;
+    float y0 = y;
+    int free_mouse = !app->dialog.kind && !app->menu.open && !under_hints;
+    if (hs.nev) {
+        Rectangle card = {x, y, w, 36};
+        int hover = CheckCollisionPointRec(GetMousePosition(), card) && free_mouse;
+        DrawRectangleRounded(card, 0.3f, 6, hover && !plat_touch() ? JD_NORD2 : JD_NORD1);
+        jd_icon("calendar", x + 12, y + 10, 16, JD_NORD8);
+        float cx = x + 38, right = x + w - 12;
+        jd_text(ui, hs.day, cx, y + 10, 14, JD_NORD6, 1);
+        cx += jd_text_width(ui, hs.day, 14, 1) + 14;
+        int shown = 0;
+        for (int i = 0; i < hs.nev; i++) {
+            char when[16];
+            if (hs.ev[i].all_day) snprintf(when, sizeof when, "All day");
+            else {
+                time_t t = (time_t)hs.ev[i].start;
+                struct tm tm;
+                localtime_r(&t, &tm);
+                strftime(when, sizeof when, "%H:%M", &tm);
+            }
+            float ww = jd_text_width(ui, when, 13, 1), tw = jd_text_width(ui, hs.ev[i].title, 13, 0);
+            int rest = hs.nev - i - 1 + hs.more;
+            float room = right - cx - (rest ? 40 : 0);
+            /* the first always shows, shortened; the others only whole */
+            if (i && ww + 6 + tw > room) break;
+            jd_text(ui, when, cx, y + 11, 13, JD_NORD8, 1);
+            cx += ww + 6;
+            float fit = fminf(tw, room - ww - 6);
+            jd_text_fit(ui, hs.ev[i].title, cx, y + 11, fit, 13, JD_NORD4, 0);
+            cx += fit + 16;
+            shown++;
+        }
+        int left = hs.nev - shown + hs.more;
+        if (left) {
+            char more[16];
+            snprintf(more, sizeof more, "+%d", left);
+            jd_text(ui, more, right - jd_text_width(ui, more, 13, 1), y + 11, 13, JD_MUTED, 1);
+        }
+        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) calendar_open_at(app, hs.ev[0].start);
+        y += 44;
+    }
+    int quiet = 0;
+    for (int i = 0; i < app->nfolders; i++) quiet += folder_left_out(app, &app->folders[i]) && app->folders[i].arrived;
+    if (quiet) {
+        jd_text(ui, "Quiet folders", x, y + 6, 12, JD_MUTED, 1);
+        float cx = x + jd_text_width(ui, "Quiet folders", 12, 1) + 12;
+        int hidden_chips = 0;
+        for (int i = 0; i < app->nfolders; i++) {
+            const jd_folder_row *f = &app->folders[i];
+            if (!folder_left_out(app, f) || !f->arrived) continue;
+            char label[160];
+            snprintf(label, sizeof label, "%s  %d", folder_label(f), f->unread);
+            if (cx + jd_text_width(ui, label, 13, 1) + 22 > x + w - 40) {
+                hidden_chips++;
+                continue;
+            }
+            if (chip(app, label, NULL, &cx, y, 0)) {
+                folder_select(app, i);
+                return 0;
+            }
+        }
+        if (hidden_chips) {
+            char more[16];
+            snprintf(more, sizeof more, "+%d", hidden_chips);
+            jd_text(ui, more, x + w - jd_text_width(ui, more, 13, 1), y + 6, 13, JD_MUTED, 1);
+        }
+        y += 34;
+    }
+    return y - y0;
+}
+
 void list_draw(jd_app *app, Rectangle r)
 {
     jd_ui *ui = &app->ui;
@@ -1666,7 +1907,7 @@ void list_draw(jd_app *app, Rectangle r)
     /* the hints drawn last frame lie over the list: the list leaves the mouse to them */
     under_hints = CheckCollisionPointRec(GetMousePosition(), hints_box);
 
-    const char *title = app->query ? "Search results" : app->nfolders ? folder_label(&app->folders[app->folder]) : "";
+    const char *title = app->query ? "Search results" : app->home ? "Home" : app->nfolders ? folder_label(&app->folders[app->folder]) : "";
     jd_text_fit(ui, title, x, y, w - 120, 20, JD_NORD6, 1);
     /* view toggles: conversations or messages, and where the reading pane goes */
     static const char *pane_icons[] = {"panel-right", "panel-bottom", "rows-2"};
@@ -1762,6 +2003,7 @@ void list_draw(jd_app *app, Rectangle r)
         }
         y += 24;
     }
+    y += home_strip(app, x, y, w);
 
     const float pick_bar_h = 50; /* the rail's settings strip (sidebar.c), so their top lines meet */
     int pick_bar = app->npicked && plat_touch();
@@ -1772,14 +2014,14 @@ void list_draw(jd_app *app, Rectangle r)
         int filtered = app->filter_unread || app->filter_flagged || app->filter_attachment || app->filter_from;
         if (fx_enabled() && inbox && !app->query && !filtered && area.height > 160) {
             fx_inbox_zero(area, JD_NORD0, JD_NORD2);
-            const char *head = "All caught up", *sub = "Nothing waiting in the Inbox.";
+            const char *head = "All caught up", *sub = app->home ? "No new mail in any folder." : "Nothing waiting in the Inbox.";
             float hy = area.y + area.height * 0.36f + 48;
             jd_text(ui, head, area.x + (area.width - jd_text_width(ui, head, 18, 1)) / 2, hy, 18, JD_NORD6, 1);
             jd_text(ui, sub, area.x + (area.width - jd_text_width(ui, sub, 14, 0)) / 2, hy + 28, 14, JD_MUTED, 0);
             return;
         }
         if (!app->query) {
-            jd_text(ui, "No messages here.", x, y + 16, 15, JD_MUTED, 0);
+            jd_text(ui, app->home ? "No new mail." : "No messages here.", x, y + 16, 15, JD_MUTED, 0);
             return;
         }
         const char *line = app->server_searching ? "Nothing in the mail on this device. Searching the server..."
@@ -1795,7 +2037,7 @@ void list_draw(jd_app *app, Rectangle r)
     float rh = row_h(app);
     /* the list's text size, relative to the 15 px it was laid out for */
     float k = (float)(app->prefs.list_text ? app->prefs.list_text : 15) / 15.0f;
-    int show_folders = app->query && !app->search_here;
+    int show_folders = app->query ? !app->search_here : app->home;
     /* cached: converting ~1000 dates to local time each frame halved a phone's scrolling frame rate */
     static struct {
         const jd_thread_row *rows;
@@ -1812,7 +2054,8 @@ void list_draw(jd_app *app, Rectangle r)
     } lay;
     uint64_t sig = 0;
     for (int i = 0; i < app->nrows; i++)
-        sig = sig * 1099511628211u + (uint64_t)app->rows[i].latest * 31u + (uint64_t)app->rows[i].date;
+        sig = sig * 1099511628211u + (uint64_t)app->rows[i].latest * 31u + (uint64_t)app->rows[i].date +
+              (app->row_group ? app->row_group[i] : 0);
     time_t now_t = time(NULL);
     static time_t day_checked, midnight;
     if (now_t - day_checked > 30) {
@@ -1828,8 +2071,10 @@ void list_draw(jd_app *app, Rectangle r)
         lay.date = jd_realloc(lay.date, sizeof *lay.date * (size_t)(app->nrows + 1));
         char prev[24] = "", group[24];
         float yy = 0;
+        static const char *sections[] = {"", "Coming up", "Flagged", "New"};
         for (int i = 0; i < app->nrows; i++) {
-            date_group(app->rows[i].date, group, sizeof group);
+            if (app->row_group) snprintf(group, sizeof group, "%s", sections[app->row_group[i] % 4]);
+            else date_group(app->rows[i].date, group, sizeof group);
             lay.heading[i][0] = 0;
             if (strcmp(group, prev) != 0) {
                 yy += HEADER_H;
@@ -1896,6 +2141,7 @@ void list_draw(jd_app *app, Rectangle r)
     /* kept fractional: rounding every frame dropped a slow finger's movement (jd_text snaps text to pixels) */
 
     jd_scissor(area.x, area.y, area.width, area.height);
+    int all_flagged = 0;
     int first = 0;
     for (int lo = 0, hi = app->nrows - 1; lo <= hi;) {
         int mid = (lo + hi) / 2;
@@ -1944,6 +2190,16 @@ void list_draw(jd_app *app, Rectangle r)
         if (ry > area.y + area.height) break;
         if (ry + rh < area.y) continue;
         if (lay.heading[i][0]) jd_text(ui, lay.heading[i], x, ry - HEADER_H + 9, 12, JD_MUTED, 1);
+        /* the flagged mail left out of Home, as a search of every flagged message */
+        if (lay.heading[i][0] && app->row_group && app->row_group[i] == HOME_FLAGGED && app->home_more) {
+            char line[32];
+            snprintf(line, sizeof line, "+%d more", app->home_more);
+            float lw = jd_text_width(ui, line, 12, 0);
+            Rectangle lr = {x + w - lw - 6, ry - HEADER_H + 4, lw + 12, 22};
+            int hover = CheckCollisionPointRec(GetMousePosition(), lr) && over;
+            jd_text(ui, line, x + w - lw, ry - HEADER_H + 9, 12, hover ? JD_NORD8 : JD_NORD9, 0);
+            if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) all_flagged = 1;
+        }
         const jd_thread_row *t = &app->rows[i];
         Rectangle box = {r.x + 8, ry + 1, r.width - 16, rh - 2};
         float came = 1;
@@ -2080,6 +2336,12 @@ void list_draw(jd_app *app, Rectangle r)
         if (came < 1) DrawRectangleRec((Rectangle){r.x, ry, r.width, rh}, ColorAlpha(JD_NORD0, 1 - came));
     }
     jd_scissor_end();
+    if (all_flagged) {
+        app->filter_flagged = 1;
+        app->search_here = 0;
+        run_search(app);
+        return;
+    }
     if (hovered != lift_key) sink_key = lift_key, sink_k = lift_k, lift_key = hovered, lift_k = 0;
     float ease = 1 - expf(-GetFrameTime() / 0.07f);
     lift_k += ((lift_key ? 1.0f : 0.0f) - lift_k) * ease;

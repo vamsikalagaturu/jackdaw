@@ -11,11 +11,12 @@ enum {
 };
 
 enum { PANE_FOLDERS, PANE_LIST, PANE_READER };
+enum { HOME_BACK = 1, HOME_FLAGGED, HOME_NEW };
 
 typedef enum { DLG_NONE, DLG_PROMPT, DLG_CONFIRM, DLG_PICK_FOLDER, DLG_RULES } dialog_kind;
 typedef enum {
     ACT_NONE, ACT_CREATE_FOLDER, ACT_RENAME_FOLDER, ACT_DELETE_FOLDER, ACT_MOVE, ACT_COPY, ACT_DESTROY, ACT_ADD_RULE, ACT_LOGOUT,
-    ACT_DISCARD, ACT_SEND_LATER, ACT_DELETE_EVENT, ACT_USE_SHARED, ACT_SNOOZE_AT
+    ACT_DISCARD, ACT_SEND_LATER, ACT_DELETE_EVENT, ACT_USE_SHARED, ACT_SNOOZE_AT, ACT_LEAVE_OUT
 } action;
 
 typedef struct {
@@ -88,6 +89,8 @@ typedef struct {
     Vector2 at;
     int on_folder; /* else on the list row */
     int index;
+    int snooze;   /* Snooze's times are shown in place of the rows */
+    double since; /* when the rows last changed, for their slide */
 } jd_menu;
 
 /* the server's Sieve script, edited in a tab */
@@ -143,6 +146,9 @@ typedef struct {
     /* sidebar */
     jd_folder_row *folders;
     int nfolders, folder;
+    /* Home is on show instead of the folder (which stays the Inbox): unread mail in every folder that
+       jd_folder_gets_new_mail, new_unread of it */
+    int home, new_unread;
 
     /* list */
     int pane;
@@ -162,6 +168,9 @@ typedef struct {
     int server_searching;
     jd_thread_row *rows;
     int nrows, row;
+    /* on Home, each row's section (HOME_BACK, HOME_FLAGGED, HOME_NEW), else NULL; home_more: the flagged left out */
+    unsigned char *row_group;
+    int home_more;
     float list_scroll;
     float side_scroll; /* the sidebar's folder rows (full and rail) */
     int side_followed; /* the folder the sidebar last scrolled to */
@@ -232,7 +241,9 @@ void mail_reload(jd_app *app);
 void mail_view_reset(jd_app *app);
 void mail_body_ready(jd_app *app, int64_t id);
 void mail_server_results(jd_app *app, int64_t serial, const int64_t *ids, int n);
-void mail_select_inbox(jd_app *app);
+void mail_select_home(jd_app *app);
+/* the search, its pills and the quick filters ended, when any is on */
+void list_search_end(jd_app *app);
 /* a tapped notification: the Inbox, with that message open */
 void mail_open_message(jd_app *app, int64_t id);
 
@@ -254,6 +265,10 @@ void folders_tree_order(jd_app *app);
    the store, as the sidebar's arrow does) */
 int folder_depth(const jd_folder_row *f);
 int folder_has_children(jd_app *app, int i);
+/* the folder (full name) is in [home] exclude */
+int folder_left_out(jd_app *app, const jd_folder_row *f);
+/* puts the folder in [home] exclude, or takes it out, and saves */
+void folder_toggle_new(jd_app *app, const char *name);
 void toggle_collapsed(jd_app *app, int i);
 
 void list_reload(jd_app *app);
@@ -329,6 +344,10 @@ void message_archive(jd_app *app, int64_t id);
 /* snooze (b): the times menu for the selection, or for one message; snooze_draw draws it each frame, snooze_typed
    takes Pick a time's answer */
 void act_snooze(jd_app *app);
+/* the snooze times as menu rows: three times, then "Pick a time..."; labels hold their text */
+void snooze_items(jd_popup_item items[4], char labels[3][80]);
+/* choice i of snooze_items for the list's selection */
+void snooze_selection(jd_app *app, int i);
 void message_snooze(jd_app *app, int64_t id);
 void snooze_draw(jd_app *app);
 void snooze_typed(jd_app *app, const char *text);
@@ -441,6 +460,11 @@ typedef struct {
 } cal_found;
 int calendar_find(const char *text, cal_found *out, int max);
 void calendar_show_event(jd_app *app, const char *text, int64_t id);
+/* what is left of today, soonest first; when nothing is, the next day with events, within a week. Up to max in out,
+   *total how many that day has */
+int calendar_upcoming(jd_app *app, cal_found *out, int max, int *total);
+/* the calendar opened on the day of t */
+void calendar_open_at(jd_app *app, int64_t t);
 void calendar_keys(jd_app *app);
 void calendar_draw(jd_app *app, Rectangle r);
 /* the event editor has the keyboard */

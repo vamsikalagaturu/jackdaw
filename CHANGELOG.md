@@ -4,6 +4,30 @@ What changed in each release, newest first, in the form of [Keep a Changelog 1.1
 `platform/release.sh` publishes a version's section as its GitHub release notes, and stops when the version has
 none: add it with the change. Releases before 0.3.4 have their notes on GitHub.
 
+## [0.3.7] - 2026-11-28
+
+### Added
+
+- Home: jackdaw opens on it, at the top of the sidebar. A line with the day's agenda, chips for quiet folders with new
+  mail, then the mail in sections: Coming up (snoozed mail back within a day, scheduled sends), Flagged (the newest
+  three, the rest a search away) and New (unread mail from every folder but Junk, Trash, Sent and Drafts). They are
+  the list's own rows: the reading pane, the menu and the keys work on them.
+- Folders can be left out of Home and its notifications, from a folder's menu or Settings > Sync (`[home] exclude`).
+  Their unread count turns grey, and a dot marks mail that came in since the folder was last opened.
+- New mail in other folders than the Inbox notifies too, at the next check of the folders.
+- Undo send waits 0 to 10 seconds, 5 by default (Settings > Compose).
+
+### Changed
+
+- Snooze from a message's menu shows its times in the same menu, with a way back.
+
+### Fixed
+
+- Previews and subjects no longer show "?" for the invisible characters newsletters pad them with, nor for symbols
+  such as Ⓘ, ✓ and ★. Ruled lines (`-----`) are left out of previews.
+- Brightly coloured buttons in HTML mail stay readable in the dark theme.
+- An underlined link no longer breaks between its words.
+
 ## [0.3.6] - 2026-11-27
 
 ### Added

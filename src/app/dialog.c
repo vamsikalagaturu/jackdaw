@@ -148,6 +148,17 @@ static void confirm(jd_app *app)
         }
         break;
     }
+    case ACT_LEAVE_OUT: {
+        const jd_folder_row *to = picked(app);
+        if (to && !folder_left_out(app, to)) {
+            char *name = jd_strdup(to->name);
+            close_dialog(app);
+            folder_toggle_new(app, name);
+            free(name);
+            return;
+        }
+        break;
+    }
     case ACT_ADD_RULE:
     {
         char *match = search_full_query(app, 0);

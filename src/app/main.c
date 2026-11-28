@@ -150,7 +150,7 @@ int main(int argc, char **argv)
     else InitWindow(1100, 720, JD_APP_NAME);
     SetExitKey(KEY_NULL);
     plat_window_ready();
-    jd_app app = {.grouped = 1, .pane = PANE_LIST};
+    jd_app app = {.grouped = 1, .home = 1, .pane = PANE_LIST};
     app.ui.touch = plat_touch();
     jd_set_touch(app.ui.touch);
 

@@ -11,6 +11,7 @@
 
 struct jd_store {
     sqlite3 *db;
+    char *new_exclude; /* " AND name NOT IN (...)" for jd_store_set_new_exclude, else NULL */
 };
 
 static const char *schema_v1 =
@@ -71,8 +72,28 @@ static void exec(jd_store *s, const char *sql)
     }
 }
 
-/* the opening of a message for the list: quoted lines, "... wrote:" lines and the signature left out,
-   whitespace folded, at most about 200 bytes cut on a character boundary */
+/* At s, UTF-8 for a character a preview neither shows nor needs: a zero-width or direction mark, a soft hyphen, the
+   grapheme joiner, a BOM (mail pads its preheader with these, which a font draws as "?"), or a space of another
+   width, which sets *space. Its length in bytes, else 0. */
+static size_t invisible(const unsigned char *s, int *space)
+{
+    *space = 0;
+    if (s[0] == 0xc2 && s[1] == 0xa0) return *space = 1, 2;
+    if ((s[0] == 0xc2 && s[1] == 0xad) || (s[0] == 0xcd && s[1] == 0x8f)) return 2;
+    if (s[0] == 0xe2 && s[1] == 0x80) {
+        if (s[2] <= 0x8a || s[2] == 0xa8 || s[2] == 0xa9 || s[2] == 0xaf) return *space = 1, 3;
+        if (s[2] <= 0x8f || (s[2] >= 0xaa && s[2] <= 0xae)) return 3;
+    }
+    if (s[0] == 0xe2 && s[1] == 0x81 && s[2] == 0x9f) return *space = 1, 3;
+    if (s[0] == 0xe2 && s[1] == 0x81 && s[2] >= 0xa0 && s[2] <= 0xaf) return 3;
+    if (s[0] == 0xe3 && s[1] == 0x80 && s[2] == 0x80) return *space = 1, 3;
+    if ((s[0] == 0xef && s[1] == 0xbb && s[2] == 0xbf) || (s[0] == 0xe1 && s[1] == 0xa0 && s[2] == 0x8e)) return 3;
+    return 0;
+}
+
+/* the opening of a message for the list: quoted lines, "... wrote:" lines and the signature left out, invisible
+   characters and ruled lines ("-----", "=====") too, whitespace folded, at most about 200 bytes cut on a character
+   boundary */
 static char *make_snippet(const char *text)
 {
     jd_buf b = {0};
@@ -85,7 +106,18 @@ static char *make_snippet(const char *text)
                    (n > 7 && strncmp(p + n - 7, "schrieb:", 7) == 0);
         if (!skip) {
             for (size_t i = 0; i < n; i++) {
-                char c = p[i] == '\t' || p[i] == '\r' ? ' ' : p[i];
+                int space;
+                size_t len = invisible((const unsigned char *)p + i, &space);
+                char c = p[i] == '\t' || p[i] == '\r' || space ? ' ' : p[i];
+                if (len && !space) {
+                    i += len - 1;
+                    continue;
+                }
+                if (len) i += len - 1;
+                if (strchr("-=_*~#", c) && i + 2 < n && p[i + 1] == c && p[i + 2] == c) {
+                    while (i + 1 < n && p[i + 1] == c) i++;
+                    c = ' ';
+                }
                 if (c == ' ' && (!b.len || b.s[b.len - 1] == ' ')) continue;
                 jd_buf_add(&b, &c, 1);
             }
@@ -227,6 +259,14 @@ jd_store *jd_store_open(const char *path, char *err, int errlen)
             exec(s, "UPDATE folders SET texts_stale = 1; PRAGMA user_version = 12;");
         exec(s, "COMMIT");
     }
+    if (run(prep(s, "PRAGMA user_version")) == 12) {
+        exec(s, "BEGIN IMMEDIATE");
+        if (run(prep(s, "PRAGMA user_version")) == 12)
+            /* snippets again, without invisible padding and ruled lines */
+            exec(s, "ALTER TABLE folders ADD COLUMN seen_at INTEGER NOT NULL DEFAULT 0;"
+                    "UPDATE folders SET seen_at = strftime('%s', 'now'), texts_stale = 1; PRAGMA user_version = 13;");
+        exec(s, "COMMIT");
+    }
     return s;
 bad:
     snprintf(err, (size_t)errlen, "%s: %s", path, s->db ? sqlite3_errmsg(s->db) : "cannot open");
@@ -238,7 +278,29 @@ void jd_store_close(jd_store *s)
 {
     if (!s) return;
     sqlite3_close(s->db);
+    sqlite3_free(s->new_exclude);
     free(s);
+}
+
+void jd_store_set_new_exclude(jd_store *s, char *const *names, int n)
+{
+    sqlite3_free(s->new_exclude);
+    s->new_exclude = NULL;
+    for (int i = 0; i < n; i++) {
+        char *was = s->new_exclude;
+        s->new_exclude = sqlite3_mprintf("%s%Q", was ? was : " AND name NOT IN (", names[i]);
+        if (was) sqlite3_free(was);
+        if (i < n - 1) {
+            was = s->new_exclude;
+            s->new_exclude = sqlite3_mprintf("%s, ", was);
+            sqlite3_free(was);
+        }
+    }
+    if (s->new_exclude) {
+        char *was = s->new_exclude;
+        s->new_exclude = sqlite3_mprintf("%s)", was);
+        sqlite3_free(was);
+    }
 }
 
 int jd_store_begin(jd_store *s)
@@ -271,7 +333,8 @@ void jd_folders_mark_absent(jd_store *s)
 int64_t jd_folder_upsert(jd_store *s, const char *name, char delim, const char *special_use)
 {
     char d[2] = {delim, 0};
-    sqlite3_stmt *st = prep(s, "INSERT INTO folders(name, delim, special_use) VALUES(?1, ?2, ?3)"
+    sqlite3_stmt *st = prep(s, "INSERT INTO folders(name, delim, special_use, seen_at)"
+                               " VALUES(?1, ?2, ?3, strftime('%s', 'now'))"
                                " ON CONFLICT(name) DO UPDATE SET delim = ?2, special_use = ?3, present = 1"
                                " RETURNING id");
     bind_text(st, 1, name);
@@ -660,16 +723,25 @@ char *jd_body_path(const char *account_dir, int64_t folder, uint32_t uidvalidity
     return jd_printf("%s/bodies/%lld/%u-%u.eml", account_dir, (long long)folder, uidvalidity, uid);
 }
 
+static char *new_mail_folders(jd_store *s);
+
 jd_folder_row *jd_store_folders(jd_store *s, int *n)
 {
-    sqlite3_stmt *st = prep(s, "SELECT f.id, f.name, f.special_use, f.delim, f.collapsed,"
-                               " (SELECT count(*) FROM messages m WHERE m.folder_id = f.id),"
-                               " (SELECT count(*) FROM messages m WHERE m.folder_id = f.id AND m.flags & 1 = 0)"
-                               " FROM folders f ORDER BY"
-                               " CASE WHEN upper(f.name) = 'INBOX' THEN 0 WHEN f.special_use = 'Drafts' THEN 1"
-                               " WHEN f.special_use = 'Sent' THEN 2 WHEN f.special_use = 'Archive' THEN 3"
-                               " WHEN f.special_use = 'Junk' THEN 4 WHEN f.special_use = 'Trash' THEN 5 ELSE 6 END,"
-                               " f.name COLLATE NOCASE");
+    char *in = new_mail_folders(s);
+    char *sql = jd_printf("SELECT f.id, f.name, f.special_use, f.delim, f.collapsed,"
+                          " (SELECT count(*) FROM messages m WHERE m.folder_id = f.id),"
+                          " (SELECT count(*) FROM messages m WHERE m.folder_id = f.id AND m.flags & 1 = 0),"
+                          " f.id IN (%s),"
+                          " EXISTS (SELECT 1 FROM messages m WHERE m.folder_id = f.id AND m.flags & 1 = 0"
+                          " AND m.internaldate > f.seen_at)"
+                          " FROM folders f ORDER BY"
+                          " CASE WHEN upper(f.name) = 'INBOX' THEN 0 WHEN f.special_use = 'Drafts' THEN 1"
+                          " WHEN f.special_use = 'Sent' THEN 2 WHEN f.special_use = 'Archive' THEN 3"
+                          " WHEN f.special_use = 'Junk' THEN 4 WHEN f.special_use = 'Trash' THEN 5 ELSE 6 END,"
+                          " f.name COLLATE NOCASE",
+                          in);
+    sqlite3_stmt *st = prep(s, sql);
+    free(sql), free(in);
     jd_folder_row *rows = NULL;
     int cap = 0;
     *n = 0;
@@ -691,6 +763,8 @@ jd_folder_row *jd_store_folders(jd_store *s, int *n)
             .collapsed = sqlite3_column_int(st, 4),
             .total = sqlite3_column_int(st, 5),
             .unread = sqlite3_column_int(st, 6),
+            .gets_new = sqlite3_column_int(st, 7),
+            .arrived = sqlite3_column_int(st, 8),
         };
     }
     sqlite3_finalize(st);
@@ -987,10 +1061,49 @@ int64_t jd_store_settings_folder(jd_store *s, char **name)
     return id;
 }
 
+/* All and Flagged hold copies of mail that is in another folder too */
+static char *new_mail_folders(jd_store *s)
+{
+    return jd_printf("SELECT id FROM folders WHERE coalesce(special_use, '') NOT IN"
+                     " ('Junk', 'Trash', 'Sent', 'Drafts', 'All', 'Flagged') AND id NOT IN (%lld, %lld)%s",
+                     (long long)jd_store_settings_folder(s, NULL), (long long)jd_store_snoozed_folder(s, NULL),
+                     s->new_exclude ? s->new_exclude : "");
+}
+
+void jd_folder_seen(jd_store *s, int64_t folder)
+{
+    sqlite3_stmt *st = prep(s, "UPDATE folders SET seen_at = strftime('%s', 'now') WHERE id = ?");
+    sqlite3_bind_int64(st, 1, folder);
+    run(st);
+}
+
+int jd_folder_gets_new_mail(jd_store *s, int64_t folder)
+{
+    char *in = new_mail_folders(s), *sql = jd_printf("SELECT ?1 IN (%s)", in);
+    sqlite3_stmt *st = prep(s, sql);
+    free(sql), free(in);
+    if (st) sqlite3_bind_int64(st, 1, folder);
+    return (int)run(st);
+}
+
+int jd_store_new_mail_unread(jd_store *s)
+{
+    char *in = new_mail_folders(s);
+    char *sql = jd_printf("SELECT count(*) FROM messages WHERE flags & 1 = 0 AND folder_id IN (%s)", in);
+    sqlite3_stmt *st = prep(s, sql);
+    free(sql), free(in);
+    return (int)run(st);
+}
+
 jd_thread_row *jd_store_list(jd_store *s, const jd_list_query *q, int *n)
 {
     jd_buf w = {0};
     jd_buf_addf(&w, "m.thread_id IS NOT NULL AND m.folder_id != %lld AND ", (long long)jd_store_settings_folder(s, NULL));
+    if (q->new_mail) {
+        char *in = new_mail_folders(s);
+        jd_buf_addf(&w, "m.folder_id IN (%s) AND ", in);
+        free(in);
+    }
     where_of(&w, q, "");
     char *sql = q->grouped
         ? jd_printf("WITH hit AS (SELECT m.*, f.name AS fname FROM messages m JOIN folders f ON f.id = m.folder_id"

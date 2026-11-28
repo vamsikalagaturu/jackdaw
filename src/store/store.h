@@ -85,6 +85,8 @@ typedef struct {
     char delim;
     int collapsed;
     int total, unread;
+    int gets_new; /* jd_folder_gets_new_mail */
+    int arrived;  /* unread mail came in after jd_folder_seen */
 } jd_folder_row;
 
 /* the personal namespace's prefix (jd_imap_namespace), as last heard from the server; "" when none */
@@ -127,6 +129,7 @@ typedef struct {
 } jd_query_any;
 struct jd_list_query {
     int64_t folder; /* 0: every folder */
+    int new_mail;   /* only the folders jd_folder_gets_new_mail */
     int grouped;    /* one row per conversation, else one per message */
     int unread, read, flagged, attachment;
     char *from, *to, *subject; /* substrings of names/addresses, of the subject */
@@ -157,6 +160,15 @@ jd_thread_row *jd_store_list(jd_store *s, const jd_list_query *q, int *n);
 int jd_text_exact(const char *text);
 void jd_thread_rows_free(jd_thread_row *rows, int n);
 int64_t jd_store_folder_by_name(jd_store *s, const char *name);
+/* 1 for a folder mail is read in, where new mail is news: not Junk, Trash, Sent, Drafts, All, Flagged, the
+   settings folder or Snoozed */
+int jd_folder_gets_new_mail(jd_store *s, int64_t folder);
+/* the unread messages in those folders */
+int jd_store_new_mail_unread(jd_store *s);
+/* folders by full name kept out of those too ([home] exclude); for this handle only */
+void jd_store_set_new_exclude(jd_store *s, char *const *names, int n);
+/* the folder was looked at now: what came before is no longer jd_folder_row.arrived */
+void jd_folder_seen(jd_store *s, int64_t folder);
 /* the folder with this RFC 6154 special use, 0 when none */
 int64_t jd_store_special(jd_store *s, const char *use, char **name);
 /* messages in folder with this Message-ID */

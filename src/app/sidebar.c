@@ -143,12 +143,51 @@ void toggle_collapsed(jd_app *app, int i)
     jd_folder_set_collapsed(app->view, f->id, f->collapsed);
 }
 
+int folder_left_out(jd_app *app, const jd_folder_row *f)
+{
+    for (int i = 0; i < app->prefs.nnew_exclude; i++)
+        if (jd_streq(app->prefs.new_exclude[i], f->name)) return 1;
+    return 0;
+}
+
+void folder_toggle_new(jd_app *app, const char *name)
+{
+    jd_prefs *p = &app->prefs;
+    int k = 0, found = 0;
+    for (int i = 0; i < p->nnew_exclude; i++) {
+        if (jd_streq(p->new_exclude[i], name)) {
+            free(p->new_exclude[i]);
+            found = 1;
+            continue;
+        }
+        p->new_exclude[k++] = p->new_exclude[i];
+    }
+    p->nnew_exclude = k;
+    if (!found) {
+        p->new_exclude = jd_realloc(p->new_exclude, sizeof *p->new_exclude * (size_t)(k + 1));
+        p->new_exclude[p->nnew_exclude++] = jd_strdup(name);
+    }
+    save_prefs(app);
+    mail_reload(app);
+}
+
+/* the folder on show, when it is (not New), was looked at: called on opening and on leaving it */
+static void folder_seen(jd_app *app)
+{
+    if (app->home || !app->nfolders || !app->view) return;
+    jd_folder_seen(app->view, app->folders[app->folder].id);
+    app->folders[app->folder].arrived = 0;
+}
+
 static void select_folder(jd_app *app, int i)
 {
     drawer_done(app);
     app->tab = 0;
-    if (i == app->folder) return;
+    if (i == app->folder && !app->home) return;
+    folder_seen(app);
     app->folder = i;
+    app->home = 0;
+    folder_seen(app);
     app->row = 0;
     app->list_scroll = 0;
     reader_close(app);
@@ -156,6 +195,14 @@ static void select_folder(jd_app *app, int i)
 }
 
 void folder_select(jd_app *app, int i) { select_folder(app, i); }
+
+static void select_home(jd_app *app)
+{
+    drawer_done(app);
+    folder_seen(app);
+    if (!app->home) app->row = 0, app->list_scroll = 0;
+    mail_select_home(app);
+}
 
 /* the folder with this special use (RFC 6154), else one whose own name is it ("Sent" under "INBOX." too);
    "INBOX" is the Inbox. Shows it and returns 1, or 0 when there is none. */
@@ -174,13 +221,19 @@ int folder_go(jd_app *app, const char *use)
     return 1;
 }
 
+/* New sits above the first folder */
 static void step(jd_app *app, int dir)
 {
+    if (app->home) {
+        if (dir > 0) select_folder(app, 0);
+        return;
+    }
     for (int i = app->folder + dir; i >= 0 && i < app->nfolders; i += dir)
         if (!folder_hidden(app, i)) {
             select_folder(app, i);
             return;
         }
+    if (dir < 0) select_home(app);
 }
 
 int sidebar_keys(jd_app *app)
@@ -312,16 +365,31 @@ static void rail_draw(jd_app *app, Rectangle r)
     if (app->prefs.tabs_side && app->ntabs > 1) y = tab_rows(app, r, y, 1);
     float bottom = r.y + r.height - 86;
     Rectangle view = {r.x, y, r.width, bottom - 4 - y};
-    float content = 0, sel = -1;
+    float content = 40, sel = app->home ? 0 : -1;
     for (int i = 0; i < app->nfolders; i++) {
         if (folder_hidden(app, i) || depth_of(&app->folders[i]) > 0) continue;
-        if (i == app->folder) sel = content;
+        if (i == app->folder && !app->home) sel = content;
         content += 40;
     }
     folder_scroll(app, view, content, sel, 40);
     jd_scissor(view.x, view.y, view.width, view.height);
     y = view.y - app->side_scroll;
     int over = CheckCollisionPointRec(GetMousePosition(), view);
+    if (app->nfolders) {
+        Rectangle b = {cx, y, 40, 36};
+        int active = app->home && app->tab == 0;
+        if (active) DrawRectangleRounded(b, 0.3f, 6, ColorAlpha(JD_NORD10, 0.45f));
+        if (icon_button(app, "house", b, "Home", active ? JD_NORD8 : JD_NORD4, &tip, &tip_at) && over) select_home(app);
+        if (app->new_unread) {
+            char count[16];
+            snprintf(count, sizeof count, "%d", app->new_unread > 99 ? 99 : app->new_unread);
+            float cw = jd_text_width(&app->ui, count, 10, 1) + 8;
+            Rectangle badge = {b.x + b.width - cw + 2, b.y + 1, cw, 15};
+            DrawRectangleRounded(badge, 0.5f, 6, JD_NORD10);
+            jd_text(&app->ui, count, badge.x + 4, badge.y + 2, 10, JD_ON_ACCENT, 1);
+        }
+        y += 40;
+    }
     for (int i = 0; i < app->nfolders; i++) {
         if (folder_hidden(app, i) || depth_of(&app->folders[i]) > 0) continue;
         const jd_folder_row *f = &app->folders[i];
@@ -330,17 +398,19 @@ static void rail_draw(jd_app *app, Rectangle r)
             y += 40;
             continue;
         }
-        int active = i == app->folder && app->tab == 0;
+        int active = i == app->folder && app->tab == 0 && !app->home;
         if (active) DrawRectangleRounded(b, 0.3f, 6, ColorAlpha(JD_NORD10, 0.45f));
         if (icon_button(app, folder_icon(f), b, folder_label(f), active ? JD_NORD8 : JD_NORD4, &tip, &tip_at) && over)
             select_folder(app, i);
+        int quiet = folder_left_out(app, f);
         if (f->unread) {
             char count[16];
             snprintf(count, sizeof count, "%d", f->unread > 99 ? 99 : f->unread);
             float cw = jd_text_width(&app->ui, count, 10, 1) + 8;
             Rectangle badge = {b.x + b.width - cw + 2, b.y + 1, cw, 15};
-            DrawRectangleRounded(badge, 0.5f, 6, JD_NORD10);
-            jd_text(&app->ui, count, badge.x + 4, badge.y + 2, 10, JD_ON_ACCENT, 1);
+            DrawRectangleRounded(badge, 0.5f, 6, quiet ? JD_NORD3 : JD_NORD10);
+            jd_text(&app->ui, count, badge.x + 4, badge.y + 2, 10, quiet ? JD_NORD4 : JD_ON_ACCENT, 1);
+            if (quiet && f->arrived && !active) DrawCircleV((Vector2){badge.x - 4, badge.y + 7}, 3, JD_NORD8);
         }
         y += 40;
     }
@@ -356,7 +426,7 @@ static void rail_draw(jd_app *app, Rectangle r)
 
 /* A folder's unread count rolls when it changes, as an odometer's digits do: the old number rises out of its place
    as the new one comes up from below (down for a count going down). By folder, for the folders on show. */
-static void rolling_count(jd_app *app, int64_t folder, int unread, Rectangle box, float y)
+static void rolling_count(jd_app *app, int64_t folder, int unread, Rectangle box, float y, Color tint)
 {
     static struct {
         int64_t folder;
@@ -375,7 +445,7 @@ static void rolling_count(jd_app *app, int64_t folder, int unread, Rectangle box
     if (u >= 1) {
         if (!unread) return;
         snprintf(text, sizeof text, "%d", unread);
-        jd_text(&app->ui, text, box.x + box.width - jd_text_width(&app->ui, text, 14, 1) - 10, y, 14, JD_NORD8, 1);
+        jd_text(&app->ui, text, box.x + box.width - jd_text_width(&app->ui, text, 14, 1) - 10, y, 14, tint, 1);
         return;
     }
     float e = 1 - (1 - u) * (1 - u) * (1 - u), dir = counts[slot].now > counts[slot].was ? 1 : -1;
@@ -386,7 +456,7 @@ static void rolling_count(jd_app *app, int64_t folder, int unread, Rectangle box
         snprintf(text, sizeof text, "%d", values[k]);
         float shift = (k ? 1 - e : -e) * 14 * dir;
         jd_text(&app->ui, text, box.x + box.width - jd_text_width(&app->ui, text, 14, 1) - 10, y + shift, 14,
-                ColorAlpha(JD_NORD8, k ? e : 1 - e), 1);
+                ColorAlpha(tint, k ? e : 1 - e), 1);
     }
     jd_scissor_end();
 }
@@ -484,10 +554,10 @@ void sidebar_draw(jd_app *app, Rectangle r)
     float y = r.y + 154, bottom = r.y + r.height - 124;
     if (app->prefs.tabs_side && app->ntabs > 1) y = tab_rows(app, r, y, 0);
     Rectangle view = {r.x, y, r.width, bottom - 4 - y};
-    float content = 0, sel = -1;
+    float content = row, sel = app->home ? 0 : -1;
     for (int i = 0; i < app->nfolders; i++) {
         if (folder_hidden(app, i)) continue;
-        if (i == app->folder) sel = content;
+        if (i == app->folder && !app->home) sel = content;
         content += row;
     }
     folder_scroll(app, view, content, sel, row);
@@ -496,6 +566,25 @@ void sidebar_draw(jd_app *app, Rectangle r)
     jd_scissor(view.x, view.y, view.width, view.height);
     y = view.y - app->side_scroll;
     int over = CheckCollisionPointRec(GetMousePosition(), view);
+    if (app->nfolders) {
+        Rectangle box = {r.x + 8, y, r.width - 16 - bar, row - 2};
+        int hover = CheckCollisionPointRec(GetMousePosition(), box) && over && free_input;
+        if (app->home && app->tab == 0) {
+            DrawRectangleRounded(box, 0.25f, 6, ColorAlpha(JD_NORD10, 0.45f));
+            if (app->pane == PANE_FOLDERS && !plat_touch()) DrawRectangleRoundedLinesEx(box, 0.25f, 6, 1.5f, JD_NORD8);
+        } else if (hover && !plat_touch()) DrawRectangleRounded(box, 0.25f, 6, JD_NORD3);
+        if (hover && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+            app->pane = PANE_FOLDERS;
+            select_home(app);
+        }
+        jd_icon("house", box.x + 22, y + 6, 16, app->home ? JD_NORD8 : JD_NORD4);
+        char count[16] = "";
+        if (app->new_unread) snprintf(count, sizeof count, "%d", app->new_unread);
+        float cw = jd_text_width(ui, count, 14, 1);
+        jd_text_fit(ui, "Home", box.x + 46, y + 7, box.width - 46 - cw - 20, 15, JD_NORD6, app->new_unread > 0);
+        rolling_count(app, -1, app->new_unread, box, y + 7, JD_NORD8);
+        y += row;
+    }
     for (int i = 0; i < app->nfolders; i++) {
         if (folder_hidden(app, i)) continue;
         const jd_folder_row *f = &app->folders[i];
@@ -508,7 +597,7 @@ void sidebar_draw(jd_app *app, Rectangle r)
         float indent = 22 + 16 * (float)depth_of(f);
         Rectangle arrow = {box.x + indent - 20, y, 18, row - 2};
         int expander = has_children(app, i), on_arrow = expander && hover && CheckCollisionPointRec(GetMousePosition(), arrow);
-        if (i == app->folder && app->tab == 0) {
+        if (i == app->folder && app->tab == 0 && !app->home) {
             DrawRectangleRounded(box, 0.25f, 6, ColorAlpha(JD_NORD10, 0.45f));
             if (app->pane == PANE_FOLDERS && !plat_touch()) DrawRectangleRoundedLinesEx(box, 0.25f, 6, 1.5f, JD_NORD8);
         }
@@ -524,13 +613,17 @@ void sidebar_draw(jd_app *app, Rectangle r)
             app->menu = (jd_menu){.open = 1, .at = GetMousePosition(), .on_folder = 1, .index = i};
         }
         if (expander) jd_icon(f->collapsed ? "chevron-right" : "chevron-down", arrow.x + 2, y + 7, 14, JD_NORD4);
-        jd_icon(folder_icon(f), box.x + indent, y + 6, 16, i == app->folder ? JD_NORD8 : JD_NORD4);
+        jd_icon(folder_icon(f), box.x + indent, y + 6, 16, i == app->folder && !app->home ? JD_NORD8 : JD_NORD4);
         indent += 24;
         char count[16] = "";
         if (f->unread) snprintf(count, sizeof count, "%d", f->unread);
         float cw = jd_text_width(ui, count, 14, 1);
-        jd_text_fit(ui, folder_label(f), box.x + indent, y + 7, box.width - indent - cw - 20, 15, JD_NORD6, f->unread > 0);
-        rolling_count(app, f->id, f->unread, box, y + 7);
+        /* kept out of Home: its unread in grey, and a dot while mail came in since it was last looked at */
+        int quiet = folder_left_out(app, f), dot = quiet && f->arrived && !(i == app->folder && !app->home);
+        jd_text_fit(ui, folder_label(f), box.x + indent, y + 7, box.width - indent - cw - 20 - (dot ? 12 : 0), 15, JD_NORD6,
+                    quiet ? dot : f->unread > 0);
+        if (dot) DrawCircleV((Vector2){box.x + box.width - cw - 20, y + row / 2 - 1}, 3.5f, JD_NORD8);
+        rolling_count(app, f->id, f->unread, box, y + 7, quiet ? JD_MUTED : JD_NORD8);
         if (f->special_use) special_seen(f->special_use, box);
         y += row;
     }

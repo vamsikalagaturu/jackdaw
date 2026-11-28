@@ -88,6 +88,7 @@ struct jd_sync {
     int nops;
     int64_t inbox;
     int first_sync_done, want_full;
+    int64_t since; /* when the last whole round that went through began, 0 before one */
     int prefetch_days, prefetch_all, check_minutes; /* from [sync], read each round */
     char **held; /* Message-IDs of drafts open in compose, not sent while open; under lock */
     int nheld;
@@ -155,7 +156,10 @@ typedef struct {
     jd_sync *s;
     int64_t folder;
     int is_inbox;
-    int64_t *fresh; /* new Inbox messages */
+    /* outside the Inbox, mail older than this was moved in from another folder (a move keeps INTERNALDATE,
+       RFC 6851 section 3.3), not delivered; -1 when the folder's new mail is no news */
+    int64_t fresh_since;
+    int64_t *fresh; /* new messages: the Inbox's, or another folder's delivered since fresh_since */
     int nfresh;
 } fetch_ctx;
 
@@ -166,7 +170,7 @@ static void on_header(void *data, jd_header *h)
     if (h->send_at && !(h->send_uuid && strcasecmp(h->send_uuid, c->s->send_later_uuid) == 0)) h->send_at = 0;
     int is_new;
     int64_t id = jd_message_put(c->s->store, c->folder, h, &is_new);
-    if (!is_new || !c->is_inbox || !id) return;
+    if (!is_new || !id || (!c->is_inbox && (c->fresh_since < 0 || h->internaldate < c->fresh_since))) return;
     c->fresh = jd_realloc(c->fresh, sizeof *c->fresh * (size_t)(c->nfresh + 1));
     c->fresh[c->nfresh++] = id;
 }
@@ -256,10 +260,10 @@ static int contains(const uint32_t *sorted, int n, uint32_t v)
 
 static void push_per_folder(jd_sync *s, const request *rq, int forget);
 
-/* new mail still in the Inbox and unread after the rules: one event, with the newest one's sender and subject */
-static void notify_fresh(jd_sync *s, int64_t inbox, const int64_t *ids, int n)
+/* new mail still in the folder and unread after the rules: one event, with the newest one's sender and subject */
+static void notify_fresh(jd_sync *s, int64_t folder, const int64_t *ids, int n)
 {
-    jd_list_query q = {.folder = inbox, .unread = 1, .only = ids, .nonly = n};
+    jd_list_query q = {.folder = folder, .unread = 1, .only = ids, .nonly = n};
     int nrows;
     jd_thread_row *rows = jd_store_list(s->store, &q, &nrows);
     const char *preview = nrows && rows[0].snippet && rows[0].snippet[0] ? rows[0].snippet : NULL;
@@ -361,7 +365,10 @@ static int sync_folder(jd_sync *s, int64_t folder, const char *name)
     jd_folder_state st;
     if (jd_imap_select(s->imap, name, &sel) != JD_IMAP_OK || jd_folder_state_get(s->store, folder, &st) != 0)
         return JD_IMAP_ERROR;
-    fetch_ctx c = {.s = s, .folder = folder, .is_inbox = folder == s->inbox};
+    fetch_ctx c = {.s = s, .folder = folder, .is_inbox = folder == s->inbox, .fresh_since = -1};
+    /* a minute's grace for the server's clock against ours */
+    if (!c.is_inbox && st.uidvalidity && s->since && jd_folder_gets_new_mail(s->store, folder))
+        c.fresh_since = s->since - 60;
 
     /* RFC 9051 section 2.3.1.1: a new UIDVALIDITY means the old UIDs mean nothing */
     if (st.uidvalidity && st.uidvalidity != sel.uidvalidity) {
@@ -459,7 +466,7 @@ static int sync_folder(jd_sync *s, int64_t folder, const char *name)
     }
     if (r == JD_IMAP_OK && c.is_inbox) r = prefetch(s, folder, name, &sel);
     /* rules run on mail that arrived since the folder was last synced, not on a new account's whole Inbox */
-    if (c.nfresh && st.uidvalidity) apply_rules(s, folder, c.fresh, c.nfresh);
+    if (c.nfresh && st.uidvalidity && c.is_inbox) apply_rules(s, folder, c.fresh, c.nfresh);
     if (c.nfresh && s->first_sync_done) notify_fresh(s, folder, c.fresh, c.nfresh);
     free(c.fresh);
     return r;
@@ -1136,6 +1143,7 @@ static void *worker(void *arg)
         s->prefetch_days = p.prefetch_days;
         s->prefetch_all = p.prefetch_all;
         s->check_minutes = p.check_minutes;
+        jd_store_set_new_exclude(s->store, p.new_exclude, p.nnew_exclude);
         jd_prefs_free(&p);
         apply_requests(s);
         if (!s->imap) {
@@ -1164,6 +1172,7 @@ static void *worker(void *arg)
             r = sync_all(s);
             if (r == JD_IMAP_OK) {
                 s->first_sync_done = 1;
+                s->since = now;
                 next_full = now + s->check_minutes * 60;
                 next_inbox = now + INBOX_POLL_EVERY;
             }

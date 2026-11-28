@@ -50,9 +50,10 @@ again.
 | `[fonts]` | `ui`, `list`, `reader`, `mono` as fontconfig families, `mono_plain` |
 | `[reading]` | format, mark_read, `remote_images` = ask/always, `images_from` = trusted senders |
 | `[notifications]` | enabled, when_focused |
-| `[compose]` | `markdown`: the body also goes out as HTML rendered from Markdown; `attachment_list`: a `[1] name` list of attachments in the body; `undo_seconds` (10; 0, 5, 20 or 30): a sent message waits this long with Undo before it goes, out of the tabs (Undo brings it back; quitting sends it at once) |
+| `[compose]` | `markdown`: the body also goes out as HTML rendered from Markdown; `attachment_list`: a `[1] name` list of attachments in the body; `undo_seconds` (5; 0 to 10, longer is 10): a sent message waits this long with Undo before it goes, out of the tabs (Undo brings it back; quitting sends it at once) |
 | `[updates]` | `check`: look for a new release once a day and offer it (default true); Settings → About checks by hand |
 | `[sync]` | `prefetch_days` (30: days of bodies fetched for offline reading and search; 0 none, -1 all), `prefetch_folders` (`"inbox"`, or `"all"` for every folder, fetched after each sync round), `check_minutes` (5), `settings` (true: shared with the account's other jackdaws, below) |
+| `[home]` | `exclude` (`[]`; `[new]` before): folders by full server name (`["INBOX.UB.UB Info"]`) kept out of Home and of new-mail notifications; their unread count shows in grey, with a dot while mail came in since the folder was last opened. Home shows unread mail in every other folder but Junk, Trash, Sent, Drafts, All, Flagged and Snoozed. The Inbox always notifies. Per device. |
 | `[[calendar]]` | one per calendar account: `provider` = `caldav` / `google`, `url` (CalDAV: the server, a principal or one calendar's address; discovery follows RFC 6764 and RFC 4791), `username` (the CalDAV login, or the Google address), `check_minutes` (15), `reminders` (true: a notification at each event's reminder; on Android also while jackdaw is closed; the same in every entry). Each account's password, or Google sign-in, is in the keystore. A single `[calendar]` section, as earlier versions wrote it, is read as the first account |
 | `[signature]` | `new`, `reply` |
 | `[[rule]]` | `match` in search syntax, `action` = `read`, `flag`, `delete`, `move:<folder>`, `copy:<folder>` |
